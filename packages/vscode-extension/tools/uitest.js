@@ -36,6 +36,8 @@ const EXPECTATIONS = {
   permission: { needsUser: true, needsAssistant: true, needsTools: 0, needsCaret: true, needsPermission: true, needsOptions: 3, minAssistantChars: 5 },
   // 带编辑器上下文：输入框上面该有两块，发出去的那条消息里也该有。
   context: { needsUser: true, needsAssistant: true, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 10, needsAttachments: 2 },
+  // 压力场景：正文由断言脚本自己灌（要计时），所以这里不要求已有正文和光标。
+  perf: { needsUser: true, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0, perf: true },
 };
 
 /**
@@ -90,7 +92,7 @@ function assertionsScript(scene) {
     return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
   }
 
-  function run() {
+  async function run() {
     var body = document.body;
     var viewportWidth = window.innerWidth;
 
@@ -304,6 +306,86 @@ function assertionsScript(scene) {
         document.querySelectorAll('.msg-user .bubble .chip-close').length === 0);
     }
 
+    // ── 7.6 压力：几百个流式增量的耗时 ────────────────
+    // 量的是「灌进去要多久」和「渲染落定后 DOM 有没有失控」。
+    // 注意两件事（都是踩过才明白的）：
+    // 1. 渲染是攒批的（rAF + 定时兜底），所以灌完之后必须**让出事件循环**再量，
+    //    同步死等会把 rAF 永远堵住；
+    // 2. 阈值给得很宽松（真实值几百毫秒），只卡数量级的回归 —— 比如有人
+    //    把渲染改成"每个增量都重渲染整棵树"。
+    if (EXPECT.perf) {
+      var messagesNode = document.getElementById('messages');
+      var segments = [];
+      for (var s = 0; s < 40; s += 1) {
+        // 注意换行符必须写成双反斜杠：这段断言脚本本身是个模板字符串，
+        // 单反斜杠会在生成时变成真换行，生成出来的脚本直接语法错（踩过）。
+        segments.push('## 第 ' + s + ' 节\\n\\n这是第 ' + s + ' 段正文，带 \`inline code\` 和一个列表：\\n\\n- 一\\n- 二\\n- 三\\n');
+      }
+      var fullText = segments.join('\\n');
+      var bodySel = '.msg-assistant .body';
+
+      function snapshot() {
+        var node = document.querySelector(bodySel);
+        return {
+          nodes: messagesNode.querySelectorAll('*').length,
+          // 面板里的标题是「# 变 h2、## 变 h3」（markdown.js 里 level = 井号数 + 1）。
+          headings: node ? node.querySelectorAll('h3').length : 0,
+          chars: node ? node.textContent.length : 0,
+        };
+      }
+
+      // (1) 一片一片喂：模拟真实流式。
+      var chunkSize = 20;
+      var chunkCount = Math.ceil(fullText.length / chunkSize);
+      var t0 = performance.now();
+      for (var c = 0; c < chunkCount; c += 1) {
+        window.postMessage(
+          { type: 'text', id: 'a1', delta: fullText.slice(c * chunkSize, (c + 1) * chunkSize) },
+          '*',
+        );
+      }
+      var ingestMs = performance.now() - t0;
+      // 让出事件循环等攒批渲染落定（同步死等会把 rAF 永远堵住）。
+      await new Promise(function (resolve) { setTimeout(resolve, 800); });
+      var settleMs = performance.now() - t0;
+      var chunked = snapshot();
+
+      console.log('     流式：' + chunkCount + ' 个增量 / ' + fullText.length + ' 字 → 受理 '
+        + Math.round(ingestMs) + 'ms，落定 ' + Math.round(settleMs) + 'ms，'
+        + chunked.chars + ' 字、' + chunked.headings + ' 个标题、' + chunked.nodes + ' 个节点');
+
+      assert('几百个增量受理得动（受理 < 1000ms）', ingestMs < 1000, Math.round(ingestMs) + 'ms');
+      assert('渲染落定得也快（含 800ms 等待仍 < 3000ms）', settleMs < 3000, Math.round(settleMs) + 'ms');
+      // 一个字没丢：正文里的换行/井号会被 markdown 结构吃掉，所以不去比总字数，
+      // 而是确认「最后一片也到了」（流式最怕的是尾巴丢了）。
+      var tailText = document.querySelector(bodySel) ? document.querySelector(bodySel).textContent : '';
+      assert('流式的最后一片也到了（尾巴没丢）',
+        tailText.indexOf('第 39 节') >= 0 && tailText.indexOf('第 39 段正文') >= 0,
+        '正文长度 ' + chunked.chars + ' 字');
+      assert('markdown 结构是真的（40 个小节都成了标题）', chunked.headings === 40, chunked.headings + ' 个标题');
+
+      // (2) 一次喂完同样的内容：DOM 必须跟流式一样 ——
+      // 这条才是真正要守的性质：不管分多少片到，结果都一样，没有重复、没有堆积。
+      window.postMessage({ type: 'reset' }, '*');
+      await new Promise(function (resolve) { setTimeout(resolve, 200); });
+      window.postMessage({ type: 'busy', busy: true }, '*');
+      window.postMessage({ type: 'assistant', id: 'a2' }, '*');
+      window.postMessage({ type: 'text', id: 'a2', delta: fullText }, '*');
+      await new Promise(function (resolve) { setTimeout(resolve, 600); });
+      var whole = snapshot();
+
+      console.log('     一次喂完：' + whole.chars + ' 字、' + whole.headings + ' 个标题、' + whole.nodes + ' 个节点');
+      assert('一次喂完的正文长度和流式一样', Math.abs(whole.chars - chunked.chars) <= 40,
+        whole.chars + ' vs ' + chunked.chars);
+      assert('一次喂完的标题数和流式一样', whole.headings === chunked.headings,
+        whole.headings + ' vs ' + chunked.headings);
+      // 这里比的是「同样内容两种切法的 DOM 规模」，差一点点正常（换行合并等），
+      // 差很多就说明流式路径在重复堆积。
+      assert('流式没有堆出多余的 DOM（和一次喂完相比不超过 15%）',
+        chunked.nodes <= whole.nodes * 1.15 + 5,
+        '流式 ' + chunked.nodes + ' vs 一次喂完 ' + whole.nodes);
+    }
+
     // ── 8. 交互：发送 / 换行 / 空输入 / 忙碌时不许发 ──
     var input = document.getElementById('input');
     var send = document.getElementById('send');
@@ -409,7 +491,14 @@ function assertionsScript(scene) {
   }
 
   // 回放脚本最多跑到约 1.5s，这里等它跑完再断言。
-  setTimeout(run, 2600);
+  // run() 是 async 的（压力那一段要让出事件循环等渲染落定），
+  // 所以这里接住异常 —— 不然一个错就变成"页面里没找到断言结果"，很难查。
+  setTimeout(function () {
+    run().catch(function (error) {
+      results.push({ name: '断言脚本自己抛错了', ok: false, detail: String(error && error.message ? error.message : error) });
+      finish();
+    });
+  }, 2600);
 })();
 </script>`;
 }
@@ -417,7 +506,15 @@ function assertionsScript(scene) {
 function runChrome(scene) {
   const html = buildHtml('dark');
   const steps = SCENARIOS[scene]().steps;
-  const withReplay = html.replace('</body>', `${buildReplayScript(steps)}\n</body>`);
+  // 错误捕获器要放在**最前面**：这样后面任何一段内联脚本（包括断言脚本）
+  // 就算有语法错，也会被它接住、写进 DOM，我们能从 dump 里读到原因。
+  const catcher =
+    '<script>window.addEventListener("error", function (e) {' +
+    'var p = document.createElement("pre"); p.id = "__pageerror";' +
+    'p.textContent = String((e && e.message) || "unknown error");' +
+    'document.body.appendChild(p); });</script>';
+  const withCatcher = html.replace('</body>', `${catcher}\n</body>`);
+  const withReplay = withCatcher.replace('</body>', `${buildReplayScript(steps)}\n</body>`);
   const withChecks = withReplay.replace('</body>', `${assertionsScript(scene)}\n</body>`);
 
   const page = path.join(WORK, `${scene}.html`);
@@ -436,7 +533,16 @@ function runChrome(scene) {
 
   const dumped = fs.readFileSync(dom, 'utf8');
   const match = /<pre id="__results">([\s\S]*?)<\/pre>/.exec(dumped);
-  if (!match) return { error: '页面里没找到断言结果（脚本可能没跑起来）', dumped };
+  if (!match) {
+    // 断言脚本没跑完（多半是生成出来的脚本有语法错）。
+    // 页面最前面装了错误捕获器，这里把它的内容带回来 —— 否则只有一句
+    // "没找到断言结果"，得手动开 Chrome 才查得到（踩过）。
+    const pageError = /<pre id="__pageerror">([\s\S]*?)<\/pre>/.exec(dumped);
+    return {
+      error: `页面里没找到断言结果（脚本可能没跑起来）${pageError ? ` —— ${pageError[1]}` : ''}`,
+      dumped,
+    };
+  }
   return { results: JSON.parse(match[1]).results };
 }
 

@@ -217,6 +217,24 @@ const SCENARIOS = {
   },
 
   /**
+   * 压力：一口气灌几百个流式增量，看耗时和 DOM 会不会失控。
+   *
+   * 为什么单独一个场景：面板每攒一批增量就把整段正文重新渲染一遍 markdown，
+   * 长回答就是 O(n²) 量级 —— 这个复杂度本身还行，但一旦有人不小心让它变成
+   * "每个字都重渲染整棵树"，界面就会肉眼可见地卡。这里量一个上限，卡住回归。
+   */
+  perf() {
+    return {
+      steps: [
+        { message: { type: 'status', state: 'busy', detail: 'DSH 正在工作…' } },
+        { message: { type: 'user', text: '写一段长文档给我。' } },
+        { message: { type: 'assistant', id: 'a1' } },
+        { message: { type: 'busy', busy: true } },
+      ],
+    };
+  },
+
+  /**
    * 带编辑器上下文：挂上"当前文件"和"选中的代码"，然后发出去。
    *
    * 这一段测的是「附件块」这条链路：挂上去看得见吗、点 × 拿得掉吗、
