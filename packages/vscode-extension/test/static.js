@@ -347,6 +347,17 @@ check(
   check('没有两个命令抢同一个图标名（抢了会有一个看起来像重复按钮）', icons.length >= 2);
 }
 {
+  // 受限模式（Restricted Mode）：不声明「支持不受信工作区」的扩展会被整个禁掉，
+  // 表现是面板凭空消失、还不报错。这一夜在真 VS Code 里踩到过，焊死它。
+  const capability = extensionManifest.capabilities && extensionManifest.capabilities.untrustedWorkspaces;
+  check('声明了「支持不受信工作区」（否则受限模式下面板会被静默禁用）',
+    Boolean(capability && capability.supported === true),
+    JSON.stringify(extensionManifest.capabilities));
+  check('这条声明写了理由（免得以后有人看着莫名就删了）',
+    Boolean(capability && typeof capability.description === 'string' && capability.description.length > 20));
+}
+
+{
   // when 里用的上下文键必须是真实存在的，写错等于该条件永远为假。
   // 按子句解析：`a == b` 只看左边的键，`a` 单独出现时它自己就是键。
   const knownWhen = new Set(['editorHasSelection', 'view', 'resourceScheme', 'inDiffEditor']);

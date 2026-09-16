@@ -32,6 +32,16 @@ VS Code 侧边栏（本扩展）
 要么重启一次桌面端（得到一个进程、一个大脑的最优状态），
 要么就让扩展自己拉一个后台内核（同一档、同一份记忆，只是多一个进程）。
 
+### 受限模式（Restricted Mode）也没问题
+
+清单里声明了 `capabilities.untrustedWorkspaces.supported = true`。
+
+这一条不是装饰：**不声明它的扩展，在 VS Code 的受限模式里会被整个禁掉** ——
+表现是"面板凭空消失，还不报错"，非常难查（真在隔离窗口里踩到过：
+同一个扩展，不带工作区文件夹能激活，带一个未被信任的文件夹就完全不加载）。
+本扩展不执行工作区里的代码：读工作区文件只发生在你主动右键「带进对话」时，
+设置也只读用户级设置（受限模式下 VS Code 本来就不套用工作区设置）。
+
 ## 用法
 
 1. 点侧边栏的 DSH 图标（活动栏里那个对话气泡）。
@@ -117,6 +127,7 @@ node test/static.js      # 静态契约：HTML id ↔ 取元素、消息协议�
                          #   以及「扩展默认端口/主机 = 门实际监听端口/主机」这类跨文件约定
 node test/markdown.js    # Markdown 渲染器：语法、注入安全、病态输入不死循环、真实耗时
 node test/blocks.js      # 编辑器上下文拼块：选区正文、resource_link、围栏加长、脏数据
+node test/session.js     # 会话层边界（假客户端）：切模型信内核回复、用量帧只给一半、帧的归属与合并
 node test/panel.js       # 面板层集成：注入假 vscode，连真的门
 node test/fallback.js    # 兜底路径：桌面端没在跑时能否自己拉起来、收摊能否杀干净
 node test/resume.js      # 断线后 session/resume 到底能不能把上下文接回来（带对照组）
@@ -126,6 +137,12 @@ node test/smoke.js       # 端到端：协议、真回合、工具调用、中�
 node tools/uitest.js     # 无头 Chrome 里对界面做 250 项断言（7 个场景：溢出/重叠/交互/注入/附件/压力）
 node tools/uitest.js context  # 只跑「带编辑器上下文」那个场景
 node tools/build-vsix.js # 打包成 vsix
+node tools/vscode-check.js  # **真 VS Code 窗口里**的自检：开一个隔离窗口（自己的 user-data-dir 和
+                            # extensions-dir，不碰你正开着的窗口），用 DSH_PANEL_AUTOFOCUS=1 让它
+                            # 自动展开面板，断言 11 条：窗口起来 / 扩展激活 / 五个命令注册 /
+                            # 视图进活动栏 / 面板展开 / ACP 握手 / 建出会话 / 兜底是 desktop 档 /
+                            # 收摊干净 / 不留孤儿内核 / 你自己的窗口没被动。约 30 秒，跑完自动收摊。
+                            # 加 --keep 可以留着窗口自己看。
 ```
 
 调试用的自检开关：设了环境变量 `DSH_PANEL_AUTOFOCUS=1` 再启动 VS Code，

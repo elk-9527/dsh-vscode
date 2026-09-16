@@ -207,13 +207,26 @@ class DshSession extends EventEmitter {
    */
   async setModel(value) {
     if (!this.sessionId) throw new Error('还没有会话');
-    await this.client.setConfigOption(this.sessionId, 'model', value);
-    // 内核回的当前值就是真值，直接记下来，别自己猜。
-    this.configOptions = this.configOptions.map((option) =>
-      option && option.id === 'model' ? { ...option, currentValue: value } : option,
-    );
+    const reply = await this.client.setConfigOption(this.sessionId, 'model', value);
+    // 内核（dsh-acp 的 setSessionConfigOption）明明白白回了
+    // `{configOptions: [...]}`，这是权威值 —— 它可能把请求归一化成别的，
+    // 也可能连带改了别的项。以前这里是自己把本地那份改成请求的值，
+    // 等于在内核不认账时给用户看一个假状态（踩过：注释里写着"别自己猜"，
+    // 代码在猜）。现在以回复为准，只在老内核不回这个字段时才退回本地改。
+    const options = reply && Array.isArray(reply.configOptions) ? reply.configOptions : null;
+    if (options) {
+      this.configOptions = options;
+      const current = modelCurrentValue(this.configOptions);
+      if (current && current !== value) {
+        this.log('warn', `请求的模型是 ${value}，内核定成了 ${current}（以内核为准）`);
+      }
+    } else {
+      this.configOptions = this.configOptions.map((option) =>
+        option && option.id === 'model' ? { ...option, currentValue: value } : option,
+      );
+    }
     this.emit('config', { configOptions: this.configOptions });
-    this.log('info', `模型已切到 ${value}`);
+    this.log('info', `模型已切到 ${modelCurrentValue(this.configOptions) || value}`);
   }
 
   /** 内核问权限时，替用户作答。 */
@@ -353,6 +366,13 @@ function flattenChoices(option) {
   };
   walk(option.options);
   return out;
+}
+
+/** 从（可能被嵌套分组的）configOptions 里读出 model 当前的 value。 */
+function modelCurrentValue(options) {
+  if (!Array.isArray(options)) return null;
+  const found = options.find((option) => option && option.id === 'model');
+  return found && typeof found.currentValue === 'string' ? found.currentValue : null;
 }
 
 function numberOr(...values) {

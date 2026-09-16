@@ -18,6 +18,12 @@
     "onView:dshPanel.chat",
     "onStartupFinished"
   ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true,
+      "description": "面板只跟你自己的 DSH 说话，不会执行工作区里的代码：它读工作区文件只在你主动右键「带进对话」时发生，设置项也只读用户级设置（受限模式下 VS Code 本来就不会套用工作区设置）。不声明这一条的话，VS Code 在受限模式里会把这个扩展整个禁掉 —— 表现是「面板凭空消失、还不报错」，这一夜真踩过。"
+    }
+  },
   "contributes": {
     "viewsContainers": {
       "activitybar": [
