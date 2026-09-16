@@ -384,6 +384,89 @@ function assertionsScript(scene) {
       assert('流式没有堆出多余的 DOM（和一次喂完相比不超过 15%）',
         chunked.nodes <= whole.nodes * 1.15 + 5,
         '流式 ' + chunked.nodes + ' vs 一次喂完 ' + whole.nodes);
+
+      // (3) 长对话：聊了很久之后会怎样。
+      // 两件事要守：一是别变成"每来一条就重排整棵树"（那会越用越卡），
+      // 二是**别把正在往回翻记录的人拽到底部** —— 这是聊天界面最招人烦的 bug。
+      window.postMessage({ type: 'reset' }, '*');
+      await new Promise(function (resolve) { setTimeout(resolve, 200); });
+
+      var exchanges = 150;
+      var tLong = performance.now();
+      for (var e = 0; e < exchanges; e += 1) {
+        window.postMessage({ type: 'user', text: '第 ' + e + ' 个问题，随便写点内容凑长度。' }, '*');
+        window.postMessage({ type: 'busy', busy: true }, '*');
+        window.postMessage({ type: 'assistant', id: 'long' + e }, '*');
+        window.postMessage(
+          { type: 'text', id: 'long' + e, delta: '第 ' + e + ' 个回答。' + '正文正文正文正文。'.repeat(8) },
+          '*',
+        );
+        window.postMessage({ type: 'done', id: 'long' + e, status: 'completed' }, '*');
+      }
+      var longIngest = performance.now() - tLong;
+      await new Promise(function (resolve) { setTimeout(resolve, 900); });
+      var longSettle = performance.now() - tLong;
+      var longNodes = messagesNode.querySelectorAll('*').length;
+      var longMessages = messagesNode.querySelectorAll('.msg').length;
+
+      console.log('     长对话：' + exchanges + ' 轮 → 受理 ' + Math.round(longIngest)
+        + 'ms，落定 ' + Math.round(longSettle) + 'ms，' + longMessages + ' 条消息、'
+        + longNodes + ' 个节点');
+
+      assert('长对话长得出来（' + exchanges + ' 轮都在）', longMessages >= exchanges * 2,
+        longMessages + ' 条消息');
+      assert('长对话受理得动（受理 < 2000ms）', longIngest < 2000, Math.round(longIngest) + 'ms');
+      assert('长对话落定不慢（含 900ms 等待仍 < 4000ms）', longSettle < 4000, Math.round(longSettle) + 'ms');
+      // 线性增长：每轮（一问一答）撑不起 60 个节点就说明没有重复堆积。
+      assert('节点数随消息线性增长（不超过每轮 60 个）',
+        longNodes <= exchanges * 60 + 200,
+        longNodes + ' 个节点 / ' + exchanges + ' 轮');
+
+      // 贴着底部时，新消息应当继续贴底。
+      messagesNode.scrollTop = messagesNode.scrollHeight;
+      await new Promise(function (resolve) { setTimeout(resolve, 120); });
+      window.postMessage({ type: 'user', text: '贴底时的最后一句。' }, '*');
+      await new Promise(function (resolve) { setTimeout(resolve, 250); });
+      var bottomGap = messagesNode.scrollHeight - messagesNode.scrollTop - messagesNode.clientHeight;
+      assert('贴着底时新消息继续贴底（差 < 40px）', bottomGap < 40, '差 ' + Math.round(bottomGap) + 'px');
+
+      // 用户往上翻记录时，**它自己的输出**不许把人拽回底部。
+      // 注意这里只喂 assistant 的流式正文，不带 user 消息 —— 分清两件事：
+      // 「你自己发了一句」把视图带回底部是合理的（你发的，你要看见）；
+      // 「它自己在输出」而你正在往回翻记录，把你拽下去才是招人烦的 bug。
+      messagesNode.scrollTop = 0;
+      await new Promise(function (resolve) { setTimeout(resolve, 250); });
+      // 关于「别把我拽回去」这条要怎么测：
+      // 界面靠 scroll 事件判断"用户是不是在往回翻"。但这个无头环境**不会**
+      // 为程序化改 scrollTop 派发 scroll 事件（实测 0 次 —— 我差一点就把这个
+      // 环境特性当成"界面有 bug"报出去了）。所以这里手动派发一个：
+      // 界面收到的是一个正常的 scroll 事件，跟我们真的用滚轮往回翻没区别，
+      // 区别只在"谁触发的"。真正的滚轮要看真浏览器，那一步在
+      // tools/vscode-check.js 里由人眼确认。
+      var sawScrollEvent = 0;
+      var countScroll = function () { sawScrollEvent += 1; };
+      messagesNode.addEventListener('scroll', countScroll);
+      messagesNode.scrollTop = 0;
+      await new Promise(function (resolve) { setTimeout(resolve, 200); });
+      messagesNode.removeEventListener('scroll', countScroll);
+      console.log('     程序化滚动派发的 scroll 事件数：' + sawScrollEvent + '（这个环境是 0，下面手动补一个）');
+      messagesNode.dispatchEvent(new Event('scroll'));
+      await new Promise(function (resolve) { setTimeout(resolve, 120); });
+
+      var scrollBefore = Math.round(messagesNode.scrollTop);
+      window.postMessage({ type: 'assistant', id: 'whileReading' }, '*');
+      window.postMessage({ type: 'text', id: 'whileReading', delta: '这条不该把用户拽到底部。' }, '*');
+      await new Promise(function (resolve) { setTimeout(resolve, 350); });
+      assert('用户翻看历史时，它自己的输出不会把他拽到底部',
+        messagesNode.scrollTop < 60,
+        'scrollTop 从 ' + scrollBefore + ' 变成了 ' + Math.round(messagesNode.scrollTop) + 'px');
+
+      // 反过来：你自己发一句，视图回到底部是应该的（不然你会看不见自己刚发的）。
+      window.postMessage({ type: 'user', text: '我发一句，应该能看见它。' }, '*');
+      await new Promise(function (resolve) { setTimeout(resolve, 300); });
+      var afterSendGap = messagesNode.scrollHeight - messagesNode.scrollTop - messagesNode.clientHeight;
+      assert('你自己发消息时，视图会回到底部（差 < 40px）', afterSendGap < 40,
+        '差 ' + Math.round(afterSendGap) + 'px');
     }
 
     // ── 8. 交互：发送 / 换行 / 空输入 / 忙碌时不许发 ──

@@ -197,6 +197,19 @@
     if (state.pinned) el.messages.scrollTop = el.messages.scrollHeight;
   }
 
+  /**
+   * 无条件滚到底部 —— 只用在"用户自己刚做了动作"的地方。
+   *
+   * 为什么需要它：如果你正在往回翻记录，然后自己发了一句，光靠 scrollIfPinned
+   * 是**不会**跟下去的（那时 pinned 已经是 false），结果你既看不见自己刚发的话、
+   * 也看不见它开始回答 —— 得自己再滚到底。别的聊天界面在这种情况下都会跟着走，
+   * 因为这是你自己的动作。它自己的输出则继续守"别把人拽回去"的规矩。
+   */
+  function scrollToBottom() {
+    state.pinned = true;
+    el.messages.scrollTop = el.messages.scrollHeight;
+  }
+
   el.messages.addEventListener('scroll', () => {
     state.pinned = atBottom();
   });
@@ -223,6 +236,8 @@
     }
     wrap.appendChild(bubble);
     appendNode(wrap);
+    // 你自己发的消息，视图一定跟到底部（见上面 scrollToBottom 的说明）。
+    scrollToBottom();
   }
 
   // ── 编辑器上下文（附件）──────────────────────────────
