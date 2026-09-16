@@ -12,7 +12,7 @@
  */
 
 const net = require('node:net');
-const { spawn } = require('node:child_process');
+const { spawn, execFileSync } = require('node:child_process');
 
 /** 探测一个端口是否能连上（不握手，只探 TCP）。 */
 function probePort(host, port, timeoutMs = 800) {
@@ -66,14 +66,25 @@ function quoteArg(value) {
   return /[\s"&|<>^]/.test(text) ? `"${text.replace(/"/g, '\\"')}"` : text;
 }
 
-function spawnBackgroundDsh({ command, profile, log }) {
+function spawnBackgroundDsh({ command, profile, log, extraArgs = [] }) {
   if (!SAFE_PROFILE.test(String(profile))) {
     throw new Error(`profile 名不合法：${profile}（只允许字母、数字、点、下划线、连字符）`);
   }
 
   // `--host 127.0.0.1` 是兜底加固：确保它的网页界面也只绑回环地址。
   // `--port 0` 让系统随便挑一个网页端口 —— 我们走的是门，不用那个界面。
-  const args = ['--profile', profile, '--no-open', '--host', '127.0.0.1', '--port', '0'];
+  // `extraArgs` 给测试用（例如 `--patch <临时覆盖文件>` 把门指到别的端口上，
+  // 这样测试不必去抢 47821）；生产路径不传它，参数一律走 quoteArg。
+  const args = [
+    '--profile',
+    profile,
+    ...extraArgs.map(String),
+    '--no-open',
+    '--host',
+    '127.0.0.1',
+    '--port',
+    '0',
+  ];
   log('info', `后台拉起 DSH：${command} ${args.join(' ')}`);
 
   /*
@@ -138,4 +149,34 @@ function killTree(child) {
   child.kill('SIGTERM');
 }
 
-module.exports = { probePort, waitForPort, spawnBackgroundDsh, delay };
+/**
+ * 同步跑一条 `dsh` 命令，拿回它的输出（成功才返回；失败抛错，带 stderr）。
+ *
+ * 给测试用的（例如把门插件重装一遍）。跟 spawnBackgroundDsh 走同一套
+ * Windows 处理：`dsh` 是个 .cmd 垫片，得显式通过 cmd.exe 调，
+ * 而且参数自己加引号（`shell:true` + 参数数组在 Node 里已废弃，见上面的说明）。
+ *
+ * @returns {string} stdout
+ */
+function runDshSync({ command, args = [], timeoutMs = 120000 }) {
+  const quoted = [quoteArg(command), ...args.map(quoteArg)].join(' ');
+  try {
+    if (process.platform === 'win32') {
+      return execFileSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', quoted], {
+        encoding: 'utf8',
+        timeout: timeoutMs,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    }
+    return execFileSync(command, args, {
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (error) {
+    const detail = [error.stdout, error.stderr].filter(Boolean).join('\n').trim();
+    throw new Error(`${command} ${args.join(' ')} 失败：${detail || error.message}`);
+  }
+}
+
+module.exports = { probePort, waitForPort, spawnBackgroundDsh, runDshSync, delay };

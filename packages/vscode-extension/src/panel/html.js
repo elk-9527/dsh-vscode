@@ -59,6 +59,10 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
         <span class="field-label">模型</span>
         <select id="model-select" class="select"></select>
       </label>
+      <label class="field" id="preset-field" hidden>
+        <span class="field-label">模式</span>
+        <select id="preset-select" class="select" title="agent preset：只能在新建对话时生效（内核不允许一段对话中途换）"></select>
+      </label>
       <div class="meter" id="meter" hidden title="上下文用量">
         <div class="meter-track"><div class="meter-fill" id="meter-fill"></div></div>
         <span class="meter-text" id="meter-text"></span>

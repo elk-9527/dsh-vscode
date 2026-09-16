@@ -27,6 +27,8 @@ const PROFILE = path.join(ROOT, 'build', 'chrome-profile');
 
 /** 每个场景期望看到的特殊东西。 */
 const EXPECTATIONS = {
+  // 什么都没发：所有「按需出现」的东西都必须真的藏着。
+  bare: { needsUser: false, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, emptyChrome: true, minAssistantChars: 0 },
   empty: { needsUser: false, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0 },
   chat: { needsUser: true, needsAssistant: true, needsTools: 2, needsCaret: false, needsPermission: false, minAssistantChars: 300 },
   streaming: { needsUser: true, needsAssistant: true, needsTools: 1, needsCaret: true, needsPermission: false, minAssistantChars: 10 },
@@ -92,6 +94,41 @@ function assertionsScript(scene) {
 
     // ── 1. 骨架 ──────────────────────────────────────
     assert('页面渲染出高度', body.getBoundingClientRect().height > 200, body.getBoundingClientRect().height);
+
+    // ── 1.5 该藏的必须真藏住 ─────────────────────────
+    // CSS 陷阱：元素一旦被作者样式设成 display:flex，浏览器默认的
+    // [hidden] { display: none } 就被盖掉了 —— hidden 属性形同不存在。
+    // 所以这里量的是「真的看不见」，而不是只看那个属性。
+    var permissionBox = document.getElementById('permission');
+    var configRow = document.getElementById('config-row');
+    var presetField = document.getElementById('preset-field');
+    var meter = document.getElementById('meter');
+    var modelCount = document.querySelectorAll('#model-select option').length;
+    var presetCount = document.querySelectorAll('#preset-select option').length;
+    var meterText = (document.getElementById('meter-text').textContent || '').trim();
+
+    assert('配置行只在有东西可调时才露出', visible(configRow) === (modelCount > 0 || presetCount > 0),
+      'visible=' + visible(configRow) + ' model=' + modelCount + ' preset=' + presetCount);
+    assert('模式下拉只在门报了清单时才露出', visible(presetField) === (presetCount > 0),
+      'visible=' + visible(presetField) + ' preset=' + presetCount);
+    assert('用量条只在有数据时才露出', visible(meter) === (meterText.length > 0),
+      'visible=' + visible(meter) + ' text=' + meterText);
+    if (!EXPECT.needsPermission) {
+      assert('权限区默认是藏着的', !visible(permissionBox));
+    }
+    if (EXPECT.emptyChrome) {
+      assert('没连上时头部不该挂空控件',
+        !visible(configRow) && !visible(presetField) && !visible(meter) && !visible(permissionBox),
+        'config=' + visible(configRow) + ' preset=' + visible(presetField) + ' meter=' + visible(meter) + ' permission=' + visible(permissionBox));
+    }
+    if (presetCount > 0) {
+      var presetSelect = document.getElementById('preset-select');
+      assert('模式下拉显示中文名', presetSelect.options[0].textContent.indexOf('模式') >= 0, presetSelect.options[0].textContent);
+      assert('模式下拉选中当前生效的那个', presetSelect.value === 'standard', presetSelect.value);
+      assert('模式选项带说明', (presetSelect.options[0].title || '').length > 0);
+      assert('模式下拉没有横向溢出', presetSelect.scrollWidth <= presetSelect.clientWidth + 2,
+        presetSelect.scrollWidth + '>' + presetSelect.clientWidth);
+    }
 
     // ── 2. 消息 ──────────────────────────────────────
     var users = document.querySelectorAll('.msg-user .bubble');

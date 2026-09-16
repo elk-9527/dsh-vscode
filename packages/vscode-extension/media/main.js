@@ -16,6 +16,8 @@
     statusText: document.getElementById('status-text'),
     configRow: document.getElementById('config-row'),
     modelSelect: document.getElementById('model-select'),
+    presetField: document.getElementById('preset-field'),
+    presetSelect: document.getElementById('preset-select'),
     newSession: document.getElementById('new-session'),
     messages: document.getElementById('messages'),
     empty: document.getElementById('empty'),
@@ -40,6 +42,8 @@
     /** 用户是否贴在底部（决定要不要自动滚动）。 */
     pinned: true,
     configOptions: [],
+    /** 门报过来的预设清单有没有内容（决定配置行要不要露出来）。 */
+    hasPresets: false,
   };
 
   /** entry → 'body' | 'think'，攒着待渲染的内容。 */
@@ -95,6 +99,9 @@
       case 'config':
         setConfig(message.configOptions || []);
         break;
+      case 'presets':
+        setPresets(message);
+        break;
       case 'permission':
         showPermission(message);
         break;
@@ -133,7 +140,12 @@
       el.statusText.textContent = text || '正在连接…';
     }
     el.statusText.title = text;
-    if (kind === 'ready' || kind === 'busy') el.configRow.hidden = state.configOptions.length === 0;
+    if (kind === 'ready' || kind === 'busy') syncConfigRow();
+  }
+
+  /** 配置行只在真有东西可调时才露出来（有模型下拉，或有模式下拉）。 */
+  function syncConfigRow() {
+    el.configRow.hidden = state.configOptions.length === 0 && !state.hasPresets;
   }
 
   function showHint(text, isError) {
@@ -487,8 +499,10 @@
   function setConfig(configOptions) {
     state.configOptions = configOptions;
     const model = configOptions.find((option) => option && option.id === 'model');
-    el.configRow.hidden = !model;
-    if (!model) return;
+    if (!model) {
+      syncConfigRow();
+      return;
+    }
 
     el.modelSelect.textContent = '';
     let matched = false;
@@ -511,6 +525,45 @@
       opt.selected = true;
       el.modelSelect.appendChild(opt);
     }
+    syncConfigRow();
+  }
+
+  /**
+   * 渲染「模式」下拉（agent preset）。
+   *
+   * 这份清单不是扩展里写死的，是门问内核要来的（`agentPresets.list()`），
+   * 所以你在 $DSH_HOME/.agent-presets/ 里自己写的预设也会出现在这里。
+   * 换它的语义是「下一段新对话用哪个模式」—— 内核不允许一段对话中途换预设。
+   */
+  function setPresets(message) {
+    const presets = Array.isArray(message.presets) ? message.presets : [];
+    state.hasPresets = presets.length > 0;
+    el.presetField.hidden = !state.hasPresets;
+    if (state.hasPresets) {
+      el.presetSelect.textContent = '';
+      const current = message.current;
+      let matched = false;
+      for (const preset of presets) {
+        const opt = document.createElement('option');
+        opt.value = preset.id;
+        opt.textContent = preset.name || preset.id;
+        if (preset.description) opt.title = preset.description;
+        if (preset.id === current) {
+          opt.selected = true;
+          matched = true;
+        }
+        el.presetSelect.appendChild(opt);
+      }
+      // 当前用的那个不在清单里（比如清单刚被改过）也要显示出来，不能显示成别的。
+      if (!matched && current) {
+        const opt = document.createElement('option');
+        opt.value = current;
+        opt.textContent = current;
+        opt.selected = true;
+        el.presetSelect.appendChild(opt);
+      }
+    }
+    syncConfigRow();
   }
 
   function optionNode(choice, current, onMatch) {
@@ -527,6 +580,10 @@
 
   el.modelSelect.addEventListener('change', () => {
     post({ type: 'setModel', value: el.modelSelect.value });
+  });
+
+  el.presetSelect.addEventListener('change', () => {
+    post({ type: 'setPreset', value: el.presetSelect.value });
   });
 
   // ── 权限询问 ────────────────────────────────────────

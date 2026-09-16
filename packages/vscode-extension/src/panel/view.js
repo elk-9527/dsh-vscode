@@ -50,6 +50,24 @@ class DshPanelView {
      * @type {string|undefined}
      */
     this.resumeTarget = undefined;
+    /**
+     * 下一段新对话要用哪个 agent preset（用户在面板里选的，或设置里的默认值）。
+     *
+     * 为什么是「下一段」而不是「当前这段」：内核不允许会话开始之后再换预设
+     * （实测报 `agent-preset/locked`），这是内核的设计，不是本扩展的偷懒。
+     * 所以面板里换预设的语义就是：**下一段新对话**用它。
+     * @type {string|undefined}
+     */
+    this.preset = undefined;
+    /**
+     * 当前这段会话有没有发过消息。
+     *
+     * 只用来决定「换预设时能不能直接重开一段」：一段还没说过话的会话重开
+     * 是零代价的，用户不用自己再点一次新建。
+     */
+    this.turnSent = false;
+    /** 门最近一次报的预设清单，界面重新加载时补发用。 */
+    this.lastPresets = undefined;
   }
 
   // ── 视图 ────────────────────────────────────────────
@@ -114,6 +132,9 @@ class DshPanelView {
         case 'setModel':
           await this.setModel(message.value);
           break;
+        case 'setPreset':
+          await this.setPreset(message.value);
+          break;
         case 'permission':
           if (this.session) this.session.answerPermission(message.requestId, message.optionId);
           break;
@@ -152,6 +173,7 @@ class DshPanelView {
       dshCommand: cfg.get('dshCommand') || 'dsh',
       provider: cfg.get('provider') || '',
       model: cfg.get('model') || '',
+      preset: cfg.get('preset') || '',
       cwd: cfg.get('cwd') || '',
     };
   }
@@ -235,8 +257,12 @@ class DshPanelView {
         // 断线重连：先试把刚才那个会话接回来，接不回来才开新的。
         const target = this.resumeTarget;
         try {
-          await session.resume(target, this.workdir());
+          // 把当前预设一起告诉门：内核不会把走门建的会话的预设记进会话记录，
+          // 门得靠这个点名（或它自己记得的）去补挂 —— 不补，接回来的会话就没有工具。
+          await session.resume(target, this.workdir(), { preset: this.wantedPreset() });
           this.resumeTarget = undefined;
+          // 接回来的是「已经说过话的」会话：别让换预设把它悄悄重开掉。
+          this.turnSent = true;
           this.post({
             type: 'status',
             state: 'ready',
@@ -252,7 +278,13 @@ class DshPanelView {
           });
         }
       }
-      await session.start({ cwd: this.workdir(), provider: cfg.provider, model: cfg.model });
+      this.turnSent = false;
+      await session.start({
+        cwd: this.workdir(),
+        provider: cfg.provider,
+        model: cfg.model,
+        preset: this.wantedPreset(cfg),
+      });
     } catch (error) {
       const text = error && error.message ? error.message : String(error);
       this.post({ type: 'status', state: 'error', detail: `建会话失败：${text}` });
@@ -278,6 +310,7 @@ class DshPanelView {
       this.post({ type: 'usage', used: payload.used, size: payload.size }),
     );
     session.on('config', (payload) => this.post({ type: 'config', configOptions: payload.configOptions }));
+    session.on('presets', (payload) => this.onPresets(payload));
     session.on('busy', (payload) => {
       this.post({ type: 'busy', busy: payload.busy });
       this.post({
@@ -309,7 +342,36 @@ class DshPanelView {
     if (!session) return;
     this.post({ type: 'status', state: session.busy ? 'busy' : 'ready', detail: '已连上' });
     this.post({ type: 'config', configOptions: session.configOptions });
+    if (this.lastPresets) this.post({ type: 'presets', ...this.lastPresets });
     if (session.usage) this.post({ type: 'usage', used: session.usage.used, size: session.usage.size });
+  }
+
+  /**
+   * 门报了可用预设清单。
+   *
+   * 这份清单是**门问内核要的**（`agentPresets.list()`，每次调用重新扫盘），
+   * 所以用户在 `$DSH_HOME/.agent-presets/` 里自己写的预设也会出现在面板里。
+   */
+  onPresets(payload) {
+    const presets = Array.isArray(payload?.presets) ? payload.presets : [];
+    const current = typeof payload?.current === 'string' && payload.current ? payload.current : undefined;
+    if (current) this.preset = current;
+    this.lastPresets = { presets, current, requested: payload?.requested };
+    this.post({ type: 'presets', ...this.lastPresets });
+    if (payload?.fallback) {
+      this.post({
+        type: 'notice',
+        text: `门里没有「${payload.requested}」这个预设，这次用的是「${this.labelOf(current)}」。`,
+      });
+    }
+  }
+
+  /** 预设的中文名（门/内核给了名字就用名字，没有就退回 id）。 */
+  labelOf(id) {
+    if (!id) return '默认';
+    const list = this.lastPresets?.presets;
+    const hit = Array.isArray(list) ? list.find((item) => item && item.id === id) : undefined;
+    return (hit && hit.name) || id;
   }
 
   // ── 操作 ────────────────────────────────────────────
@@ -318,7 +380,14 @@ class DshPanelView {
     if (!text || !text.trim()) return;
     const session = await this.ensureConnection();
     if (!session) return;
+    // 从这一刻起这段会话「说过话」了：换预设时就不能再悄悄重开它。
+    this.turnSent = true;
     await session.send(text);
+  }
+
+  /** 下一段新对话要用哪个预设：面板里选过的优先，其次是设置里的默认值。 */
+  wantedPreset(cfg = this.config()) {
+    return this.preset || cfg.preset || undefined;
   }
 
   async newSession() {
@@ -329,6 +398,7 @@ class DshPanelView {
     this.post({ type: 'reset' });
     // 用户主动要新对话，就别再想着把上一段接回来了。
     this.resumeTarget = undefined;
+    this.turnSent = false;
     // 新会话要先把旧的放掉，免得内核里堆一堆空会话。
     if (old) {
       try {
@@ -339,7 +409,12 @@ class DshPanelView {
       }
     }
     try {
-      await session.start({ cwd: this.workdir(), provider: cfg.provider, model: cfg.model });
+      await session.start({
+        cwd: this.workdir(),
+        provider: cfg.provider,
+        model: cfg.model,
+        preset: this.wantedPreset(cfg),
+      });
       this.post({ type: 'status', state: 'ready', detail: '已连上（新对话）' });
     } catch (error) {
       this.post({ type: 'status', state: 'error', detail: `新建会话失败：${this.errText(error)}` });
@@ -349,6 +424,31 @@ class DshPanelView {
   async setModel(value) {
     if (!this.session) return;
     await this.session.setModel(value);
+  }
+
+  /**
+   * 用户在面板里换了 agent preset。
+   *
+   * 内核不允许一段会话中途换预设（`agent-preset/locked`，实测），
+   * 所以这里只有两条路：
+   *   - 这段还没说过话 → 直接按新预设重开一段（零代价，用户不用自己再点新建）；
+   *   - 已经说过了 → 记下来，明确告诉他下一段新对话用它，绝不假装换成功了。
+   */
+  async setPreset(value) {
+    const preset = typeof value === 'string' ? value.trim() : '';
+    if (!preset) return;
+    this.preset = preset;
+    if (this.session && !this.turnSent) {
+      this.log('info', `预设改成 ${preset}；当前这段还没说过话，直接重开一段`);
+      await this.newSession();
+      this.post({ type: 'notice', text: `已按「${this.labelOf(preset)}」重开一段新对话。` });
+      return;
+    }
+    this.log('info', `预设改成 ${preset}（下一段新对话生效）`);
+    this.post({
+      type: 'notice',
+      text: `已选「${this.labelOf(preset)}」：下一段新对话用它（内核不允许一段对话中途换预设）。`,
+    });
   }
 
   async reconnect() {

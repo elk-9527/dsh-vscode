@@ -105,6 +105,11 @@
           "default": "",
           "description": "新会话的初始模型名。留空则由内核决定。"
         },
+        "dshPanel.preset": {
+          "type": "string",
+          "default": "",
+          "description": "新会话挂载的 agent preset（standard 标准模式 / ptc PTC 模式 / minimal 极简模式 / cordis 创造模式）。留空则用门插件里配的那个（默认 standard）。注意：预设只能在新建对话时选 —— 内核不允许一段对话中途换，面板里换预设的语义就是「下一段新对话用它」。"
+        },
         "dshPanel.cwd": {
           "type": "string",
           "default": "",

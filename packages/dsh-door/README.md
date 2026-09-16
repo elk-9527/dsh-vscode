@@ -56,9 +56,25 @@ DSH Desktop（已在跑）
 
 > `(join through AgentPresets.mount() or composeFrom() in the agent factory setup)`
 
-所以本插件监听 `agent/created`，用公开的 `agentPresets.select(agent, id)`
-补上这一步。它会把该 agent 的作用域重新组装，并把这次选择**记进会话记录** ——
-因此之后在桌面端打开这个会话，它显示的预设也是对的。
+所以本插件监听 `agent/created`，用公开的 `agentPresets` 补上这一步。**新会话**和
+**恢复的会话**走的是两个不同的入口 —— 这是踩出来的，不是猜的：
+
+| 情况 | 用哪个 | 为什么 |
+|---|---|---|
+| 新建的会话 | `select(agent, id)` | 它会重组装 agent 的作用域，并把这次选择**追加进会话事件日志**（`agent-preset/selected`）。 |
+| 恢复的会话（断线接回 / 打开历史会话） | `mount(agent.ctx, id)` | 内核按「有没有跑过回合」给 `select` 上了锁（`agent-preset/locked`，这是设计）。而恢复时 agent 的作用域是**重新组装**的，不补这一刀它就是个空壳。`mount` 是工厂期用的入口，只负责组装，不看那把锁。 |
+
+### 恢复会话这里真出过一个 bug，记下来
+
+症状：面板断线重连（或重启内核后接回旧会话）之后，会话**一个工具都没有** ——
+模型会说"我来跑一下"，然后把工具调用当文本写出来（`<｜｜DSML｜｜invoke …>`）。
+实测数据：同一个会话，断线前 18 次工具调用，接回来 **0 次**，正文变成裸的 DSML。
+
+为什么：`select()` 只在**新建**时能挂上；恢复时它被锁，而预设又**不会**从会话记录里
+自动还原（见下面那条"记录里其实没有预设"）。于是恢复出来的 agent 手里空空。
+
+修法：`select` 撞锁就改用 `mount(agent.ctx, id)`。修完同一个试验立刻变成接回后 10 次
+工具调用（`test/presets.js` 第 8 节把这条钉住了）。
 
 ### 两个必须注意的坑（都实测踩过）
 
@@ -66,6 +82,8 @@ DSH Desktop（已在跑）
    **直接抛**（`cannot get property "…" without inject`）。而这个异常发生在内核
    创建 agent 的**同步**流程里：要么打断 `session/new`，要么被 async 吞掉、
    让门**假装在工作**。所以它进了 `inject`，缺这个服务的 profile 会直接不启动这扇门。
+   同一条也适用于 `mount()`：它要的是 **agent 的作用域上下文**（`agent.ctx`），
+   传错东西会抛 `refusing to compose an unscoped context`。
 
 2. **有一道竞态，必须用入站闸挡住。** 内核派发 `agent/created` 时**不等待**
    监听器返回的 promise，于是「补挂预设」和「客户端发第一个 prompt」是并行的。
@@ -81,29 +99,66 @@ DSH Desktop（已在跑）
    只能把工具调用当文本写出来。因此 {@link gatePrompts} 在传输层把该会话的
    `session/prompt` 按住，直到挂载落定 —— 上表那一轮实际压了 303ms。
 
+### 记录里其实没有预设（这条纠正过）
+
+上面那句"记进会话记录"曾经写在这里，**是错的**。实测（解开
+`$DSH_HOME/sessions/<项目>/<会话>/session.v3.jsonl.zstd`）：
+
+- 桌面端建的会话，第一行 header 里有 `"agentPreset":"standard"`；
+- 走本门建的会话，**没有** `agentPreset` —— 建完就读没有，跑完一个回合再读还是没有。
+
+也就是说，内核只在"桌面端那种建会话方式"下才把预设写进记录。所以：
+
+1. 门不能指望从记录里知道自己原来挂的是哪个预设 → 门在**内核进程内**记一份
+   `sessionId → preset`（跨连接共享），客户端也会在 `session/resume` 的
+   `_meta` 里点名它要的预设，两个来源合并着用。
+2. 这也正是上面那个 bug 的根：不看记录就没法自动还原，必须靠 `mount` 补挂。
+
 ## 配置
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `host` | `127.0.0.1` | 监听地址。**不要改成 `0.0.0.0`**，那会把门开到局域网上。 |
 | `port` | `47821` | 监听端口；传 `0` 让系统挑空闲端口。 |
-| `provider` | — | 新会话的初始模型服务商。 |
-| `model` | — | 新会话的初始模型名。 |
+| `provider` | — | 新会话的初始模型服务商。**必须写**，见下面的警告。 |
+| `model` | — | 新会话的初始模型名。**必须写。** |
 | `preset` | `standard` | 新会话挂载的 agent preset：`standard`（标准）/ `ptc` / `cordis`（创造）/ `minimal`（极简）。 |
 | `diagLog` | 关 | 诊断日志文件路径；也可用环境变量 `DSH_ACP_DOOR_DIAG`。排查时序问题用，不配则完全不写文件。 |
 
+### 警告：`provider` / `model` 缺了会静默变哑
+
+少了这两项，**会话照样建得起来、门照样开得好好的**，但第一个回合直接失败：
+
+```
+agent "…" has no provider/model: set AgentOptions.provider and AgentOptions.model
+```
+
+很容易踩，因为 id 定向的 `--patch` 覆盖是**整体替换**这份配置（不是合并）——
+只想改 `port` 而没写全其它键，就把 `provider`/`model` 一起冲掉了。所以门在启动时
+会检查这两项，缺了就在内核日志里吵一次，不等用户发了消息才发现。
+（`test/presets.js` 也盯着 `cordis.patch.yml` 里必须有这两项。）
+
 ## 怎么装
 
-**必须用 `npm pack` 的产物安装，不要直接指向源码目录。** 因为本插件要
-`import '@deepseek-ai/dsh-acp'`，而那是 DSH 内部自带的包、不在 npm 上；
-直接指向目录时 Node 会从源码目录往上找，找不到那个包。装成 tgz 后它落在
-profile 里，就能顺着 `profiles/node_modules` 找到 DSH 自己的包。
+在目标 profile 里装这个包，两种来源都行，但要知道它们的区别：
 
 ```powershell
-cd <本目录>
-npm pack
+# A) 指向源码目录：开发用，装完就能用（pnpm 会把它拷进 profile）
+dsh plugin --profile <profile> add "file:<本目录>"
+
+# B) 用 npm pack 的 tgz：最接近"用户拿到的东西"，也最稳
+cd <本目录>; npm pack
 dsh plugin --profile <profile> add "file:<本目录>\dsh-acp-door-<版本>.tgz"
 ```
+
+**别用 `link:`。** 那会建一个真符号链接，Node 解析依赖时按**真实路径**往上找，
+于是 `import '@deepseek-ai/dsh-acp'` 找不到（它不在源码树里，而在 profile/DSH 安装目录里），
+门直接起不来。更糟的是，删掉这个链接时 pnpm 可能**把源码目录一起清空** ——
+真发生过一次，靠 profile 里的那份拷贝才救回来。
+
+**改了源码必须重新 `add` 一次。** `file:` 是**拷贝**而不是链接，而且 pnpm 有缓存，
+源码变了它有时直接报 `added 0`（内容没换）。`test/helpers/door.js` 的 `syncDoor()`
+每次跑测试前会逐字节比对源码与装的那份，不一致就自动重装 —— 免得测试悄悄测了旧代码。
 
 然后在该 profile 的用户自定义层 `cordis.patch.yml` 里插入一行：
 

@@ -207,6 +207,42 @@ check(
   'view.js 里的兜底值和 package.json 漂移了',
 );
 
+// ── 预设（模式）这条链路横跨两边，_meta 的键名必须一模一样 ──────────
+// 门用这个键往 result._meta 里塞清单，扩展用同一个键去读。键名一漂移，
+// 表现只是「下拉框永远是空的」，不会报任何错 —— 所以在这里钉死。
+
+const doorFrames = read('../dsh-door/lib/frames.js');
+const clientSource = read('src/door/client.js');
+const doorKey = /DOOR_META_KEY\s*=\s*'([^']+)'/.exec(doorFrames)?.[1];
+const clientKey = /PRESET_META_KEY\s*=\s*'([^']+)'/.exec(clientSource)?.[1];
+
+check('两边都定义了 _meta 的键名', Boolean(doorKey) && Boolean(clientKey), `门=${doorKey} 扩展=${clientKey}`);
+check(
+  '门和扩展用的 _meta 键名完全一致',
+  doorKey === clientKey,
+  `门=${doorKey} vs 扩展=${clientKey}（不一致就静默失效）`,
+);
+check(
+  '扩展设置项里有 dshPanel.preset',
+  Object.prototype.hasOwnProperty.call(settings, 'dshPanel.preset'),
+  `现有设置：${Object.keys(settings).join(', ')}`,
+);
+check(
+  '预设的四个 id 在门那边写全了（兜底清单不许漏）',
+  ['standard', 'ptc', 'minimal', 'cordis'].every((id) => doorFrames.includes(`'${id}'`)),
+  'frames.js 的兜底清单里少了 id',
+);
+check(
+  '扩展在 resume 时会把预设一起告诉门（不告诉，接回来的会话就没有工具）',
+  /resumeSession\(sessionId,\s*cwd,\s*\{\s*preset\s*\}/.test(clientSource),
+  'client.js 的 resumeSession 没有 preset 参数',
+);
+check(
+  '面板接回旧会话时传了当前预设',
+  /session\.resume\(\s*target,\s*this\.workdir\(\),\s*\{\s*preset:/.test(viewSource),
+  'view.js 的 resume 调用没带 preset',
+);
+
 console.log(`\n${'═'.repeat(56)}`);
 if (failed === 0) console.log(`✅ 全部通过：${passed} 项检查`);
 else {

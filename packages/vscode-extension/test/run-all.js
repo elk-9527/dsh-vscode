@@ -25,10 +25,12 @@ const withDsh = args.includes('--all');
 
 const suites = [
   { name: '静态契约', file: 'test/static.js', always: true },
+  { name: '门的看帧判断（纯函数）', file: '../dsh-door/test/frames.js', always: true },
   { name: 'Markdown 渲染器', file: 'test/markdown.js', always: true },
   { name: '界面（真浏览器）', file: 'tools/uitest.js', always: false, needs: withUi, hint: '加 --ui 才跑' },
   { name: '兜底拉起（真进程）', file: 'test/fallback.js', always: false, needs: withDsh, hint: '加 --all 才跑（要求 47821 空着）' },
   { name: '断线接回（真 DSH）', file: 'test/resume.js', always: false, needs: withDsh, hint: '加 --all 才跑' },
+  { name: '预设/模式（真 DSH）', file: 'test/presets.js', always: false, needs: withDsh, hint: '加 --all 才跑（自己挑端口，不抢 47821）' },
   { name: '面板层（假 vscode + 真门）', file: 'test/panel.js', always: true },
   { name: '端到端（真 DSH）', file: 'test/smoke.js', always: false, needs: withDsh, hint: '加 --all 才跑' },
 ];

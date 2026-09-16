@@ -22,6 +22,7 @@
  */
 
 const { EventEmitter } = require('node:events');
+const { readDoorMeta } = require('../door/client');
 
 /** 没有 sessionId 的会话——用一个稳定的哨兵，方便日志里一眼看出问题。 */
 let nextId = 1;
@@ -43,6 +44,15 @@ class DshSession extends EventEmitter {
     this.sessionId = null;
     /** @type {any[]} session/new 返回的配置项（模型清单在这里）。 */
     this.configOptions = [];
+    /**
+     * 门补的那份预设信息：`{presets, current, requested, fallback}`。
+     *
+     * 为什么会有这个东西：预设不是 ACP 的概念，是门（dsh-acp-door）替内核
+     * 接出来的 —— 桌面端把工具改成「按会话挂预设」，而 ACP 建 agent 时从不点名
+     * 预设，不补就是一个没有工具的 agent。见 dsh-acp-door 的 frames.js。
+     * @type {{presets?: object[], current?: string, requested?: string, fallback?: boolean}|undefined}
+     */
+    this.doorMeta = undefined;
     /** @type {{used: number, size: number}|null} */
     this.usage = null;
     this.busy = false;
@@ -71,8 +81,8 @@ class DshSession extends EventEmitter {
    * @param {string} [options.model] 想要的模型名（可空）。
    * @returns {Promise<string>} sessionId
    */
-  async start({ cwd, provider, model }) {
-    const result = await this.client.newSession(cwd);
+  async start({ cwd, provider, model, preset }) {
+    const result = await this.client.newSession(cwd, { preset });
     if (!result || !result.sessionId) {
       throw new Error(`session/new 没有返回 sessionId：${JSON.stringify(result)}`);
     }
@@ -80,7 +90,21 @@ class DshSession extends EventEmitter {
     this.configOptions = Array.isArray(result.configOptions) ? result.configOptions : [];
     this.emit('session', { sessionId: this.sessionId });
     this.emit('config', { configOptions: this.configOptions });
-    this.log('info', `已建会话 ${this.sessionId}（cwd=${cwd}）`);
+
+    // 门会在回复里补一份「有哪些预设、这次用的哪个」（ACP 的 _meta 扩展点）。
+    // 内核自己不给这份信息 —— 预设压根不是 ACP 的概念，是门替它接出来的。
+    const doorMeta = readDoorMeta(result);
+    if (doorMeta) {
+      this.doorMeta = doorMeta;
+      this.emit('presets', doorMeta);
+    } else {
+      this.doorMeta = undefined;
+    }
+
+    this.log(
+      'info',
+      `已建会话 ${this.sessionId}（cwd=${cwd}${doorMeta?.current ? `，预设=${doorMeta.current}` : ''}）`,
+    );
 
     if (provider && model) {
       await this._applyModel(provider, model);
@@ -93,11 +117,22 @@ class DshSession extends EventEmitter {
    *
    * @param {string} sessionId
    * @param {string} cwd
+   * @param {object} [options]
+   * @param {string} [options.preset] 这段会话本来用哪个预设。
+   *   必须带上：内核不会把走门建的会话的预设记进会话记录，门只能靠客户端
+   *   点名（或它自己记得的）来补挂 —— 不补，接回来的会话就没有工具。
    */
-  async resume(sessionId, cwd) {
-    const result = await this.client.resumeSession(sessionId, cwd);
+  async resume(sessionId, cwd, { preset } = {}) {
+    const result = await this.client.resumeSession(sessionId, cwd, { preset });
     this.sessionId = sessionId;
     this.configOptions = Array.isArray(result && result.configOptions) ? result.configOptions : [];
+    // 门在 resume 的回复里也会补一份预设清单，照 session/new 一样处理，
+    // 免得重连之后面板上的「模式」下拉空着。
+    const doorMeta = readDoorMeta(result);
+    if (doorMeta) {
+      this.doorMeta = doorMeta;
+      this.emit('presets', doorMeta);
+    }
     this.emit('session', { sessionId });
     this.emit('config', { configOptions: this.configOptions });
     this.log('info', `已恢复会话 ${sessionId}`);

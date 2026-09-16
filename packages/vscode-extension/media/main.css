@@ -18,6 +18,19 @@
   box-sizing: border-box;
 }
 
+/*
+ * `hidden` 属性必须真的能藏住东西。
+ *
+ * 为什么非要写这一条：浏览器默认的 `[hidden] { display: none }` 来自 UA 样式表，
+ * 而**作者样式永远赢过 UA 样式** —— 于是只要元素自己带着 `display: flex`，
+ * `hidden` 就完全失效。踩过的坑（ui test 里 bare 场景量出来的）：什么都没连上时，
+ * 空的模型下拉、空的用量条、还有一个空的黄色「需要你的许可」框全都挂在面板上。
+ * 加了 `!important` 才能盖住那些 `display: flex`。
+ */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   height: 100%;

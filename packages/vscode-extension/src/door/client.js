@@ -22,6 +22,30 @@ const PROTOCOL_VERSION = 1;
 const PARSE_ERROR = -32700;
 
 /**
+ * 门用的 `_meta` 键名 —— 与 `packages/dsh-door/lib/frames.js` 里的
+ * `DOOR_META_KEY` 必须一致（test/static.js 会核对，改一边忘一边会被测出来）。
+ *
+ * 为什么用 `_meta` 而不是自己加一个 ACP 方法：`_meta` 是 ACP 官方预留的
+ * 扩展点（schema 里就是 `z.record(z.string(), z.unknown())`），
+ * 不认识它的实现会原样忽略，不会因为多了个字段就谈崩。
+ */
+const PRESET_META_KEY = 'dsh-door';
+
+/**
+ * 读出门在 `session/new` 回复里补的那份信息。
+ *
+ * @param {object} result 内核的回复对象
+ * @returns {{presets?: object[], current?: string, requested?: string, fallback?: boolean}|undefined}
+ *   没有这份信息（比如对面不是 DSH 的门）就返回 undefined。
+ */
+function readDoorMeta(result) {
+  const meta = result && typeof result === 'object' ? result._meta : undefined;
+  if (!meta || typeof meta !== 'object') return undefined;
+  const info = meta[PRESET_META_KEY];
+  return info && typeof info === 'object' ? info : undefined;
+}
+
+/**
  * 内核回的业务错误（例如 `agent-preset/locked`）。
  * `code` 是 JSON-RPC 数字码；`message` 里可能带内核自己的语义码。
  */
@@ -193,14 +217,46 @@ class DoorClient extends EventEmitter {
 
   // ── ACP 具体方法（都经过实测抓包核对）────────────────────────────
 
-  /** 新建会话。返回值里有 `sessionId` 和 `configOptions`（模型清单在里面）。 */
-  newSession(cwd) {
-    return this.request('session/new', { cwd, mcpServers: [] });
+  /**
+   * 新建会话。
+   *
+   * @param {string} cwd 会话的工作目录。
+   * @param {object} [options]
+   * @param {string} [options.preset] 想用的 agent preset（standard / ptc / minimal / cordis）。
+   *   走 ACP 官方的 `_meta` 扩展点传给门（键名与 dsh-acp-door 的 lib/frames.js
+   *   一致，test/static.js 会核对两边没跑偏）。
+   *   注意：**预设只在新建会话时能选** —— 内核不允许会话开始之后再换
+   *   （`agent-preset/locked`，实测），所以面板里换预设的语义是「下一段新对话用哪个」。
+   * @returns {Promise<object>} 内核的回复（`sessionId`、`configOptions`），
+   *   门还会在 `_meta['dsh-door']` 里补一份可用预设清单与实际用的那个。
+   */
+  newSession(cwd, { preset } = {}) {
+    const params = { cwd, mcpServers: [] };
+    if (typeof preset === 'string' && preset) {
+      params._meta = { [PRESET_META_KEY]: { preset } };
+    }
+    return this.request('session/new', params);
   }
 
-  /** 恢复一个已有会话。返回值里有 `configOptions`。 */
-  resumeSession(sessionId, cwd) {
-    return this.request('session/resume', { sessionId, cwd, mcpServers: [] });
+  /**
+   * 恢复一个已有会话。返回值里有 `configOptions`。
+   *
+   * @param {object} [options]
+   * @param {string} [options.preset] 这段会话本来用哪个预设。
+   *   为什么要带上：内核只在「桌面端那种建会话方式」下把预设写进会话记录，
+   *   走 ACP 门建的会话记录里没有 agentPreset（实测）。不告诉门一声，接回
+   *   来的 agent 就是个**没有工具的空壳** —— 模型只能把工具调用当文本写出来
+   *   （这个症状实测抓到过，见 test/presets.js 第 8 节）。
+   *   门会按这里点名（或它自己记得的）补挂预设。
+   * @returns {Promise<object>} 内核的回复；门同样会在 `_meta['dsh-door']`
+   *   里补上可用预设清单与当前用的那个。
+   */
+  resumeSession(sessionId, cwd, { preset } = {}) {
+    const params = { sessionId, cwd, mcpServers: [] };
+    if (typeof preset === 'string' && preset) {
+      params._meta = { [PRESET_META_KEY]: { preset } };
+    }
+    return this.request('session/resume', params);
   }
 
   /** 列出历史会话。 */
@@ -334,4 +390,4 @@ class DoorClient extends EventEmitter {
   }
 }
 
-module.exports = { DoorClient, DoorRequestError, PROTOCOL_VERSION, PARSE_ERROR };
+module.exports = { DoorClient, DoorRequestError, PROTOCOL_VERSION, PARSE_ERROR, PRESET_META_KEY, readDoorMeta };

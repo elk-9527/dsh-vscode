@@ -151,6 +151,22 @@ const configMessage = {
   ],
 };
 
+/**
+ * 门在 session/new 回复里补的那份预设清单（真实形状，对着 dsh-acp-door 抄的）。
+ * 界面上的「模式」下拉就是拿它渲染的。
+ */
+const presetsMessage = {
+  type: 'presets',
+  current: 'standard',
+  requested: 'standard',
+  presets: [
+    { id: 'standard', name: '标准模式', description: '功能完整的编码 Agent，支持文件编辑、Shell、检索、Skills、计划、目标、子代理和工作流。', order: 1 },
+    { id: 'ptc', name: 'PTC 模式', description: '功能完整的编码 Agent，但默认不提供 workflow 工具。', order: 2 },
+    { id: 'minimal', name: '极简模式', description: '仅提供持久 shell 的单工具编码 Agent。', order: 3 },
+    { id: 'cordis', name: '创造模式', description: '用于创建自定义 Agent preset。', order: 4 },
+  ],
+};
+
 const longAnswer = [
   '我看了一下你的 `packages/dsh-door/lib/index.js`，问题出在**服务依赖没有声明**。\n',
   '\n',
@@ -176,12 +192,26 @@ const longAnswer = [
 ];
 
 const SCENARIOS = {
+  /**
+   * 刚打开、还没连上：什么都不该露出来。
+   *
+   * 这个场景是专门为「CSS 的 hidden 陷阱」写的：`hidden` 属性会被作者样式里的
+   * `display:flex` 盖掉，于是配置行、用量条、权限区会一直挂在那儿。这里什么都不发，
+   * 断言里逐条量它们「真的看不见」。
+   */
+  bare() {
+    return {
+      steps: [{ message: { type: 'status', state: 'connecting', detail: '连接 127.0.0.1:47821…' } }],
+    };
+  },
+
   /** 空状态：刚打开面板。 */
   empty() {
     return {
       steps: [
         { message: { type: 'status', state: 'ready', detail: '已连上正在运行的 DSH' } },
         { message: configMessage },
+        { message: presetsMessage },
       ],
     };
   },
@@ -192,6 +222,7 @@ const SCENARIOS = {
       steps: [
         { message: { type: 'status', state: 'ready', detail: '已连上正在运行的 DSH' } },
         { message: configMessage },
+        { message: presetsMessage },
         { message: { type: 'usage', used: 12480, size: 262144 } },
         { message: { type: 'user', text: '为什么我的门插件里读 agentPresets 会报错？' } },
         { message: { type: 'assistant', id: 'a1' } },
