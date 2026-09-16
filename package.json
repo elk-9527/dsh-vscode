@@ -1,0 +1,16 @@
+{
+  "name": "dsh-vscode-workspace",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "把 DeepSeek Harness 接入 VS Code 的自有扩展：扩展自己充当 ACP 客户端，驱动 dsh --profile acp",
+  "scripts": {
+    "probe": "node spike/acp-probe.mjs",
+    "probe:edit": "node spike/acp-probe.mjs --edit"
+  },
+  "devDependencies": {
+    "@agentclientprotocol/sdk": "^1.4.0",
+    "typescript": "^7.0.2",
+    "zod": "^4.6.5"
+  }
+}

@@ -1,0 +1,11 @@
+node_modules/
+dist/
+out/
+*.vsix
+
+# M0 原始抓包可能包含文件内容，不入库；筛选后的帧另行放进 packages/acp/test/fixtures
+spike/capture/
+spike/scratch/
+
+.DS_Store
+*.log
