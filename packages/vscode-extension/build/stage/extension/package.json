@@ -1,0 +1,115 @@
+{
+  "name": "dsh-panel",
+  "displayName": "DSH Panel",
+  "description": "在 VS Code 侧边栏里使用你正在运行的 DeepSeek Harness（同一个内核、同一份记忆、同一份会话记录）。",
+  "version": "0.0.1",
+  "private": true,
+  "publisher": "local",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "main": "./src/extension.js",
+  "activationEvents": [
+    "onView:dshPanel.chat"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "dshPanel",
+          "title": "DSH Panel",
+          "icon": "media/dsh.svg"
+        }
+      ]
+    },
+    "views": {
+      "dshPanel": [
+        {
+          "id": "dshPanel.chat",
+          "name": "对话",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "dshPanel.newSession",
+        "title": "DSH：新建对话",
+        "icon": "$(add)"
+      },
+      {
+        "command": "dshPanel.reconnect",
+        "title": "DSH：重新连接",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "dshPanel.showLog",
+        "title": "DSH：查看日志"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "dshPanel.newSession",
+          "when": "view == dshPanel.chat",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dshPanel.reconnect",
+          "when": "view == dshPanel.chat",
+          "group": "navigation@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "DSH Panel",
+      "properties": {
+        "dshPanel.host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "DSH「门」的监听地址。默认只连本机。"
+        },
+        "dshPanel.port": {
+          "type": "number",
+          "default": 47821,
+          "description": "DSH「门」的端口。与门插件 cordis.patch.yml 里的 port 保持一致。"
+        },
+        "dshPanel.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "连不上时，自动在后台拉起一个 DSH（与桌面端共用同一份 $DSH_HOME，因此记忆与会话记录是同一份）。关掉则只连已经在跑的。"
+        },
+        "dshPanel.fallbackProfile": {
+          "type": "string",
+          "default": "dshdoor",
+          "description": "自动拉起后台 DSH 时使用的 profile 名。这个 profile 里必须装好 dsh-acp-door 门插件。"
+        },
+        "dshPanel.dshCommand": {
+          "type": "string",
+          "default": "dsh",
+          "description": "dsh 命令行程序的名字或完整路径。"
+        },
+        "dshPanel.provider": {
+          "type": "string",
+          "default": "",
+          "description": "新会话的初始模型服务商。留空则由内核决定。"
+        },
+        "dshPanel.model": {
+          "type": "string",
+          "default": "",
+          "description": "新会话的初始模型名。留空则由内核决定。"
+        },
+        "dshPanel.cwd": {
+          "type": "string",
+          "default": "",
+          "description": "新会话的工作目录。留空则用 VS Code 当前打开的工作区目录。"
+        }
+      }
+    }
+  }
+}

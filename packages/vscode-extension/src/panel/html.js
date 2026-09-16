@@ -21,11 +21,12 @@ function makeNonce() {
  * @param {object} options
  * @param {string} options.cspSource webview.cspSource
  * @param {string} options.styleUri main.css 的 webview URI
+ * @param {string} options.markdownUri markdown.js 的 webview URI
  * @param {string} options.scriptUri main.js 的 webview URI
  * @param {string} options.nonce
  * @returns {string} HTML
  */
-function renderHtml({ cspSource, styleUri, scriptUri, nonce }) {
+function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
   const csp = [
     "default-src 'none'",
     `style-src ${cspSource}`,
@@ -94,6 +95,8 @@ function renderHtml({ cspSource, styleUri, scriptUri, nonce }) {
     <div class="permission-actions" id="permission-actions"></div>
   </div>
 
+  <!-- markdown.js 必须在 main.js 之前：main.js 启动时就要用到它 -->
+  <script nonce="${nonce}" src="${markdownUri}"></script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<!-- 预览专用：这里故意没有 CSP（见 tools/preview.js 的说明） -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link href="main.css" rel="stylesheet">
+<title>DSH Panel</title>
+</head>
+<body>
+  <header class="bar">
+    <div class="bar-row">
+      <span id="status-dot" class="dot" aria-hidden="true"></span>
+      <span id="status-text" class="status">正在连接…</span>
+      <span class="spacer"></span>
+      <button id="new-session" class="icon-btn" type="button" title="新建对话" aria-label="新建对话">
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M8 2.5a.75.75 0 0 1 .75.75v4h4a.75.75 0 0 1 0 1.5h-4v4a.75.75 0 0 1-1.5 0v-4h-4a.75.75 0 0 1 0-1.5h4v-4A.75.75 0 0 1 8 2.5Z"/></svg>
+      </button>
+    </div>
+    <div class="bar-row" id="config-row" hidden>
+      <label class="field">
+        <span class="field-label">模型</span>
+        <select id="model-select" class="select"></select>
+      </label>
+      <div class="meter" id="meter" hidden title="上下文用量">
+        <div class="meter-track"><div class="meter-fill" id="meter-fill"></div></div>
+        <span class="meter-text" id="meter-text"></span>
+      </div>
+    </div>
+  </header>
+
+  <main id="messages" class="messages" tabindex="0" aria-live="polite">
+    <div class="empty" id="empty">
+      <p class="empty-title">DSH Panel</p>
+      <p class="empty-hint">直接提问即可。它用的是你正在运行的 DSH —— 同一份记忆、同一份会话记录、同一套工具。</p>
+    </div>
+  </main>
+
+  <footer class="composer">
+    <div class="composer-box">
+      <textarea id="input" class="input" rows="1" placeholder="给 DSH 发条消息…（Enter 发送，Shift+Enter 换行）"></textarea>
+      <button id="send" class="send" type="button" title="发送" aria-label="发送">
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M2.2 7.3 13 2.2c.5-.2 1 .2.8.7l-5.1 10.8c-.2.5-1 .5-1.2 0L6 10.4a.8.8 0 0 0-.4-.4L2.2 8.5c-.5-.2-.5-1 0-1.2Z"/></svg>
+      </button>
+      <button id="stop" class="send stop" type="button" title="中断当前回合" aria-label="中断" hidden>
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.4" fill="currentColor"/></svg>
+      </button>
+    </div>
+    <div class="composer-foot">
+      <span id="hint" class="hint"></span>
+      <span id="usage-inline" class="hint mono"></span>
+    </div>
+  </footer>
+
+  <div id="permission" class="permission" hidden>
+    <div class="permission-title" id="permission-title">DSH 需要你的许可</div>
+    <div class="permission-body" id="permission-body"></div>
+    <div class="permission-actions" id="permission-actions"></div>
+  </div>
+
+  <style>
+:root {
+  --vscode-font-family: 'Segoe UI', system-ui, sans-serif;
+  --vscode-font-size: 13px;
+  --vscode-editor-font-family: Consolas, 'Courier New', monospace;
+  --vscode-sideBar-background: #f8f8f8;
+  --vscode-sideBar-foreground: #3b3b3b;
+  --vscode-foreground: #3b3b3b;
+  --vscode-descriptionForeground: #717171;
+  --vscode-panel-border: #e5e5e5;
+  --vscode-widget-border: #e5e5e5;
+  --vscode-input-background: #ffffff;
+  --vscode-input-foreground: #3b3b3b;
+  --vscode-input-border: #cecece;
+  --vscode-input-placeholderForeground: #767676;
+  --vscode-dropdown-background: #ffffff;
+  --vscode-dropdown-foreground: #3b3b3b;
+  --vscode-dropdown-border: #cecece;
+  --vscode-button-background: #005fb8;
+  --vscode-button-foreground: #ffffff;
+  --vscode-button-hoverBackground: #0258a8;
+  --vscode-button-secondaryBackground: #e5e5e5;
+  --vscode-button-secondaryForeground: #3b3b3b;
+  --vscode-button-secondaryHoverBackground: #cccccc;
+  --vscode-focusBorder: #005fb8;
+  --vscode-textLink-foreground: #005fb8;
+  --vscode-textCodeBlock-background: #f2f2f2;
+  --vscode-editor-background: #ffffff;
+  --vscode-editorWidget-background: #f8f8f8;
+  --vscode-icon-foreground: #3b3b3b;
+  --vscode-toolbar-hoverBackground: rgba(184, 184, 184, 0.31);
+  --vscode-list-hoverBackground: #e8e8e8;
+  --vscode-progressBar-background: #005fb8;
+  --vscode-charts-green: #388a34;
+  --vscode-charts-red: #e51400;
+  --vscode-charts-yellow: #bf8803;
+  --vscode-testing-iconPassed: #388a34;
+  --vscode-testing-iconFailed: #e51400;
+  --vscode-editorCursor-foreground: #000000;
+  --vscode-diffEditor-insertedLineBackground: rgba(155, 185, 85, 0.2);
+  --vscode-diffEditor-removedLineBackground: rgba(255, 0, 0, 0.2);
+  --vscode-inputValidation-warningBackground: #fff4ce;
+  --vscode-inputValidation-warningBorder: #bf8803;
+  --vscode-inputValidation-errorBorder: #e51400;
+}
+html, body { height: 100%; }
+</style>
+<script>
+window.__received = [];
+window.acquireVsCodeApi = function () {
+  return {
+    postMessage: function (message) { window.__received.push(message); },
+    getState: function () { return undefined; },
+    setState: function () {},
+  };
+};
+</script>
+<script nonce="hLCHrRyWPZknEwGmfTBhDf9KzVQXb9PL" src="main.js"></script>
+<script>
+setTimeout(function () { window.postMessage({"type":"status","state":"ready","detail":"已连上正在运行的 DSH"}, '*'); }, 150);
+setTimeout(function () { window.postMessage({"type":"config","configOptions":[{"id":"model","name":"模型","currentValue":"[\"opencode-go\",\"deepseek-v4.1-flash\"]","options":[{"group":"opencode-go","name":"opencode-go","options":[{"value":"[\"opencode-go\",\"deepseek-v4.1-flash\"]","name":"deepseek-v4.1-flash"},{"value":"[\"opencode-go\",\"deepseek-v4.1-pro\"]","name":"deepseek-v4.1-pro"}]},{"group":"anthropic","name":"anthropic","options":[{"value":"[\"anthropic\",\"claude-sonnet-4\"]","name":"claude-sonnet-4"}]}]}]}, '*'); }, 180);
+</script>
+</body>
+</html>
