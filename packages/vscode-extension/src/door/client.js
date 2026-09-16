@@ -15,6 +15,8 @@
 const net = require('node:net');
 const { EventEmitter } = require('node:events');
 
+const { buildPromptBlocks } = require('../dsh/blocks');
+
 /** ACP 协议版本（第 0 步实测：内核回的就是 1）。 */
 const PROTOCOL_VERSION = 1;
 
@@ -275,13 +277,14 @@ class DoorClient extends EventEmitter {
    * @param {string} sessionId
    * @param {string} text
    * @param {object} [options]
+   * @param {Array<object>} [options.attachments] 一起带上的编辑器上下文（当前文件/选中的代码）。
    * @param {AbortSignal} [options.signal]
    * @returns {Promise<{stopReason?: string}>}
    */
-  prompt(sessionId, text, { signal } = {}) {
+  prompt(sessionId, text, { attachments = [], signal } = {}) {
     return this.request(
       'session/prompt',
-      { sessionId, prompt: [{ type: 'text', text }] },
+      { sessionId, prompt: buildPromptBlocks(text, attachments) },
       { signal },
     );
   }

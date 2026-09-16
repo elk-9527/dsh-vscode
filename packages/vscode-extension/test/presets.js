@@ -19,7 +19,7 @@ const net = require('node:net');
 const path = require('node:path');
 
 const { DoorClient, readDoorMeta } = require('../src/door/client');
-const { ensureDoor, syncDoor } = require('./helpers/door');
+const { ensureDoor, syncDoor, inspectDoor, PORT, PROFILE, TEST_PROFILE } = require('./helpers/door');
 
 const ROOT = path.resolve(__dirname, '..');
 const BUILD = path.join(ROOT, 'build');
@@ -126,8 +126,8 @@ async function main() {
 
   const port = await freePort();
   const overlay = writeOverlay(port);
-  console.log(`\n用 profile=dshdoor、端口 ${port}、覆盖文件 ${path.relative(ROOT, overlay)}`);
-  console.log('（这样不用去抢 47821，也不会碰你桌面上那一个）');
+  console.log(`\n用 profile=${PROFILE}、端口 ${port}、覆盖文件 ${path.relative(ROOT, overlay)}`);
+  console.log(`（这样不用去抢 ${PORT}，也不会碰你桌面上那一个）`);
 
   section('0. 前置：门自带的配置里必须写明 provider/model');
   check(
@@ -148,8 +148,22 @@ async function main() {
 
   // 装的那份门必须跟源码一致 —— 否则这个套件就是在测旧代码（pnpm 对
   // `file:` 依赖有缓存，改了源码它可能压根不重装，实测踩过）。
-  const sync = syncDoor({ log: (level, text) => console.log(`  [${level}] ${text}`) });
-  check('测试档里装的门跟源码一致（不一致会自动重装）', sync.drift.length === 0 || sync.synced, sync.drift.join('、'));
+  //
+  // 但**只有测试档才自动重装**。用 `DSH_PANEL_PROFILE=desktop` 跑这个套件，
+  // 是为了在生产档上验一遍真实路径；那种时候绝不能顺手改用户的档，
+  // 只检查、只报告。（这条规矩是真踩出来的：早先它会拿 desktop 去装、
+  // 却对着 dshdoor 的路径比对，把生产档的依赖形态都换掉了。）
+  if (PROFILE === TEST_PROFILE) {
+    const sync = syncDoor({ log: (level, text) => console.log(`  [${level}] ${text}`) });
+    check('测试档里装的门跟源码一致（不一致会自动重装）', sync.drift.length === 0 || sync.synced, sync.drift.join('、'));
+  } else {
+    const info = inspectDoor(PROFILE);
+    console.log(`  [info] 跑的是 ${PROFILE} 档：按规矩**不自动改**它，只检查`);
+    check(`生产档 ${PROFILE} 里装上了门`, info.installed, info.path);
+    if (info.installed) {
+      console.log(`  [info] 装的是 ${info.version}；跟当前源码${info.drift.length ? `不一致（${info.drift.join('、')}）—— 源码比装的新，属于开发中的正常情况` : '逐字节一致'}`);
+    }
+  }
 
   const door = await ensureDoor({
     port,
