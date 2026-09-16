@@ -472,6 +472,66 @@ function assertionsScript(scene) {
       host.remove();
     }
 
+    // ── 11. 通用视觉体检（每个场景都跑）────────────────
+    // 这一段替代"用眼睛扫一遍"里**能机器判**的部分：文字被截断、元素横着溢出、
+    // 点不到的按钮、跑到面板外面的浮层。丑不丑机器判不了（那要等样稿），
+    // 但"挤坏了"必须每次都能自动发现。
+    var root = document.querySelector('.panel') || document.body;
+    var clipped = [];
+    var undersized = [];
+    var escaped = [];
+    var rootBox = root.getBoundingClientRect();
+
+    function scrollable(node) {
+      if (!node) return false;
+      var style = window.getComputedStyle(node);
+      return style.overflowX === 'auto' || style.overflowX === 'scroll';
+    }
+
+    root.querySelectorAll('*').forEach(function (node) {
+      var style = window.getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return;
+      var box = node.getBoundingClientRect();
+      if (box.width === 0 && box.height === 0) return;
+
+      // 1) 文字被横向截断（允许本来就该横向滚动的：代码块、pre）。
+      var isText = !node.children.length && (node.textContent || '').trim().length > 0;
+      var exempt = node.tagName === 'PRE' || scrollable(node) || scrollable(node.parentElement);
+      if (isText && !exempt && node.scrollWidth > node.clientWidth + 1) {
+        clipped.push(node.className || node.tagName);
+      }
+
+      // 2) 能点的东西太小（按钮、关闭叉）：手指/鼠标都难点。
+      if (node.tagName === 'BUTTON' && (box.height < 20 || box.width < 20)) {
+        undersized.push((node.id || node.className || 'button') + ' ' + Math.round(box.width) + '×' + Math.round(box.height));
+      }
+
+      // 3) 跑到面板外面的浮层（右边或下边露出去）。
+      if (style.position === 'absolute' || style.position === 'fixed') {
+        if (box.right > rootBox.right + 1 || box.bottom > rootBox.bottom + 1) {
+          escaped.push(node.className || node.tagName);
+        }
+      }
+    });
+
+    assert('没有文字被横向截断', clipped.length === 0, clipped.join(', '));
+    assert('按钮都点得到（不小于 20×20）', undersized.length === 0, undersized.join(', '));
+    assert('没有浮层跑到面板外面', escaped.length === 0, escaped.join(', '));
+
+    // 4) 相邻消息之间的间距应该一致（不一致会看起来"有的挤有的松"）。
+    // 注意门槛是 2：消息的类名是 'msg msg-user' / 'msg msg-assistant'，
+    // 一开始我写了 >= 3，结果大多数场景只有 2 条，这条检查从来没跑过（死代码）。
+    var bubbles = [].slice.call(document.querySelectorAll('.msg'));
+    if (bubbles.length >= 2) {
+      var gaps = [];
+      for (var b = 1; b < bubbles.length; b += 1) {
+        gaps.push(Math.round(bubbles[b].getBoundingClientRect().top - bubbles[b - 1].getBoundingClientRect().bottom));
+      }
+      var min = Math.min.apply(null, gaps);
+      var max = Math.max.apply(null, gaps);
+      assert('消息之间的间距一致（最大最小差不超过 8px）', max - min <= 8, '间距 ' + gaps.join('/') + 'px');
+    }
+
     finish();
   }
 

@@ -134,8 +134,11 @@ node test/resume.js      # 断线后 session/resume 到底能不能把上下文�
 node test/presets.js     # 模式（agent preset）：新会话挂上、恢复会话补挂、工具没丢
 node test/smoke.js       # 端到端：协议、真回合、工具调用、中断、切模型、多轮、
                          #   以及编辑器上下文（选中代码里的暗号 + 带进来的文件里的暗号）
-node tools/uitest.js     # 无头 Chrome 里对界面做 250 项断言（7 个场景：溢出/重叠/交互/注入/附件/压力）
+node tools/uitest.js     # 无头 Chrome 里对界面做 275 项断言（7 个场景，含通用视觉体检：
+                         # 文字截断 / 按钮太小 / 浮层跑出面板 / 消息间距不一致）
 node tools/uitest.js context  # 只跑「带编辑器上下文」那个场景
+node tools/shots.js      # 把每个场景 × 深/浅主题拍成图（build/shots/*.png），
+                         # 用于"用眼睛看"和改动前后对比。加场景名可只拍一个。
 node tools/build-vsix.js # 打包成 vsix
 node tools/vscode-check.js  # **真 VS Code 窗口里**的自检：开一个隔离窗口（自己的 user-data-dir 和
                             # extensions-dir，不碰你正开着的窗口），用 DSH_PANEL_AUTOFOCUS=1 让它
