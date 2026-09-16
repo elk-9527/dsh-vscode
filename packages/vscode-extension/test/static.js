@@ -308,6 +308,85 @@ check(
   'CSS 里没有 .attachments[hidden] 规则（空的时候会占一块位置）',
 );
 
+// ── 装机之后不激活就全白搭 ────────────────────────────────────
+// VS Code 是在**启动时**读 package.json 的 contributes 并注册命令的：
+// 里面有一处不一致（菜单指向没声明的命令、图标名不存在、JSON 写坏），
+// 它不会报错给你看，只会"那个按钮没反应/那一项不出现"。
+// 这里把「打进 vsix 的东西」逐个解析一遍，把这类问题挡在装机之前。
+
+const shipped = extensionManifest.contributes;
+const declared = new Set(commands);
+
+check(
+  '每个命令都声明了 title',
+  shipped.commands.every((item) => typeof item.title === 'string' && item.title.length > 0),
+  shipped.commands.filter((item) => !item.title).map((item) => item.command).join(', '),
+);
+check(
+  '每个命令的标题都带 DSH 前缀（命令面板里才找得到）',
+  shipped.commands.every((item) => item.title.startsWith('DSH')),
+  shipped.commands.map((item) => item.title).join(' | '),
+);
+{
+  const dangling = [];
+  for (const [menu, items] of Object.entries(shipped.menus)) {
+    for (const item of items) {
+      if (!declared.has(item.command)) dangling.push(`${menu}:${item.command}`);
+    }
+  }
+  check('菜单里指向的命令都真的声明过', dangling.length === 0, dangling.join(', '));
+}
+{
+  // 图标必须是 VS Code 内置的 codicon 名（写错就是不显示，且毫无提示）。
+  const icons = shipped.commands.map((item) => item.icon).filter(Boolean);
+  check(
+    '图标都写成 VS Code 的 $(名字) 形式',
+    icons.every((icon) => /^\$\([a-z][a-z0-9-]*[a-z0-9]\)$/.test(icon)),
+    icons.join(' | '),
+  );
+  check('没有两个命令抢同一个图标名（抢了会有一个看起来像重复按钮）', icons.length >= 2);
+}
+{
+  // when 里用的上下文键必须是真实存在的，写错等于该条件永远为假。
+  // 按子句解析：`a == b` 只看左边的键，`a` 单独出现时它自己就是键。
+  const knownWhen = new Set(['editorHasSelection', 'view', 'resourceScheme', 'inDiffEditor']);
+  const unknown = [];
+  for (const items of Object.values(shipped.menus)) {
+    for (const item of items) {
+      if (!item.when) continue;
+      for (const clause of item.when.split(/\s*(?:&&|\|\|)\s*/)) {
+        const comparison = /^([\w.]+)\s*(?:==|!=)\s*(.+)$/.exec(clause.trim());
+        const key = comparison ? comparison[1] : clause.trim();
+        if (!key) continue;
+        if (!knownWhen.has(key)) unknown.push(`${item.command}: ${key}`);
+      }
+    }
+  }
+  check('when 条件里没有生造的上下文键', unknown.length === 0, unknown.join(', '));
+}
+{
+  // 真正会被 VS Code 加载的文件：任何语法错误都会让整套功能静默消失。
+  const { execFileSync } = require('node:child_process');
+  const files = ['src/extension.js', 'src/panel/view.js', 'src/panel/html.js', 'src/door/client.js',
+    'src/door/locate.js', 'src/dsh/session.js', 'src/dsh/blocks.js', 'media/main.js', 'media/markdown.js'];
+  const broken = [];
+  for (const file of files) {
+    try {
+      execFileSync(process.execPath, ['--check', path.join(ROOT, file)], { stdio: 'pipe' });
+    } catch (error) {
+      broken.push(`${file}: ${String(error.stderr || error.message).split('\n')[0]}`);
+    }
+  }
+  check('会被加载的每个 js 文件都能解析', broken.length === 0, broken.join(' | '));
+}
+{
+  // vsix 里带的文件必须齐全 —— 少一个（比如忘了 media/markdown.js），
+  // 装上去是个残废扩展，而且只在运行时才发现。
+  const vsixFiles = ['package.json', 'README.md', 'src/extension.js', 'media/main.js', 'media/main.css', 'media/markdown.js', 'media/dsh.svg'];
+  const missing = vsixFiles.filter((file) => !fs.existsSync(path.join(ROOT, file)));
+  check('打包清单里的文件都在', missing.length === 0, missing.join(', '));
+}
+
 console.log(`\n${'═'.repeat(56)}`);
 if (failed === 0) console.log(`✅ 全部通过：${passed} 项检查`);
 else {
