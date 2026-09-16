@@ -19,7 +19,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DoorClient } = require('../src/door/client');
 const { DshSession, flattenChoices } = require('../src/dsh/session');
-const { probePort } = require('../src/door/locate');
+const { ensureDoor } = require('./helpers/door');
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.DSH_PANEL_PORT || 47821);
@@ -83,11 +83,9 @@ async function runOnce(round) {
   const sample = prepareScratch();
   console.log(`\n══ 第 ${round} 轮 ══════════════════════════════════════════════`);
 
-  // ── 1. 端口 ────────────────────────────────────────
+  // ── 1. 端口（由 main 里的 ensureDoor 保证已经开着）────
   section('1. 门的端口');
-  const up = await probePort(HOST, PORT);
-  check(`端口 ${PORT} 可连`, up, up ? '' : '没有 DSH 在跑？');
-  if (!up) throw new Error('门没开，后面的测试没法做');
+  check(`端口 ${PORT} 可连`, true, '（内核由测试自己按需拉起）');
 
   // ── 2. 握手 ────────────────────────────────────────
   section('2. ACP 握手');
@@ -238,6 +236,15 @@ async function runOnce(round) {
 }
 
 (async () => {
+  // 内核没开就自己拉一个；用它自己的内核，跑完负责收摊（不留孤儿进程）。
+  let door;
+  try {
+    door = await ensureDoor({ host: HOST, port: PORT, log });
+  } catch (error) {
+    console.error(`💥 起不来内核：${error.message}`);
+    process.exit(1);
+  }
+
   for (let round = 1; round <= REPEAT; round += 1) {
     try {
       await runOnce(round);
@@ -247,6 +254,7 @@ async function runOnce(round) {
       console.log(`\n💥 第 ${round} 轮异常：${error.stack || error.message}`);
     }
   }
+  door.stop();
 
   console.log(`\n${'═'.repeat(56)}`);
   if (failed === 0) {

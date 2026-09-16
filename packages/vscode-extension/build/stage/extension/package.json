@@ -15,7 +15,8 @@
   ],
   "main": "./src/extension.js",
   "activationEvents": [
-    "onView:dshPanel.chat"
+    "onView:dshPanel.chat",
+    "onStartupFinished"
   ],
   "contributes": {
     "viewsContainers": {

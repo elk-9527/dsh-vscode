@@ -39,10 +39,12 @@
     busy: false,
     /** 用户是否贴在底部（决定要不要自动滚动）。 */
     pinned: true,
-    /** 每帧最多渲染一次。 */
-    pendingRender: new WeakMap(),
     configOptions: [],
   };
+
+  /** entry → 'body' | 'think'，攒着待渲染的内容。 */
+  const pendingRenders = new Map();
+  let flushScheduled = false;
 
   // ── 与扩展通信 ──────────────────────────────────────
 
@@ -237,19 +239,34 @@
   }
 
   /**
-   * 一帧只渲染一次。流式吐字时每个 chunk 都改 DOM 会卡，
-   * 攒到下一帧统一改，视觉上仍然是连续的。
+   * 攒到下一帧统一渲染：流式吐字时每个 chunk 都改 DOM 会卡。
+   *
+   * 这里必须**双重兜底**：正常情况用 requestAnimationFrame（跟屏幕刷新对齐，
+   * 看着最顺滑），但面板被折叠或隐藏时浏览器会把 rAF 完全停掉 —— 只靠 rAF
+   * 的话，后台跑完的回合会一直不显示，要等用户切回来看才补上。定时器兜住它。
    */
   function scheduleRender(entry, which) {
-    if (state.pendingRender.get(entry) === which) return;
-    state.pendingRender.set(entry, which);
-    requestAnimationFrame(() => {
-      const target = state.pendingRender.get(entry);
-      state.pendingRender.delete(entry);
-      if (target === 'body') entry.body.innerHTML = renderMarkdown(entry.text) + caret();
-      else if (target === 'think') entry.thinkBody.textContent = entry.thinkText;
-      scrollIfPinned();
-    });
+    pendingRenders.set(entry, which);
+    if (flushScheduled) return;
+    flushScheduled = true;
+    requestAnimationFrame(flushRenders);
+    setTimeout(flushRenders, 120);
+  }
+
+  function flushRenders() {
+    if (pendingRenders.size === 0) {
+      flushScheduled = false;
+      return;
+    }
+    flushScheduled = false;
+    for (const [entry, which] of pendingRenders) {
+      // 已经收尾的条目不再补渲染，否则会把光标又画回去。
+      if (entry.finished) continue;
+      if (which === 'body') entry.body.innerHTML = renderMarkdown(entry.text) + caret();
+      else if (which === 'think') entry.thinkBody.textContent = entry.thinkText;
+    }
+    pendingRenders.clear();
+    scrollIfPinned();
   }
 
   function caret() {
@@ -259,6 +276,7 @@
   function finishAssistant(id, status) {
     const entry = state.messages.get(id);
     if (!entry) return;
+    entry.finished = true;
     entry.body.innerHTML = renderMarkdown(entry.text);
     if (status === 'cancelled') {
       entry.node.appendChild(note('（已中断）'));
@@ -562,118 +580,22 @@
     post({ type: 'openLink', href: anchor.dataset.href });
   });
 
-  // ── 极简 Markdown ───────────────────────────────────
+  // ── Markdown ────────────────────────────────────────
+  //
+  // 渲染器在 media/markdown.js 里，是纯函数、不碰 DOM —— 这样它能在 Node 里
+  // 被单测（正确性、注入安全、真实耗时）。无头浏览器里按帧计时受虚拟时钟影响，
+  // 量出来恒为 0，会掩盖真实的性能问题，所以那部分测试必须在 Node 里做。
 
-  function escapeHtml(text) {
-    return String(text)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+  const markdown = window.DshMarkdown;
+  if (!markdown) {
+    // 脚本没加载上时要说人话，而不是让整个面板静默失效。
+    document.getElementById('status-text').textContent = '界面脚本缺失：markdown.js 没加载';
   }
+  const escapeHtml = markdown ? markdown.escapeHtml : (text) => String(text);
+  const renderMarkdown = markdown ? markdown.renderMarkdown : (text) => escapeHtml(text);
 
   function cssEscape(value) {
     return String(value).replace(/["\\]/g, '\\$&');
-  }
-
-  /**
-   * 只支持够用的一小撮语法：代码块、行内代码、粗体、斜体、链接、
-   * 标题、无序/有序列表、引用。**先整体转义再加工**，所以不会被执行。
-   */
-  function renderMarkdown(raw) {
-    if (!raw) return '';
-    const lines = String(raw).replace(/\r\n?/g, '\n').split('\n');
-    const out = [];
-    let i = 0;
-
-    while (i < lines.length) {
-      const line = lines[i];
-
-      // 围栏代码块（未闭合也照收——流式输出时代码不会闪来闪去）
-      const fence = line.match(/^\s*```([\w+-]*)\s*$/);
-      if (fence) {
-        const lang = fence[1] || '';
-        const buf = [];
-        i += 1;
-        while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) {
-          buf.push(lines[i]);
-          i += 1;
-        }
-        if (i < lines.length) i += 1;
-        const cls = lang ? ` class="language-${escapeHtml(lang)}"` : '';
-        out.push(`<pre><code${cls}>${escapeHtml(buf.join('\n'))}</code></pre>`);
-        continue;
-      }
-
-      const heading = line.match(/^(#{1,6})\s+(.*)$/);
-      if (heading) {
-        const level = Math.min(heading[1].length + 1, 6);
-        out.push(`<h${level}>${inline(heading[2])}</h${level}>`);
-        i += 1;
-        continue;
-      }
-
-      if (/^\s*>\s?/.test(line)) {
-        const buf = [];
-        while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
-          buf.push(lines[i].replace(/^\s*>\s?/, ''));
-          i += 1;
-        }
-        out.push(`<blockquote>${buf.map(inline).join('<br>')}</blockquote>`);
-        continue;
-      }
-
-      if (/^\s*([-*+]|\d+[.)])\s+/.test(line)) {
-        const ordered = /^\s*\d+[.)]\s+/.test(line);
-        const items = [];
-        while (i < lines.length && /^\s*([-*+]|\d+[.)])\s+/.test(lines[i])) {
-          items.push(lines[i].replace(/^\s*([-*+]|\d+[.)])\s+/, ''));
-          i += 1;
-        }
-        const tag = ordered ? 'ol' : 'ul';
-        out.push(`<${tag}>${items.map((item) => `<li>${inline(item)}</li>`).join('')}</${tag}>`);
-        continue;
-      }
-
-      if (!line.trim()) {
-        i += 1;
-        continue;
-      }
-
-      const para = [];
-      while (
-        i < lines.length &&
-        lines[i].trim() &&
-        !/^\s*```/.test(lines[i]) &&
-        !/^(#{1,6})\s+/.test(lines[i]) &&
-        !/^\s*>\s?/.test(lines[i]) &&
-        !/^\s*([-*+]|\d+[.)])\s+/.test(lines[i])
-      ) {
-        para.push(lines[i]);
-        i += 1;
-      }
-      out.push(`<p>${para.map(inline).join('<br>')}</p>`);
-    }
-    return out.join('');
-  }
-
-  /** 行内语法。输入是**未转义**的原文，输出是转义后的 HTML。 */
-  function inline(text) {
-    const tokens = [];
-    // 先把行内代码抠出来，免得里面的 `*` `_` 被当成强调符号。
-    let work = text.replace(/`([^`]+)`/g, (_, code) => {
-      tokens.push(`<code>${escapeHtml(code)}</code>`);
-      return `\u0000${tokens.length - 1}\u0000`;
-    });
-    work = escapeHtml(work);
-    work = work.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, label, href) => {
-      // 只允许 http/https，别的（javascript:、data:）一律按纯文本处理。
-      return `<a data-href="${href}" href="#">${label}</a>`;
-    });
-    work = work.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-    work = work.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
-    work = work.replace(/\u0000(\d+)\u0000/g, (_, index) => tokens[Number(index)] || '');
-    return work;
   }
 
   // ── 启动 ────────────────────────────────────────────

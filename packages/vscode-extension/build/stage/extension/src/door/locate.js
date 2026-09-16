@@ -57,18 +57,40 @@ function delay(ms) {
  * @param {(level: string, message: string) => void} options.log
  * @returns {{child: import('node:child_process').ChildProcess, dispose: () => void}}
  */
+/** profile 名只允许这些字符 —— 它会进命令行，不能有注入的空间。 */
+const SAFE_PROFILE = /^[A-Za-z0-9._-]+$/;
+
+/** 按 Windows 命令行的规则给参数加引号（只在需要时加）。 */
+function quoteArg(value) {
+  const text = String(value);
+  return /[\s"&|<>^]/.test(text) ? `"${text.replace(/"/g, '\\"')}"` : text;
+}
+
 function spawnBackgroundDsh({ command, profile, log }) {
-  const args = ['--profile', profile, '--no-open', '--port', '0'];
+  if (!SAFE_PROFILE.test(String(profile))) {
+    throw new Error(`profile 名不合法：${profile}（只允许字母、数字、点、下划线、连字符）`);
+  }
+
+  // `--host 127.0.0.1` 是兜底加固：确保它的网页界面也只绑回环地址。
+  // `--port 0` 让系统随便挑一个网页端口 —— 我们走的是门，不用那个界面。
+  const args = ['--profile', profile, '--no-open', '--host', '127.0.0.1', '--port', '0'];
   log('info', `后台拉起 DSH：${command} ${args.join(' ')}`);
 
-  const child = spawn(command, args, {
-    // Windows 上 dsh 是 .cmd 垫片，必须过一层 shell 才找得到。
-    shell: true,
-    windowsHide: true,
-    stdio: 'ignore',
-    // 不要 detached：让子进程跟着扩展宿主走，扩展一停就一起收摊。
-    detached: false,
-  });
+  /*
+   * 为什么不直接用 `spawn(command, args, { shell: true })`：
+   * Windows 上 dsh 是个 .cmd 垫片，确实需要一层 shell 才找得到，但
+   * 「shell:true + 参数数组」在 Node 里已经废弃（DEP0190），因为它只是把
+   * 参数拼成字符串、并不转义 —— profile 名来自设置项，那就是一个注入点。
+   * 这里改成显式调用 cmd.exe，并且参数自己加引号。
+   */
+  const child =
+    process.platform === 'win32'
+      ? spawn(
+          process.env.ComSpec || 'cmd.exe',
+          ['/d', '/s', '/c', [quoteArg(command), ...args.map(quoteArg)].join(' ')],
+          { windowsHide: true, stdio: 'ignore', detached: false },
+        )
+      : spawn(command, args, { stdio: 'ignore', detached: false });
 
   let disposed = false;
   child.on('error', (error) => {
@@ -85,13 +107,35 @@ function spawnBackgroundDsh({ command, profile, log }) {
       if (disposed) return;
       disposed = true;
       try {
-        child.kill();
+        killTree(child);
         log('info', '已停掉本扩展拉起的后台 DSH');
       } catch (error) {
         log('warn', `停后台 DSH 失败：${error.message}`);
       }
     },
   };
+}
+
+/**
+ * 杀掉整棵进程树。
+ *
+ * 为什么不能只用 `child.kill()`：Windows 上 `dsh` 是个 .cmd 垫片，
+ * shell:true 会多包一层 cmd.exe，而后台真正干活的是它下面的
+ * 「DSH Desktop.exe」。`child.kill()` 只杀得到外壳，真正的内核会变成
+ * 孤儿进程继续占着端口和内存 —— 用户看不见，但确实还在跑。
+ * 所以这里按 pid 连子孙一起杀。
+ */
+function killTree(child) {
+  if (!child || !child.pid) return;
+  if (process.platform === 'win32') {
+    require('node:child_process').execFileSync(
+      'taskkill',
+      ['/PID', String(child.pid), '/T', '/F'],
+      { stdio: 'ignore', timeout: 10000 },
+    );
+    return;
+  }
+  child.kill('SIGTERM');
 }
 
 module.exports = { probePort, waitForPort, spawnBackgroundDsh, delay };

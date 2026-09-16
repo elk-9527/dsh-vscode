@@ -1,3 +1,3 @@
-2026/09/16-23:37:37.345 76c0 Reusing MANIFEST D:\dsh-vscode\packages\vscode-extension\build\chrome-profile\Default\Local Storage\leveldb/MANIFEST-000001
-2026/09/16-23:37:37.349 76c0 Recovering log #3
-2026/09/16-23:37:37.351 76c0 Reusing old log D:\dsh-vscode\packages\vscode-extension\build\chrome-profile\Default\Local Storage\leveldb/000003.log 
+2026/09/16-23:45:05.985 4158 Reusing MANIFEST D:\dsh-vscode\packages\vscode-extension\build\chrome-profile\Default\Local Storage\leveldb/MANIFEST-000001
+2026/09/16-23:45:05.989 4158 Recovering log #3
+2026/09/16-23:45:05.991 4158 Reusing old log D:\dsh-vscode\packages\vscode-extension\build\chrome-profile\Default\Local Storage\leveldb/000003.log 

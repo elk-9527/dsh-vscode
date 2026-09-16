@@ -12,3 +12,6 @@ spike/scratch/
 
 # 打包产物（可随时用 npm pack 重新生成）
 *.tgz
+
+# 扩展的构建与测试产物：vsix、界面预览页、截图、无头浏览器临时配置
+packages/vscode-extension/build/

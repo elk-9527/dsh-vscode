@@ -60,6 +60,24 @@ function activate(context) {
     }),
     { dispose: () => view.dispose() },
   );
+
+  /*
+   * 自检开关：设了 DSH_PANEL_AUTOFOCUS=1 时，启动后自动把面板打开一次。
+   *
+   * 为什么需要它：这个面板平时要点活动栏图标才会出现，而「点一下」这件事
+   * 在无人值守时做不到。有了这个开关，就能在真编辑器里验证「装上了 → 激活了
+   * → 面板真的能展开 → 真的连上了 DSH」整条路，而不是只靠我猜。
+   * 不设这个环境变量时完全没有影响。
+   */
+  if (process.env.DSH_PANEL_AUTOFOCUS === '1') {
+    log('info', '自检模式：1.5 秒后自动打开面板（DSH_PANEL_AUTOFOCUS=1）');
+    setTimeout(() => {
+      vscode.commands.executeCommand(`${VIEW_ID}.focus`).then(
+        () => log('info', '自检：已请求展开面板'),
+        (error) => log('error', `自检：展开面板失败 ${error && error.message ? error.message : error}`),
+      );
+    }, 1500);
+  }
 }
 
 function deactivate() {

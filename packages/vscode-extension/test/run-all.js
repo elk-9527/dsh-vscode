@@ -6,10 +6,13 @@
  * 用法：
  *   node test/run-all.js           # 快速套件（不需要 DSH，不需要浏览器）
  *   node test/run-all.js --ui      # 再加上真浏览器里的界面断言
- *   node test/run-all.js --all     # 再加上需要 DSH 在跑的端到端测试
+ *   node test/run-all.js --all     # 再加上需要真 DSH 进程的测试
  *
  * 分层是刻意的：静态与单测秒级、随时能跑；需要外部依赖的放后面，
  * 这样改一行代码能马上知道有没有踩坏东西。
+ *
+ * 顺序也有讲究：兜底测试要求 47821 是空着的，所以它排在会自己拉起内核的
+ * 面板层/端到端之前 —— 那两组用完会把内核收干净，不留孤儿进程。
  */
 
 const path = require('node:path');
@@ -23,9 +26,10 @@ const withDsh = args.includes('--all');
 const suites = [
   { name: '静态契约', file: 'test/static.js', always: true },
   { name: 'Markdown 渲染器', file: 'test/markdown.js', always: true },
-  { name: '面板层（假 vscode + 真门）', file: 'test/panel.js', always: true },
   { name: '界面（真浏览器）', file: 'tools/uitest.js', always: false, needs: withUi, hint: '加 --ui 才跑' },
-  { name: '端到端（真 DSH）', file: 'test/smoke.js', always: false, needs: withDsh, hint: '加 --all 才跑（需要 dsh 在 47821 开门）' },
+  { name: '兜底拉起（真进程）', file: 'test/fallback.js', always: false, needs: withDsh, hint: '加 --all 才跑（要求 47821 空着）' },
+  { name: '面板层（假 vscode + 真门）', file: 'test/panel.js', always: true },
+  { name: '端到端（真 DSH）', file: 'test/smoke.js', always: false, needs: withDsh, hint: '加 --all 才跑' },
 ];
 
 const results = [];

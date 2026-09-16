@@ -70,6 +70,7 @@ require.cache['vscode-mock'] = {
 };
 
 const { DshPanelView } = require('../src/panel/view');
+const { ensureDoor } = require('./helpers/door');
 
 // ── 断言小工具 ──────────────────────────────────────────
 
@@ -137,6 +138,10 @@ function typesOf(items) {
   const log = (level, message) => {
     if (process.env.DSH_PANEL_TEST_VERBOSE) console.log(`     [${level}] ${message}`);
   };
+
+  // 内核没开就自己拉一个（跑完负责收摊）。「自动拉起」那条路另有
+  // test/fallback.js 专测，所以这里配置里的 autoStart 是关的，免得两处都拉进程。
+  const door = await ensureDoor({ log });
 
   section('1. 视图注册与 HTML 生成');
   const panel = new DshPanelView({ extensionUri: { fsPath: 'D:\\dsh-vscode\\packages\\vscode-extension' }, log });
@@ -217,6 +222,7 @@ function typesOf(items) {
 
   section('8. 收摊');
   panel.dispose();
+  door.stop();
   check('dispose 后能再建面板', true);
 
   console.log(`\n${'═'.repeat(56)}`);
