@@ -18,14 +18,29 @@ VS Code 侧边栏（本扩展）
 ```
 
 - 门**只监听本机回环地址**，不接受外部连接。
-- 桌面端没在跑时，扩展会按你的设置自动在后台拉起一个 DSH。它和桌面端
-  **共用同一份 `$DSH_HOME`**，所以记忆和会话记录仍然是同一份，不是另立门户。
+- 桌面端没在跑时，扩展会自动在后台拉起一个 DSH，用的是**你桌面端那一档**
+  （`dshPanel.fallbackProfile`，默认 `desktop`），所以记忆、技能、插件完全一致，
+  只是没有窗口。它和桌面端**共用同一份 `$DSH_HOME`**，记忆和会话记录仍然是同一份。
+
+### 门要装进哪个档
+
+门插件装在哪个 profile 里，面板就连得上哪个 profile 的 DSH。
+本项目把它装进了用户的 `desktop` 档（记录与卸载方法见 `docs/第1步-装进桌面端.md`），
+于是「先开桌面端、再开 VS Code」时，面板连的就是桌面端那个**正在跑的进程**。
+
+**注意**：插件是在内核启动时加载的。装完之后，已经在跑的桌面端不会立刻有门 ——
+要么重启一次桌面端（得到一个进程、一个大脑的最优状态），
+要么就让扩展自己拉一个后台内核（同一档、同一份记忆，只是多一个进程）。
 
 ## 用法
 
 1. 点侧边栏的 DSH 图标（活动栏里那个对话气泡）。
 2. 直接提问。Enter 发送，Shift+Enter 换行。
 3. 顶栏是模型下拉与上下文用量；右上角是「新建对话」与「重新连接」。
+4. 连接中途断掉（比如 DSH 重启了）不用管：下次发送会自动重连，
+   并**自动接回原来那个会话**（ACP 的 `session/resume` 实测保上下文）。
+   万一接不回来（内核里已经没了），面板会明确告诉你「上面那段它不记得了」，
+   而不是悄悄换成一段没有记忆的新对话。
 
 ## 设置
 
@@ -34,7 +49,7 @@ VS Code 侧边栏（本扩展）
 | `dshPanel.host` | `127.0.0.1` | 「门」的监听地址 |
 | `dshPanel.port` | `47821` | 「门」的端口，要和门插件里写的保持一致 |
 | `dshPanel.autoStart` | `true` | 连不上时自动在后台拉起一个 DSH |
-| `dshPanel.fallbackProfile` | `dshdoor` | 后台拉起时用哪个 profile（里面要装好门插件） |
+| `dshPanel.fallbackProfile` | `desktop` | 后台拉起时用哪个 profile（里面要装好门插件）。默认就是用户自己那一档 |
 | `dshPanel.dshCommand` | `dsh` | `dsh` 命令的名字或完整路径 |
 | `dshPanel.provider` / `dshPanel.model` | 空 | 新会话的初始模型，留空由内核决定 |
 | `dshPanel.cwd` | 空 | 新会话的工作目录，留空用当前工作区 |
@@ -66,15 +81,39 @@ VS Code 侧边栏（本扩展）
 
 扩展是**纯 JavaScript、零运行时依赖、无构建步骤** —— 改完文件直接重载窗口即可。
 
+一条命令跑完全部测试（内核没开的话，测试会自己按需拉起、跑完自己收）：
+
 ```powershell
-node test/static.js     # 静态契约：id、消息协议、CSS 类、零硬编码颜色
-node test/panel.js      # 面板层集成测试（注入假 vscode，连真的门）
-node test/smoke.js      # 端到端：协议、回合、中断、切模型
-node tools/build-vsix.mjs
+node test/run-all.js        # 快速套件：静态契约 + Markdown 单测 + 面板层，约 10s
+node test/run-all.js --ui   # 再加上真浏览器里的界面断言（需要 Chrome）
+node test/run-all.js --all  # 再加上真 DSH 进程的兜底拉起与端到端，约 50s
 ```
 
-测试需要一个 DSH 在 47821 上开门：
+单独跑某个套件：
 
 ```powershell
-dsh --profile dshdoor --no-open --port 0
+node test/static.js      # 静态契约：HTML id ↔ 取元素、消息协议双向、CSS 类、零硬编码颜色
+                         #   以及「扩展默认端口/主机 = 门实际监听端口/主机」这类跨文件约定
+node test/markdown.js    # Markdown 渲染器：语法、注入安全、病态输入不死循环、真实耗时
+node test/panel.js       # 面板层集成：注入假 vscode，连真的门
+node test/fallback.js    # 兜底路径：桌面端没在跑时能否自己拉起来、收摊能否杀干净
+node test/resume.js      # 断线后 session/resume 到底能不能把上下文接回来（带对照组）
+node test/smoke.js       # 端到端：协议、真回合、工具调用、中断、切模型、多轮
+node tools/uitest.js     # 无头 Chrome 里对界面做 100+ 项断言（溢出/重叠/交互/注入）
+node tools/build-vsix.js # 打包成 vsix
+```
+
+调试用的自检开关：设了环境变量 `DSH_PANEL_AUTOFOCUS=1` 再启动 VS Code，
+扩展会自己把面板展开一次 —— 这样在无人值守时也能验证「装上 → 激活 → 开面板 → 连上」
+整条链路，不用手点。
+
+```powershell
+$env:DSH_PANEL_AUTOFOCUS='1'; code --new-window .
+```
+
+测试用的档、端口、命令都可以用环境变量覆盖（默认指向 `dshdoor` 这个测试档，
+**刻意不用 `desktop`** —— 测试不该有权限去拉起你真实的那一档）：
+
+```powershell
+$env:DSH_PANEL_PROFILE='dshdoor'; $env:DSH_PANEL_PORT='47821'; node test/run-all.js --all
 ```

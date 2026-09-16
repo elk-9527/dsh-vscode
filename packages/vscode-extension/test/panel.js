@@ -139,6 +139,9 @@ function typesOf(items) {
     if (process.env.DSH_PANEL_TEST_VERBOSE) console.log(`     [${level}] ${message}`);
   };
 
+  // 断线接回测试要用一个不容易被模型「猜中」的数字。
+  const MARKER = String(1000 + Math.floor(Math.random() * 8999));
+
   // 内核没开就自己拉一个（跑完负责收摊）。「自动拉起」那条路另有
   // test/fallback.js 专测，所以这里配置里的 autoStart 是关的，免得两处都拉进程。
   const door = await ensureDoor({ log });
@@ -220,7 +223,47 @@ function typesOf(items) {
   await panel.onWebviewMessage({ type: 'send', text: '说一句：收到。' });
   check('之后仍能收到回复', view.messages.some((item) => item.message.type === 'done'));
 
-  section('8. 收摊');
+  section('8. 断线：必须能自动接回上下文');
+  // 这是真实会遇到的场景：DSH 桌面端被关掉/重启，而面板还开着。
+  // 实测 session/resume 有效（test/resume.js），所以面板不该开一个没记忆的新会话 ——
+  // 那样用户会以为它还记着上面那段对话。
+  const beforeDrop = panel.session.sessionId;
+  await panel.onWebviewMessage({ type: 'send', text: `记住数字 ${MARKER}，只回答「已记住」。` });
+  check('断线前这一段能正常跑完', view.messages.some((item) => item.message.type === 'done'));
+
+  const dropIndex = view.messages.length;
+  panel.client.close(); // 掐断连接，等价于内核没了
+  await new Promise((resolve) => setTimeout(resolve, 600));
+
+  const afterDrop = view.messages.slice(dropIndex).map((item) => item.message);
+  check(
+    '断线被界面看见了',
+    afterDrop.some((item) => item.type === 'status' && item.state === 'error' && /断开/.test(item.detail || '')),
+    JSON.stringify(afterDrop.map((i) => i.type)),
+  );
+  check(
+    '断线后会解除「正在回答」状态（否则停止按钮会一直转）',
+    afterDrop.some((item) => item.type === 'busy' && item.busy === false),
+    JSON.stringify(afterDrop),
+  );
+  check('断线后会话被放掉，下次发送会重连', !panel.session, String(panel.session));
+
+  const resumeIndex = view.messages.length;
+  await panel.onWebviewMessage({ type: 'send', text: '我刚才让你记住的数字是多少？只回答数字。' });
+  check('重连后拿回了会话', Boolean(panel.session && panel.session.sessionId));
+  check(
+    '拿回的是原来那个会话（不是悄悄开了个新的）',
+    panel.session.sessionId === beforeDrop,
+    `${beforeDrop} → ${panel.session.sessionId}`,
+  );
+  const resumeMessages = view.messages.slice(resumeIndex).map((item) => item.message);
+  check(
+    '上下文真的接回来了（它答得出断线前那个数字）',
+    resumeMessages.some((item) => item.type === 'text' && String(item.delta).includes(MARKER)),
+    JSON.stringify(resumeMessages.filter((i) => i.type === 'text').map((i) => i.delta)).slice(0, 200),
+  );
+
+  section('9. 收摊');
   panel.dispose();
   door.stop();
   check('dispose 后能再建面板', true);

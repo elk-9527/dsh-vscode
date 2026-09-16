@@ -101,6 +101,9 @@
       case 'error':
         addError(message.message);
         break;
+      case 'notice':
+        addNotice(message.text);
+        break;
       case 'reset':
         resetTranscript();
         break;
@@ -298,6 +301,20 @@
     div.className = 'msg msg-error';
     div.textContent = text;
     appendNode(div);
+  }
+
+  /**
+   * 一条居中的系统提示。
+   *
+   * 用在「有事发生了但不算错误」的地方，最要紧的一处是：断线后上下文
+   * 没能接回来时，必须让用户看见「上面那段它不记得了」—— 否则他会以为
+   * 它还记着，然后为它的「失忆」困惑半天。
+   */
+  function addNotice(text) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'msg msg-system';
+    wrapper.appendChild(note(text));
+    appendNode(wrapper);
   }
 
   // ── 工具卡片 ────────────────────────────────────────

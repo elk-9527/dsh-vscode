@@ -474,6 +474,22 @@ body {
   font-style: italic;
 }
 
+/* 居中的系统提示（例如「上面那段对话没能接回来」） */
+.msg-system {
+  display: flex;
+  justify-content: center;
+  padding: 2px 0;
+}
+
+.msg-system .msg-note {
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  max-width: 92%;
+  text-align: center;
+  font-style: normal;
+}
+
 /* ── 输入区 ─────────────────────────────────────────── */
 
 .composer {

@@ -1,0 +1,22 @@
+# 零污染验证用：把 ACP 门叠加到 desktop 档之上，但**不修改 desktop 档本身**。
+#
+# 用法：
+#   dsh --profile desktop --patch D:\dsh-vscode\spike\door-overlay-desktop.yml --no-open --host 127.0.0.1 --port 0
+#
+# 目的有两个：
+#   1. 验证「你完整的 13 个插件 + 门」这套组合能正常启动；
+#   2. 验证桌面端正在运行时，第二个同档内核能不能共存（插件会不会抢端口）。
+#
+# 这里用 47822 端口，避免和扩展默认的 47821 撞车。
+# name 指向 dshdoor 档里已经装好的那份门 —— 这样它依赖的
+# @agentclientprotocol/sdk 能就近解析到，不需要动 desktop 档。
+
+- insert:
+    - id: acp-door-probe
+      name: file:///C:/Users/Lenovo/.dsh/profiles/dshdoor/node_modules/dsh-acp-door/lib/index.js
+      config:
+        host: 127.0.0.1
+        port: 47822
+        provider: opencode-go
+        model: deepseek-v4.1-flash
+        preset: standard

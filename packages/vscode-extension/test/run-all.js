@@ -28,6 +28,7 @@ const suites = [
   { name: 'Markdown 渲染器', file: 'test/markdown.js', always: true },
   { name: '界面（真浏览器）', file: 'tools/uitest.js', always: false, needs: withUi, hint: '加 --ui 才跑' },
   { name: '兜底拉起（真进程）', file: 'test/fallback.js', always: false, needs: withDsh, hint: '加 --all 才跑（要求 47821 空着）' },
+  { name: '断线接回（真 DSH）', file: 'test/resume.js', always: false, needs: withDsh, hint: '加 --all 才跑' },
   { name: '面板层（假 vscode + 真门）', file: 'test/panel.js', always: true },
   { name: '端到端（真 DSH）', file: 'test/smoke.js', always: false, needs: withDsh, hint: '加 --all 才跑' },
 ];
@@ -46,18 +47,24 @@ for (const suite of suites) {
     stdio: 'inherit',
   });
   const ms = Date.now() - started;
+  // 退出码 2 = 套件自己说「现在没法测」（例如端口被占），不算失败，
+  // 但要在汇总里单独列出来，不能假装它通过了。
   results.push({ name: suite.name, code: result.status, ms });
 }
 
 console.log(`\n${'═'.repeat(56)}`);
 console.log('汇总：');
 for (const item of results) {
-  const mark = item.code === 0 ? '✅' : '❌';
-  console.log(`  ${mark} ${item.name}  (${(item.ms / 1000).toFixed(1)}s)`);
+  const mark = item.code === 0 ? '✅' : item.code === 2 ? '⏭ ' : '❌';
+  const note = item.code === 2 ? '  （跳过：环境不满足）' : '';
+  console.log(`  ${mark} ${item.name}  (${(item.ms / 1000).toFixed(1)}s)${note}`);
 }
-const bad = results.filter((item) => item.code !== 0);
+const bad = results.filter((item) => item.code !== 0 && item.code !== 2);
+const skipped = results.filter((item) => item.code === 2);
 if (bad.length === 0) {
-  console.log(`\n✅ 全部套件通过（共 ${results.length} 个）`);
+  console.log(
+    `\n✅ 全部套件通过（共 ${results.length} 个${skipped.length ? `，其中 ${skipped.length} 个跳过` : ''}）`,
+  );
 } else {
   console.log(`\n❌ ${bad.length} 个套件失败`);
 }

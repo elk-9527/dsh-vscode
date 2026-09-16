@@ -87,8 +87,8 @@
         },
         "dshPanel.fallbackProfile": {
           "type": "string",
-          "default": "dshdoor",
-          "description": "自动拉起后台 DSH 时使用的 profile 名。这个 profile 里必须装好 dsh-acp-door 门插件。"
+          "default": "desktop",
+          "description": "自动拉起后台 DSH 时使用的 profile 名。默认 desktop —— 就是你桌面端那一档，记忆、技能、插件完全一致，只是没有窗口。这个 profile 里必须装好 dsh-acp-door 门插件。"
         },
         "dshPanel.dshCommand": {
           "type": "string",

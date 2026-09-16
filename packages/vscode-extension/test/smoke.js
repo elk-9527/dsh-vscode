@@ -12,7 +12,8 @@
  *   node test/smoke.js --repeat 5   # 连跑 5 遍（找偶发问题）
  *   node test/smoke.js --fast       # 跳过比较慢的中断/长回复用例
  *
- * 前置：有一个 DSH 在 47821 上开门（`dsh --profile dshdoor --no-open --port 0`）。
+ * 前置：47821 上有一个开了门的 DSH。没有的话测试会自己拉一个
+ * （profile=dshdoor，跑完自己收），所以直接 `node test/smoke.js` 就能跑。
  */
 
 const fs = require('node:fs');

@@ -40,6 +40,16 @@ class DshPanelView {
     this.background = undefined;
     /** 防止并发重复连接。 */
     this.connecting = null;
+    /**
+     * 断线后要接回的会话 id。
+     *
+     * 为什么需要它：ACP 的 `session/resume` 实测**真的能把上下文接回来**
+     * （见 test/resume.js：断线后新连接 resume，它还记得断线前让它记的数字，
+     * 而新开的会话答不出来）。所以断线不该悄悄换成一个没记忆的新会话 ——
+     * 那会让用户以为它还记着上面那段对话，其实已经忘了。
+     * @type {string|undefined}
+     */
+    this.resumeTarget = undefined;
   }
 
   // ── 视图 ────────────────────────────────────────────
@@ -138,7 +148,7 @@ class DshPanelView {
       host: cfg.get('host') || '127.0.0.1',
       port: cfg.get('port') || 47821,
       autoStart: cfg.get('autoStart') !== false,
-      fallbackProfile: cfg.get('fallbackProfile') || 'dshdoor',
+      fallbackProfile: cfg.get('fallbackProfile') || 'desktop',
       dshCommand: cfg.get('dshCommand') || 'dsh',
       provider: cfg.get('provider') || '',
       model: cfg.get('model') || '',
@@ -170,7 +180,11 @@ class DshPanelView {
 
     let reachable = await probePort(cfg.host, cfg.port);
     if (!reachable && cfg.autoStart) {
-      this.post({ type: 'status', state: 'connecting', detail: '桌面端没在跑，正在后台启动 DSH…' });
+      this.post({
+        type: 'status',
+        state: 'connecting',
+        detail: `桌面端没在跑，正在后台启动 DSH（档：${cfg.fallbackProfile}）…`,
+      });
       this.log('info', '门连不上，按设置自动拉起后台 DSH');
       if (this.background) this.background.dispose();
       this.background = spawnBackgroundDsh({
@@ -183,7 +197,9 @@ class DshPanelView {
         this.post({
           type: 'status',
           state: 'error',
-          detail: `后台 DSH 起来了但门没开（profile=${cfg.fallbackProfile}）`,
+          detail:
+            `后台 DSH 起来了，但 ${cfg.host}:${cfg.port} 上没开门（profile=${cfg.fallbackProfile}）。` +
+            `如果你改过端口，门插件里的 port 也要一起改。`,
         });
         return undefined;
       }
@@ -215,6 +231,27 @@ class DshPanelView {
     this.wire(session, client);
 
     try {
+      if (this.resumeTarget) {
+        // 断线重连：先试把刚才那个会话接回来，接不回来才开新的。
+        const target = this.resumeTarget;
+        try {
+          await session.resume(target, this.workdir());
+          this.resumeTarget = undefined;
+          this.post({
+            type: 'status',
+            state: 'ready',
+            detail: '已重连，上面那段对话的上下文接回来了',
+          });
+          return session;
+        } catch (error) {
+          this.log('warn', `接回旧会话失败，改成新会话：${this.errText(error)}`);
+          this.resumeTarget = undefined;
+          this.post({
+            type: 'notice',
+            text: '刚才那段对话没能接回来（内核里已经没有了），下面是一段新的对话。',
+          });
+        }
+      }
       await session.start({ cwd: this.workdir(), provider: cfg.provider, model: cfg.model });
     } catch (error) {
       const text = error && error.message ? error.message : String(error);
@@ -258,6 +295,8 @@ class DshPanelView {
     client.on('close', (reason) => {
       this.post({ type: 'status', state: 'error', detail: `连接断开：${reason}` });
       this.post({ type: 'busy', busy: false });
+      // 记住这个会话，下次连接时先试着接回来（session/resume 实测有效）。
+      if (session.sessionId) this.resumeTarget = session.sessionId;
       // 让它下次「发送」时自动重连，而不是把面板卡死。
       if (this.session === session) this.session = undefined;
       if (this.client === client) this.client = undefined;
@@ -288,6 +327,8 @@ class DshPanelView {
     const cfg = this.config();
     const old = session.sessionId;
     this.post({ type: 'reset' });
+    // 用户主动要新对话，就别再想着把上一段接回来了。
+    this.resumeTarget = undefined;
     // 新会话要先把旧的放掉，免得内核里堆一堆空会话。
     if (old) {
       try {

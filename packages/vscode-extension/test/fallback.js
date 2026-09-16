@@ -20,6 +20,8 @@ const configValues = {
   host: '127.0.0.1',
   port: 47821,
   autoStart: true, // ← 本次测试的主角
+  // 生产默认是 desktop（用户自己那一档）。测试里刻意用 dshdoor：
+  // 让测试去拉起用户的真实配置，会往他的档和记忆里写东西 —— 测试不该有这个权力。
   fallbackProfile: 'dshdoor',
   dshCommand: 'dsh',
   provider: '',
@@ -128,9 +130,14 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
   section('0. 前置：端口必须是空的');
   const alreadyUp = await probePort('127.0.0.1', 47821, 800);
   if (alreadyUp) {
-    console.log('  ❌ 47821 上已经有 DSH 在跑 —— 这个测试需要它空着。');
-    console.log('     请先停掉手动启动的试验台，再跑这个测试。');
-    process.exit(1);
+    // 这不是失败，是「现在没法测」：这个测试要验证「从零拉起一个内核」，
+    // 而 47821 上已经有一个在跑了（比如你的 VS Code 正开着）。
+    // 用退出码 2 表示跳过，让上层能和真失败区分开。
+    console.log('  ⏭  47821 上已经有一个 DSH 在跑，这个测试现在没法做。');
+    console.log('     它验证的是「从零拉起」，需要端口空着。');
+    console.log('     先关掉 VS Code（或手工起的试验台），再跑一次即可。');
+    console.log('     —— 按「跳过」处理，不算失败。');
+    process.exit(2);
   }
   console.log('  ✅ 47821 是空的，可以测兜底路径了');
 

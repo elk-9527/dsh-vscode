@@ -171,6 +171,42 @@ check(
   /currentColor/.test(read('media/dsh.svg')),
 );
 
+// ── 跨文件的约定：扩展和门必须对得上，否则静默连不上 ──────────────
+// 这两边分别是「扩展默认往哪连」和「门实际开在哪」。它们一旦漂移，
+// 表现只是「连不上」，很难看出是配置不一致，所以在这里钉死。
+
+const extensionManifest = JSON.parse(read('package.json'));
+const settings = extensionManifest.contributes.configuration.properties;
+const doorPatch = read('../dsh-door/cordis.patch.yml');
+const doorPort = Number(/^\s*port:\s*(\d+)/m.exec(doorPatch)?.[1]);
+const doorHost = /^\s*host:\s*([\d.]+)/m.exec(doorPatch)?.[1];
+
+check(
+  '扩展默认端口和门实际监听端口一致',
+  settings['dshPanel.port'].default === doorPort,
+  `扩展 ${settings['dshPanel.port'].default} vs 门 ${doorPort}`,
+);
+check(
+  '扩展默认主机和门实际监听主机一致',
+  settings['dshPanel.host'].default === doorHost,
+  `扩展 ${settings['dshPanel.host'].default} vs 门 ${doorHost}`,
+);
+check(
+  '门只监听回环地址',
+  doorHost === '127.0.0.1' || doorHost === 'localhost',
+  `门监听在 ${doorHost}`,
+);
+check(
+  '兜底档默认指向用户自己的 desktop 档（记忆/技能才一致）',
+  settings['dshPanel.fallbackProfile'].default === 'desktop',
+  `实际是 ${settings['dshPanel.fallbackProfile'].default}`,
+);
+check(
+  '代码里的兜底档默认值和设置项一致（不能两处各写一个）',
+  /fallbackProfile:\s*cfg\.get\('fallbackProfile'\)\s*\|\|\s*'desktop'/.test(viewSource),
+  'view.js 里的兜底值和 package.json 漂移了',
+);
+
 console.log(`\n${'═'.repeat(56)}`);
 if (failed === 0) console.log(`✅ 全部通过：${passed} 项检查`);
 else {
