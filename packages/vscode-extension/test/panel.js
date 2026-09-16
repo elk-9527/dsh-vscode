@@ -263,6 +263,40 @@ function typesOf(items) {
     JSON.stringify(resumeMessages.filter((i) => i.type === 'text').map((i) => i.delta)).slice(0, 200),
   );
 
+  section('8.5 兜底拉起失败时，别让用户干等两分钟');
+  {
+    // 场景：门连不上 + 自动拉起 + 命令写错（dshCommand 填了个不存在的路径）。
+    // 以前这里会老老实实等满 120 秒的 waitForPort，用户对着
+    // "正在后台启动 DSH…" 干等两分钟，最后只得到一句"没开门"。
+    const saved = { ...configValues };
+    configValues.autoStart = true;
+    configValues.port = 47844; // 这个端口上不会有门
+    configValues.dshCommand = 'dsh-这个命令不存在-9f3a';
+    const badPanel = new DshPanelView({
+      extensionUri: { fsPath: 'D:\\dsh-vscode\\packages\\vscode-extension' },
+      log,
+    });
+    const badView = makeFakeView();
+    badPanel.resolveWebviewView(badView);
+
+    const startedAt = Date.now();
+    await badPanel.onWebviewMessage({ type: 'ready' });
+    const elapsed = Date.now() - startedAt;
+
+    const all = badView.messages.map((item) => item.message);
+    const errorStatus = all.find((item) => item.type === 'status' && item.state === 'error');
+    check('命令不存在时给出了错误状态（不是一直转圈）', Boolean(errorStatus),
+      JSON.stringify(all.slice(-3)));
+    check('错误里说清了是哪个命令、该怎么办',
+      Boolean(errorStatus) &&
+        errorStatus.detail.includes(configValues.dshCommand) &&
+        /PATH|dshCommand/.test(errorStatus.detail),
+      errorStatus ? errorStatus.detail : '没有错误消息');
+    check('而且是**早点**说的（没有干等满 120 秒）', elapsed < 15000, `耗时 ${elapsed}ms`);
+    badPanel.dispose();
+    Object.assign(configValues, saved);
+  }
+
   section('9. 收摊');
   panel.dispose();
   door.stop();

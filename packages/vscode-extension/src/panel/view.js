@@ -17,7 +17,7 @@ const vscode = require('vscode');
 const path = require('node:path');
 const { DoorClient } = require('../door/client');
 const { DshSession } = require('../dsh/session');
-const { probePort, waitForPort, spawnBackgroundDsh } = require('../door/locate');
+const { probePort, spawnBackgroundDsh } = require('../door/locate');
 const { renderHtml, makeNonce } = require('../panel/html');
 
 const VIEW_ID = 'dshPanel.chat';
@@ -203,6 +203,39 @@ class DshPanelView {
     return this.connecting;
   }
 
+  /**
+   * 等兜底拉起的那个内核把门开起来；它**刚启动就退出**的话早点说清楚。
+   *
+   * 为什么不能只等 waitForPort：命令写错（最典型的是 dsh 不在 PATH 里、
+   * 或者 dshPanel.dshCommand 填了个不存在的路径）时，进程会立刻退出，
+   * 而 waitForPort 会老老实实等满 120 秒 —— 用户对着"正在后台启动 DSH…"
+   * 干等两分钟，最后只换来一句"没开门"，还得自己猜为什么。
+   * 既然进程都已经退出了，就没有必要再等。
+   */
+  async waitForFallbackDoor(child, host, port) {
+    let exit = null;
+    const onExit = (code, signal) => {
+      exit = { code, signal };
+    };
+    if (child && typeof child.once === 'function') child.once('exit', onExit);
+    try {
+      const deadline = Date.now() + 120000;
+      while (Date.now() < deadline) {
+        if (await probePort(host, port)) return { ok: true };
+        if (exit) {
+          // 刚退出时端口可能还在收尾，再确认一次才判失败。
+          if (await probePort(host, port)) return { ok: true };
+          this.log('warn', `兜底内核退出了（code=${exit.code} signal=${exit.signal}），不再干等`);
+          return { ok: false, exitedEarly: true };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+      return { ok: false, exitedEarly: false };
+    } finally {
+      if (child && typeof child.removeListener === 'function') child.removeListener('exit', onExit);
+    }
+  }
+
   async connectInternal() {
     const cfg = this.config();
     this.post({ type: 'status', state: 'connecting', detail: `连接 ${cfg.host}:${cfg.port}…` });
@@ -216,19 +249,36 @@ class DshPanelView {
       });
       this.log('info', '门连不上，按设置自动拉起后台 DSH');
       if (this.background) this.background.dispose();
-      this.background = spawnBackgroundDsh({
-        command: cfg.dshCommand,
-        profile: cfg.fallbackProfile,
-        log: this.log,
-      });
-      reachable = await waitForPort(cfg.host, cfg.port, { totalMs: 120000 });
-      if (!reachable) {
+      let background;
+      try {
+        background = spawnBackgroundDsh({
+          command: cfg.dshCommand,
+          profile: cfg.fallbackProfile,
+          log: this.log,
+        });
+      } catch (error) {
         this.post({
           type: 'status',
           state: 'error',
           detail:
-            `后台 DSH 起来了，但 ${cfg.host}:${cfg.port} 上没开门（profile=${cfg.fallbackProfile}）。` +
-            `如果你改过端口，门插件里的 port 也要一起改。`,
+            `拉不起后台 DSH：${this.errText(error)}。` +
+            `检查设置 dshPanel.dshCommand（现在是「${cfg.dshCommand}」）是不是 dsh 的完整路径。`,
+        });
+        return undefined;
+      }
+      this.background = background;
+      const outcome = await this.waitForFallbackDoor(background.child, cfg.host, cfg.port);
+      reachable = outcome.ok;
+      if (!reachable) {
+        this.post({
+          type: 'status',
+          state: 'error',
+          detail: outcome.exitedEarly
+            ? `后台 DSH 刚启动就退出了（命令：「${cfg.dshCommand}」，profile=${cfg.fallbackProfile}）。` +
+              '多半是 dsh 不在 PATH 里，或者 dshPanel.dshCommand 指错了 —— ' +
+              '先开个终端跑一次 dsh --version 确认，再把它的完整路径填进设置。'
+            : `后台 DSH 起来了，但 ${cfg.host}:${cfg.port} 上没开门（profile=${cfg.fallbackProfile}）。` +
+              '如果你改过端口，门插件里的 port 也要一起改。',
         });
         return undefined;
       }
