@@ -137,7 +137,7 @@ node test/smoke.js       # 端到端：协议、真回合、工具调用、中�
 node tools/uitest.js     # 无头 Chrome 里对界面做 275 项断言（7 个场景，含通用视觉体检：
                          # 文字截断 / 按钮太小 / 浮层跑出面板 / 消息间距不一致）
 node tools/uitest.js context  # 只跑「带编辑器上下文」那个场景
-node tools/shots.js      # 把每个场景 × 深/浅主题拍成图（build/shots/*.png），
+node tools/shots.js      # 把每个场景 × 深/浅主题拍成图（shots/*.png），
                          # 用于"用眼睛看"和改动前后对比。加场景名可只拍一个。
 node tools/build-vsix.js # 打包成 vsix
 node tools/vscode-check.js  # **真 VS Code 窗口里**的自检：开一个隔离窗口（自己的 user-data-dir 和

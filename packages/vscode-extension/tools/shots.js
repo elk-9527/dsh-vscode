@@ -15,7 +15,11 @@
  *   node tools/shots.js chat         # 只拍某个场景
  *   node tools/shots.js chat light   # 只拍某个场景的某个主题
  *
- * 输出：build/shots/<场景>-<主题>.png
+ * 输出：shots/<场景>-<主题>.png
+ *
+ * 为什么不放 build/ 下面：`node tools/build-vsix.js` 会把整个 build/ 清掉
+ * （那是它的临时区），拍好的图会跟着没了 —— 头一次就这么丢的。所以放在
+ * 一个不会被任何脚本清掉的地方，并且在 .gitignore 里（图不进版本库）。
  */
 
 const fs = require('node:fs');
@@ -24,7 +28,7 @@ const { spawnSync } = require('node:child_process');
 const { SCENARIOS, THEMES, OUT } = require('./preview');
 
 const ROOT = path.resolve(__dirname, '..');
-const SHOTS = path.join(ROOT, 'build', 'shots');
+const SHOTS = path.join(ROOT, 'shots');
 const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 
 function main() {
