@@ -123,7 +123,7 @@ node test/resume.js      # 断线后 session/resume 到底能不能把上下文�
 node test/presets.js     # 模式（agent preset）：新会话挂上、恢复会话补挂、工具没丢
 node test/smoke.js       # 端到端：协议、真回合、工具调用、中断、切模型、多轮、
                          #   以及编辑器上下文（选中代码里的暗号 + 带进来的文件里的暗号）
-node tools/uitest.js     # 无头 Chrome 里对界面做 150+ 项断言（溢出/重叠/交互/注入/附件块）
+node tools/uitest.js     # 无头 Chrome 里对界面做 217 项断言（6 个场景：溢出/重叠/交互/注入/附件块）
 node tools/uitest.js context  # 只跑「带编辑器上下文」那个场景
 node tools/build-vsix.js # 打包成 vsix
 ```
