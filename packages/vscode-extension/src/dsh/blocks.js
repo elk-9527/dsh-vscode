@@ -80,6 +80,8 @@ function buildPromptBlocks(text, attachments = []) {
     if (!item || typeof item !== 'object') continue;
     const hasText = typeof item.text === 'string' && item.text.trim();
     const hasUri = typeof item.uri === 'string' && item.uri;
+    // 选区的正文只要非空就带上 —— 正文才是用户真正想给的东西，
+    // 位置只是锦上添花（写不出位置就写「未知位置」）。
     if (item.kind === 'selection' && hasText) blocks.push({ type: 'text', text: selectionText(item) });
     // 选了代码也给一条链接：需要更多上下文时它自己能去读。
     if (hasUri) {

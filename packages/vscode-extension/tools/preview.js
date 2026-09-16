@@ -216,6 +216,74 @@ const SCENARIOS = {
     };
   },
 
+  /**
+   * 带编辑器上下文：挂上"当前文件"和"选中的代码"，然后发出去。
+   *
+   * 这一段测的是「附件块」这条链路：挂上去看得见吗、点 × 拿得掉吗、
+   * 发出去的时候带上了吗、发完清空了吗、"已经被发出去的那条消息"里还看不看得出
+   * 它当时带了什么。
+   */
+  context() {
+    return {
+      steps: [
+        { message: { type: 'status', state: 'ready', detail: '已连上正在运行的 DSH' } },
+        { message: configMessage },
+        { message: presetsMessage },
+        {
+          message: {
+            type: 'attach',
+            items: [
+              {
+                kind: 'file',
+                id: 'src/panel/view.js',
+                name: 'src/panel/view.js',
+                uri: 'file:///d%3A/dsh-vscode/packages/vscode-extension/src/panel/view.js',
+                detail: '当前文件',
+              },
+              {
+                kind: 'selection',
+                id: 'src/panel/html.js:80-82',
+                name: 'src/panel/html.js',
+                uri: 'file:///d%3A/dsh-vscode/packages/vscode-extension/src/panel/html.js',
+                text: '<footer class="composer">',
+                language: 'html',
+                detail: '选中 3 行',
+              },
+            ],
+          },
+        },
+        {
+          message: {
+            type: 'user',
+            text: '这两个文件是干嘛的？',
+            attachments: [
+              {
+                kind: 'file',
+                id: 'src/panel/view.js',
+                name: 'src/panel/view.js',
+                uri: 'file:///d%3A/dsh-vscode/packages/vscode-extension/src/panel/view.js',
+                detail: '当前文件',
+              },
+              {
+                kind: 'selection',
+                id: 'src/panel/html.js:80-82',
+                name: 'src/panel/html.js',
+                uri: 'file:///d%3A/dsh-vscode/packages/vscode-extension/src/panel/html.js',
+                text: '<footer class="composer">',
+                language: 'html',
+                detail: '选中 3 行',
+              },
+            ],
+          },
+        },
+        { message: { type: 'assistant', id: 'a1' } },
+        { message: { type: 'text', id: 'a1', delta: '一个是面板的逻辑，一个是它的结构。' } },
+        { message: { type: 'done', id: 'a1', status: 'done' } },
+        { message: { type: 'busy', busy: false } },
+      ],
+    };
+  },
+
   /** 一个完整回合：用户提问 → 思考 → 正文 → 工具卡片 → 结束。 */
   chat() {
     return {

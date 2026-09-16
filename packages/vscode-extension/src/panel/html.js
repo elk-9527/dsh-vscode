@@ -78,6 +78,7 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
   </main>
 
   <footer class="composer">
+    <div class="attachments" id="attachments" hidden></div>
     <div class="composer-box">
       <textarea id="input" class="input" rows="1" placeholder="给 DSH 发条消息…（Enter 发送，Shift+Enter 换行）"></textarea>
       <button id="send" class="send" type="button" title="发送" aria-label="发送">

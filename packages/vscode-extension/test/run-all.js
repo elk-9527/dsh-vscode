@@ -27,6 +27,7 @@ const suites = [
   { name: '静态契约', file: 'test/static.js', always: true },
   { name: '门的看帧判断（纯函数）', file: '../dsh-door/test/frames.js', always: true },
   { name: 'Markdown 渲染器', file: 'test/markdown.js', always: true },
+  { name: '编辑器上下文拼块（纯函数）', file: 'test/blocks.js', always: true },
   { name: '界面（真浏览器）', file: 'tools/uitest.js', always: false, needs: withUi, hint: '加 --ui 才跑' },
   { name: '兜底拉起（真进程）', file: 'test/fallback.js', always: false, needs: withDsh, hint: '加 --all 才跑（要求 47821 空着）' },
   { name: '断线接回（真 DSH）', file: 'test/resume.js', always: false, needs: withDsh, hint: '加 --all 才跑' },

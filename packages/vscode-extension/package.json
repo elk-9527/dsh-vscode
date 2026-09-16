@@ -51,6 +51,16 @@
       {
         "command": "dshPanel.showLog",
         "title": "DSH：查看日志"
+      },
+      {
+        "command": "dshPanel.attachFile",
+        "title": "DSH：把当前文件带进对话",
+        "icon": "$(file-add)"
+      },
+      {
+        "command": "dshPanel.attachSelection",
+        "title": "DSH：把选中的代码带进对话",
+        "icon": "$(selection)"
       }
     ],
     "menus": {
@@ -64,6 +74,23 @@
           "command": "dshPanel.reconnect",
           "when": "view == dshPanel.chat",
           "group": "navigation@2"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "dshPanel.attachSelection",
+          "when": "editorHasSelection",
+          "group": "dsh@1"
+        },
+        {
+          "command": "dshPanel.attachFile",
+          "group": "dsh@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "dshPanel.attachSelection",
+          "when": "editorHasSelection"
         }
       ]
     },

@@ -42,6 +42,27 @@ VS Code 侧边栏（本扩展）
    万一接不回来（内核里已经没了），面板会明确告诉你「上面那段它不记得了」，
    而不是悄悄换成一段没有记忆的新对话。
 
+### 把编辑器里的东西带进对话
+
+两个命令（命令面板里搜 `DSH`，或者**在编辑器里右键**）：
+
+| 命令 | 什么时候有 | 带过去的东西 |
+| --- | --- | --- |
+| `DSH：把选中的代码带进对话` | 编辑器里有选区时 | 选中的那几行**正文** + 这个文件的链接 |
+| `DSH：把当前文件带进对话` | 打开着文件时 | 只给这个文件的链接，让 DSH 自己去读 |
+
+带过去的东西会变成输入框上面的一小块，点 `×` 可以拿掉；发出去之后，
+那条消息气泡里也留着当时带的清单。
+
+为什么两者不一样：**选中的代码小、且你的意思往往就是"就这几行"，直接把正文给模型最准**；
+**整个文件可能很大，只给一条链接（ACP 的 `resource_link`）让 DSH 用自己的工具去读** ——
+不占上下文，读到的永远是最新版本。
+
+### 权限与确认
+
+工具调用要不要问你，取决于你那个 profile 的权限策略（桌面端装了 `auto-approval`，
+默认不打断你）。面板能在内核真的来问的时候弹出选项，也会把代码改动渲染成 diff。
+
 ## 设置
 
 | 设置项 | 默认值 | 说明 |
@@ -84,9 +105,9 @@ VS Code 侧边栏（本扩展）
 一条命令跑完全部测试（内核没开的话，测试会自己按需拉起、跑完自己收）：
 
 ```powershell
-node test/run-all.js        # 快速套件：静态契约 + Markdown 单测 + 面板层，约 10s
+node test/run-all.js        # 快速套件：静态契约 + 拼块单测 + Markdown 单测 + 面板层，约 15s
 node test/run-all.js --ui   # 再加上真浏览器里的界面断言（需要 Chrome）
-node test/run-all.js --all  # 再加上真 DSH 进程的兜底拉起与端到端，约 50s
+node test/run-all.js --all  # 再加上真 DSH 进程的兜底拉起、模式、端到端，约 2 分钟
 ```
 
 单独跑某个套件：
@@ -95,11 +116,15 @@ node test/run-all.js --all  # 再加上真 DSH 进程的兜底拉起与端到端
 node test/static.js      # 静态契约：HTML id ↔ 取元素、消息协议双向、CSS 类、零硬编码颜色
                          #   以及「扩展默认端口/主机 = 门实际监听端口/主机」这类跨文件约定
 node test/markdown.js    # Markdown 渲染器：语法、注入安全、病态输入不死循环、真实耗时
+node test/blocks.js      # 编辑器上下文拼块：选区正文、resource_link、围栏加长、脏数据
 node test/panel.js       # 面板层集成：注入假 vscode，连真的门
 node test/fallback.js    # 兜底路径：桌面端没在跑时能否自己拉起来、收摊能否杀干净
 node test/resume.js      # 断线后 session/resume 到底能不能把上下文接回来（带对照组）
-node test/smoke.js       # 端到端：协议、真回合、工具调用、中断、切模型、多轮
-node tools/uitest.js     # 无头 Chrome 里对界面做 100+ 项断言（溢出/重叠/交互/注入）
+node test/presets.js     # 模式（agent preset）：新会话挂上、恢复会话补挂、工具没丢
+node test/smoke.js       # 端到端：协议、真回合、工具调用、中断、切模型、多轮、
+                         #   以及编辑器上下文（选中代码里的暗号 + 带进来的文件里的暗号）
+node tools/uitest.js     # 无头 Chrome 里对界面做 150+ 项断言（溢出/重叠/交互/注入/附件块）
+node tools/uitest.js context  # 只跑「带编辑器上下文」那个场景
 node tools/build-vsix.js # 打包成 vsix
 ```
 

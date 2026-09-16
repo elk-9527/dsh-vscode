@@ -243,6 +243,71 @@ check(
   'view.js 的 resume 调用没带 preset',
 );
 
+// ── 编辑器上下文这条链路：命令 → 面板 → 界面 → 协议 ─────────────
+// 任何一环换了名字都是"按了没反应"，所以逐环钉住。
+
+const extensionSource = read('src/extension.js');
+const commands = extensionManifest.contributes.commands.map((item) => item.command);
+
+check(
+  '两个"带进对话"的命令都声明了',
+  commands.includes('dshPanel.attachFile') && commands.includes('dshPanel.attachSelection'),
+  `现有命令：${commands.join(', ')}`,
+);
+check(
+  '声明的命令在 extension.js 里真的注册了',
+  ['dshPanel.attachFile', 'dshPanel.attachSelection'].every((id) => extensionSource.includes(`registerCommand('${id}'`)),
+  '命令声明了却没注册，按下去只会报错',
+);
+check(
+  '编辑器右键菜单里有这两项',
+  extensionManifest.contributes.menus['editor/context'].some((item) => item.command === 'dshPanel.attachSelection') &&
+    extensionManifest.contributes.menus['editor/context'].some((item) => item.command === 'dshPanel.attachFile'),
+  JSON.stringify(extensionManifest.contributes.menus['editor/context']),
+);
+check(
+  '没选中东西时，菜单里不显示"把选中的代码带进对话"',
+  extensionManifest.contributes.menus['editor/context'].some(
+    (item) => item.command === 'dshPanel.attachSelection' && item.when === 'editorHasSelection',
+  ),
+  '缺 when: editorHasSelection',
+);
+check(
+  '扩展把编辑器里的东西整理成附件时用了 view.workdir()（路径才会是相对路径）',
+  /attachmentFromEditor\(editor,\s*view\.workdir\(\)\)/.test(extensionSource),
+  'extension.js 里的 attachFromEditor 没用 workdir',
+);
+check(
+  '界面收到的附件消息（attach）在 view.js 里有对应的发出点',
+  /post\(\{\s*type:\s*'attach',\s*items:/.test(viewSource),
+  'view.js 没有发 attach 消息',
+);
+check(
+  '面板的 send 把附件一起传下去（不然附件永远到不了内核）',
+  /await session\.send\(text,\s*\{\s*attachments:\s*items\s*\}\)/.test(viewSource),
+  'view.js 的 send 没把 attachments 传给会话',
+);
+check(
+  '会话层把附件转交给门客户端',
+  /client\.prompt\(this\.sessionId,\s*text,\s*\{\s*attachments,/.test(read('src/dsh/session.js')),
+  'session.js 的 send 没把 attachments 给 client.prompt',
+);
+check(
+  '主进程发消息时带上了挂着的附件',
+  /post\(\{\s*type:\s*'send',\s*text,\s*attachments\s*\}\)/.test(webviewJs),
+  'main.js 的 submit 没带 attachments',
+);
+check(
+  '输入框上面那个附件容器，HTML 里有（否则界面往里塞不进去）',
+  /id="attachments"/.test(htmlSource),
+  'html.js 里没有 id="attachments"',
+);
+check(
+  '附件块也是 flex 容器，所以必须自己压一道 [hidden]',
+  /\.attachments\[hidden\]\s*\{[^}]*display:\s*none\s*!important/.test(webviewCss),
+  'CSS 里没有 .attachments[hidden] 规则（空的时候会占一块位置）',
+);
+
 console.log(`\n${'═'.repeat(56)}`);
 if (failed === 0) console.log(`✅ 全部通过：${passed} 项检查`);
 else {

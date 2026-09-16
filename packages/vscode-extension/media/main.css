@@ -514,6 +514,103 @@ body {
   gap: 4px;
 }
 
+/* ── 挂在输入框上面的上下文（当前文件 / 选中的代码）─────── */
+
+/*
+ * 这一块是 flex 容器，所以 [hidden] 必须自己再压一道 ——
+ * 浏览器默认的 [hidden]{display:none} 打不过 display:flex（踩过：空用量条常显）。
+ */
+.attachments[hidden] {
+  display: none !important;
+}
+
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding-bottom: 2px;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-badge-background, var(--vscode-editorWidget-background, transparent));
+  color: var(--vscode-badge-foreground, var(--vscode-foreground));
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.chip-sel {
+  border-color: var(--vscode-focusBorder);
+}
+
+.chip-icon {
+  flex: 0 0 auto;
+  opacity: 0.85;
+  font-size: 10px;
+}
+
+.chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* 长路径从尾部截断，留下文件名那段 */
+  text-align: left;
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+.chip-detail {
+  flex: 0 0 auto;
+  opacity: 0.7;
+}
+
+.chip-close {
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 2px;
+  border-radius: 999px;
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0.7;
+}
+
+.chip-close:hover {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground, transparent));
+}
+
+.chip-close:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+}
+
+/* 气泡里的附件块：不可摘，跟正文上下留一点距离。 */
+.msg-user .bubble .chips {
+  margin-bottom: 4px;
+  justify-content: flex-end;
+}
+
+.bubble-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .composer-box {
   display: flex;
   align-items: flex-end;

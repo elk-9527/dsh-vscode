@@ -108,9 +108,12 @@ async function runOnce(round) {
     busyOff: false,
     done: null,
     errors: [],
+    /** 这一回合的正文原文（用来查暗号在不在回答里）。 */
+    answer: '',
   };
   session.on('text', (payload) => {
     seen.text += payload.delta.length;
+    seen.answer += payload.delta;
   });
   session.on('thinking', (payload) => {
     seen.thinking += payload.delta.length;
@@ -231,6 +234,67 @@ async function runOnce(round) {
   seen.text = 0;
   await session.send('我刚才让你读的那个文件叫什么名字？只回答文件名。');
   check('第二轮有正文', seen.text > 0, `${seen.text} 字`);
+
+  // ── 8.5 把编辑器里的东西带进对话 ─────────────────────
+  // 这一段是整个「编辑器上下文」功能的真凭实据：
+  // 选中的代码是不是真的到了模型眼前（它得念出暗号），
+  // 以及 resource_link 到底管不管用（它得自己去把文件读出来）。
+  if (!FAST) {
+    section('8.5 编辑器上下文：选中的代码 + 带进来的文件');
+
+    // (1) 选中的代码：正文直接随消息过去，模型不看文件也该知道暗号。
+    const secret = '紫色河马';
+    seen.answer = '';
+    seen.tools.clear();
+    seen.errors.length = 0;
+    await session.send('我选中的这段代码里的暗号是什么？只回答暗号本身，不要引号、不要解释。', {
+      attachments: [
+        {
+          kind: 'selection',
+          id: 'fake.ts:1-3',
+          name: 'fake.ts',
+          uri: `file:///${path.join(SCRATCH, 'fake.ts').replace(/\\/g, '/')}`,
+          text: `// 无关的注释\nconst 暗号 = '${secret}';\nexport default 暗号;`,
+          language: 'typescript',
+          detail: '选中 3 行',
+        },
+      ],
+    });
+    check('带选区的回合正常结束', seen.errors.length === 0, seen.errors.join(' | '));
+    check(
+      '选中的代码真的到了模型眼前（它念出了暗号）',
+      seen.answer.includes(secret),
+      `回答是：${JSON.stringify(seen.answer.slice(0, 120))}`,
+    );
+
+    // (2) 带进来的文件：只给一条 resource_link，模型得自己用工具去读。
+    const fileSecret = '蓝色长颈鹿';
+    const attachedFile = path.join(SCRATCH, 'door-context.md');
+    fs.writeFileSync(attachedFile, `# 门\n\n这个文件里的暗号是：${fileSecret}\n`, 'utf8');
+
+    seen.answer = '';
+    seen.tools.clear();
+    seen.errors.length = 0;
+    await session.send('我带上来的那个文件里的暗号是什么？只回答暗号本身，不要解释。', {
+      attachments: [
+        {
+          kind: 'file',
+          id: 'door-context.md',
+          name: 'door-context.md',
+          uri: `file:///${attachedFile.replace(/\\/g, '/')}`,
+          mimeType: 'text/markdown',
+          detail: '当前文件',
+        },
+      ],
+    });
+    check('带文件的回合正常结束', seen.errors.length === 0, seen.errors.join(' | '));
+    check('为读这个文件真的调了工具', seen.tools.size > 0, `${seen.tools.size} 个工具调用`);
+    check(
+      'resource_link 管用（它自己把文件读出来了）',
+      seen.answer.includes(fileSecret),
+      `回答是：${JSON.stringify(seen.answer.slice(0, 120))}`,
+    );
+  }
 
   session.dispose();
   client.close();

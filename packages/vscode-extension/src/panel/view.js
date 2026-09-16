@@ -14,12 +14,19 @@
  */
 
 const vscode = require('vscode');
+const path = require('node:path');
 const { DoorClient } = require('../door/client');
 const { DshSession } = require('../dsh/session');
 const { probePort, waitForPort, spawnBackgroundDsh } = require('../door/locate');
 const { renderHtml, makeNonce } = require('../panel/html');
 
 const VIEW_ID = 'dshPanel.chat';
+
+/** target 在 base 这个目录里面吗（Windows 上大小写不敏感，path.relative 会处理）。 */
+function pathIsInside(target, base) {
+  const rel = path.relative(base, target);
+  return Boolean(rel) && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
 
 class DshPanelView {
   /**
@@ -121,7 +128,7 @@ class DshPanelView {
           break;
         }
         case 'send':
-          await this.send(message.text);
+          await this.send(message.text, message.attachments);
           break;
         case 'stop':
           this.session ? this.session.stop() : undefined;
@@ -376,13 +383,81 @@ class DshPanelView {
 
   // ── 操作 ────────────────────────────────────────────
 
-  async send(text) {
-    if (!text || !text.trim()) return;
+  async send(text, attachments = []) {
+    const items = Array.isArray(attachments) ? attachments.filter(Boolean) : [];
+    if ((!text || !text.trim()) && items.length === 0) return;
     const session = await this.ensureConnection();
     if (!session) return;
     // 从这一刻起这段会话「说过话」了：换预设时就不能再悄悄重开它。
     this.turnSent = true;
-    await session.send(text);
+    await session.send(text, { attachments: items });
+  }
+
+  // ── 编辑器上下文（当前文件 / 选中的代码）────────────────
+
+  /**
+   * 把编辑器里的东西送进面板，变成输入框上面的一个「附件」。
+   *
+   * 为什么是送进面板、而不是直接替用户发出去：用户按那个命令，多半是想
+   * 「就这段代码问点什么」——所以把上下文挂上、把光标留给输入框，
+   * 让他接着打字。这也是 VS Code 里其它 AI 扩展的做法。
+   *
+   * @param {Array<object>} items
+   */
+  async attach(items) {
+    const list = (Array.isArray(items) ? items : [items]).filter(Boolean);
+    if (list.length === 0) return;
+    // 面板可能还没展开（命令可以从命令面板直接调），先让它出来。
+    await this.reveal();
+    this.post({ type: 'attach', items: list });
+  }
+
+  /**
+   * 让面板显出来。
+   *
+   * 展开一个视图只能通过 VS Code 自己的命令 `<viewId>.focus`，
+   * 所以这里只能走 executeCommand —— 在测试的假 vscode 里它不存在，
+   * 那就记一条日志、当作没事发生（附件本身照挂）。
+   */
+  async reveal() {
+    try {
+      await vscode.commands.executeCommand(`${VIEW_ID}.focus`);
+    } catch (error) {
+      this.log('warn', `展开面板失败（不影响把内容挂上去）：${this.errText(error)}`);
+    }
+  }
+
+  /** 把命令面板/右键菜单拿来的编辑器信息整理成附件形状。 */
+  static attachmentFromEditor(editor, workdir) {
+    if (!editor || !editor.document) return undefined;
+    const document = editor.document;
+    const uri = document.uri;
+    const absolute = uri && uri.fsPath ? uri.fsPath : document.fileName;
+    if (!absolute) return undefined;
+    // 名字用相对于工作目录的路径：模型和自己看都更短、更清楚。
+    let name = absolute;
+    if (workdir && pathIsInside(absolute, workdir)) {
+      name = path.relative(workdir, absolute).split('\\').join('/');
+    }
+    const base = {
+      name,
+      uri: uri && typeof uri.toString === 'function' ? uri.toString() : `file://${absolute}`,
+      mimeType: 'text/plain',
+    };
+
+    const selection = editor.selection;
+    const selected = selection && !selection.isEmpty ? document.getText(selection) : '';
+    if (selected && selected.trim()) {
+      return {
+        ...base,
+        kind: 'selection',
+        text: selected,
+        language: document.languageId,
+        detail: `选中 ${selection.end.line - selection.start.line + 1} 行`,
+        id: `${name}:${selection.start.line + 1}-${selection.end.line + 1}`,
+      };
+    }
+    return { ...base, kind: 'file', detail: '当前文件', id: name };
   }
 
   /** 下一段新对话要用哪个预设：面板里选过的优先，其次是设置里的默认值。 */

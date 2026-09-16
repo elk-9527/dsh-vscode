@@ -24,6 +24,7 @@
     input: document.getElementById('input'),
     send: document.getElementById('send'),
     stop: document.getElementById('stop'),
+    attachments: document.getElementById('attachments'),
     hint: document.getElementById('hint'),
     usageInline: document.getElementById('usage-inline'),
     meter: document.getElementById('meter'),
@@ -44,6 +45,14 @@
     configOptions: [],
     /** 门报过来的预设清单有没有内容（决定配置行要不要露出来）。 */
     hasPresets: false,
+    /**
+     * 挂着的编辑器上下文（当前文件 / 选中的代码），随下一条消息一起发出去。
+     *
+     * 这份清单由界面自己管：扩展只负责把编辑器里的东西送进来（`attach`），
+     * 摘掉、清空都在本地完成 —— 不需要为这种事来回通信。
+     * @type {Array<object>}
+     */
+    attachments: [],
   };
 
   /** entry → 'body' | 'think'，攒着待渲染的内容。 */
@@ -73,7 +82,7 @@
         setStatus(message.state, message.detail);
         break;
       case 'user':
-        addUser(message.text);
+        addUser(message.text, message.attachments);
         break;
       case 'assistant':
         addAssistant(message.id);
@@ -113,6 +122,9 @@
         break;
       case 'reset':
         resetTranscript();
+        break;
+      case 'attach':
+        addAttachments(message.items);
         break;
       case 'hint':
         showHint(message.text, Boolean(message.error));
@@ -165,6 +177,8 @@
 
   function resetTranscript() {
     state.messages.clear();
+    state.attachments = [];
+    renderAttachments();
     el.messages.textContent = '';
     el.messages.appendChild(el.empty);
     el.empty.hidden = false;
@@ -193,14 +207,111 @@
     scrollIfPinned();
   }
 
-  function addUser(text) {
+  function addUser(text, attachments) {
     const wrap = document.createElement('div');
     wrap.className = 'msg msg-user';
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
-    bubble.textContent = text;
+    // 这条消息带了哪些上下文，气泡里也要看得出 —— 否则回头看对话记录会莫名其妙。
+    const list = Array.isArray(attachments) ? attachments.filter(Boolean) : [];
+    if (list.length > 0) bubble.appendChild(chipRow(list, { removable: false }));
+    if (text && text.trim()) {
+      const body = document.createElement('div');
+      body.className = 'bubble-text';
+      body.textContent = text;
+      bubble.appendChild(body);
+    }
     wrap.appendChild(bubble);
     appendNode(wrap);
+  }
+
+  // ── 编辑器上下文（附件）──────────────────────────────
+
+  /**
+   * 挂上一批附件（扩展从编辑器那边送过来的）。
+   *
+   * 同名的（同一个文件/同一段选区）只留一个：连按两次"把当前文件带进来"，
+   * 用户想要的是一个，不是两个。
+   */
+  function addAttachments(items) {
+    const list = (Array.isArray(items) ? items : [items]).filter(Boolean);
+    if (list.length === 0) return;
+    let added = 0;
+    for (const item of list) {
+      const id = item.id || item.uri || item.name;
+      if (!id || state.attachments.some((held) => (held.id || held.uri || held.name) === id)) continue;
+      state.attachments.push({ ...item, id });
+      added += 1;
+    }
+    renderAttachments();
+    if (added > 0) {
+      el.input.focus();
+      const last = state.attachments[state.attachments.length - 1];
+      showHint(`已带上：${last.detail || last.name}`, false);
+    }
+  }
+
+  function removeAttachment(id) {
+    state.attachments = state.attachments.filter((item) => item.id !== id);
+    renderAttachments();
+  }
+
+  function renderAttachments() {
+    el.attachments.textContent = '';
+    const list = state.attachments;
+    // 用 hidden 属性控制显示，同时靠 CSS 里的 [hidden] 规则压住 display:flex ——
+    // 这个坑踩过一次（空用量条常显），别再踩。
+    el.attachments.hidden = list.length === 0;
+    if (list.length === 0) return;
+    el.attachments.appendChild(chipRow(list, { removable: true }));
+  }
+
+  /**
+   * 做一排"上下文小块"。
+   *
+   * @param {Array<object>} list
+   * @param {{removable: boolean}} options
+   */
+  function chipRow(list, options) {
+    const row = document.createElement('div');
+    row.className = 'chips';
+    for (const item of list) {
+      const chip = document.createElement('span');
+      chip.className = `chip chip-${item.kind === 'selection' ? 'sel' : 'file'}`;
+      chip.title = `${item.name || ''}${item.detail ? ` · ${item.detail}` : ''}`;
+
+      const icon = document.createElement('span');
+      icon.className = 'chip-icon';
+      // 选区用一个"选中"的方块，文件用文件图标，一眼能分出这两类。
+      icon.textContent = item.kind === 'selection' ? '❯' : '📄';
+      icon.setAttribute('aria-hidden', 'true');
+      chip.appendChild(icon);
+
+      const label = document.createElement('span');
+      label.className = 'chip-label';
+      label.textContent = item.name || item.uri || '（未知）';
+      chip.appendChild(label);
+
+      if (item.detail) {
+        const detail = document.createElement('span');
+        detail.className = 'chip-detail';
+        detail.textContent = item.detail;
+        chip.appendChild(detail);
+      }
+
+      if (options.removable) {
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'chip-close';
+        close.title = '拿掉';
+        close.setAttribute('aria-label', `拿掉 ${item.name || ''}`);
+        close.textContent = '×';
+        close.addEventListener('click', () => removeAttachment(item.id));
+        chip.appendChild(close);
+      }
+      row.appendChild(chip);
+    }
+    return row;
   }
 
   function addAssistant(id) {
@@ -635,11 +746,15 @@
 
   function submit() {
     const text = el.input.value;
-    if (!text.trim() || state.busy) return;
+    const attachments = state.attachments.slice();
+    // 只有上下文、没有文字也允许发：用户可能就是想说"看看这个"。
+    if ((!text.trim() && attachments.length === 0) || state.busy) return;
     el.input.value = '';
+    state.attachments = [];
+    renderAttachments();
     autoGrow();
     showHint('');
-    post({ type: 'send', text });
+    post({ type: 'send', text, attachments });
   }
 
   el.send.addEventListener('click', submit);

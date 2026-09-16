@@ -10,7 +10,6 @@
 
 const vscode = require('vscode');
 const { DshPanelView, VIEW_ID } = require('./panel/view');
-
 /**
  * 建一个带时间戳的输出通道。
  *
@@ -37,6 +36,33 @@ function activate(context) {
 
   const view = new DshPanelView({ extensionUri: context.extensionUri, log });
 
+  /**
+   * 把「当前编辑器」里的东西挂进面板。
+   *
+   * 两个命令（带上当前文件 / 带上选中的代码）走的是同一条路，
+   * 区别只在编辑器有没有选区 —— 有选区就带选中的那几行，没有就带整个文件。
+   *
+   * @param {'file'|'selection'} wanted
+   */
+  async function attachFromEditor(wanted) {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      vscode.window.showInformationMessage('DSH：先打开一个文件，再把内容带进对话。');
+      return;
+    }
+    const item = DshPanelView.attachmentFromEditor(editor, view.workdir());
+    if (!item) {
+      vscode.window.showInformationMessage('DSH：这个编辑器里拿不到文件路径，带不进去。');
+      return;
+    }
+    if (wanted === 'selection' && item.kind !== 'selection') {
+      vscode.window.showInformationMessage('DSH：先选中一段代码，再执行「把选中的代码带进对话」。');
+      return;
+    }
+    log('info', `带进对话：${item.kind} ${item.name}${item.detail ? `（${item.detail}）` : ''}`);
+    await view.attach([item]);
+  }
+
   context.subscriptions.push(
     channel,
     vscode.window.registerWebviewViewProvider(VIEW_ID, view, {
@@ -52,6 +78,9 @@ function activate(context) {
     vscode.commands.registerCommand('dshPanel.showLog', () => {
       channel.show(true);
     }),
+    // 编辑器上下文：右键菜单和命令面板都能用。
+    vscode.commands.registerCommand('dshPanel.attachFile', () => attachFromEditor('file')),
+    vscode.commands.registerCommand('dshPanel.attachSelection', () => attachFromEditor('selection')),
     // 改设置后让下次连接用新值；正在进行的会话不动。
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('dshPanel')) {

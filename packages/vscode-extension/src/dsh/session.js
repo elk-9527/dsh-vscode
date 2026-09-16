@@ -143,19 +143,23 @@ class DshSession extends EventEmitter {
    * 发一条消息并跑完整个回合。
    *
    * @param {string} text
+   * @param {object} [options]
+   * @param {Array<object>} [options.attachments] 一起带上的编辑器上下文
+   *   （当前文件 / 选中的代码），由 door/client.js 拼成 ACP 内容块。
    * @returns {Promise<{stopReason?: string}>}
    */
-  async send(text) {
+  async send(text, { attachments = [] } = {}) {
     if (!this.sessionId) throw new Error('还没有会话');
     if (this.busy) throw new Error('上一个回合还没结束');
-    if (!text || !text.trim()) return { stopReason: 'empty' };
+    if ((!text || !text.trim()) && attachments.length === 0) return { stopReason: 'empty' };
 
     const id = `m${nextId++}`;
     const entry = { id, role: 'assistant', text: '', thinking: '', tools: [], status: 'running' };
     this.messages.set(id, entry);
     this.tools = new Map();
 
-    this.emit('user', { text });
+    // 界面上要能看出这条消息带了什么上下文 —— 带上清单，渲染时显示成附件。
+    this.emit('user', { text, attachments });
     this.emit('assistant', { id });
     this.busy = true;
     this.emit('busy', { busy: true });
@@ -164,7 +168,10 @@ class DshSession extends EventEmitter {
     this.#current = controller;
 
     try {
-      const result = await this.client.prompt(this.sessionId, text, { signal: controller.signal });
+      const result = await this.client.prompt(this.sessionId, text, {
+        attachments,
+        signal: controller.signal,
+      });
       const stopReason = result && result.stopReason ? result.stopReason : 'end_turn';
       entry.status = stopReason === 'cancelled' ? 'cancelled' : 'done';
       this.emit('done', { id, status: entry.status, stopReason });

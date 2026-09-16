@@ -34,6 +34,8 @@ const EXPECTATIONS = {
   streaming: { needsUser: true, needsAssistant: true, needsTools: 1, needsCaret: true, needsPermission: false, minAssistantChars: 10 },
   // 权限场景里回合还没结束（在等用户点许可），所以光标应该还在。
   permission: { needsUser: true, needsAssistant: true, needsTools: 0, needsCaret: true, needsPermission: true, needsOptions: 3, minAssistantChars: 5 },
+  // 带编辑器上下文：输入框上面该有两块，发出去的那条消息里也该有。
+  context: { needsUser: true, needsAssistant: true, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 10, needsAttachments: 2 },
 };
 
 /**
@@ -113,13 +115,19 @@ function assertionsScript(scene) {
       'visible=' + visible(presetField) + ' preset=' + presetCount);
     assert('用量条只在有数据时才露出', visible(meter) === (meterText.length > 0),
       'visible=' + visible(meter) + ' text=' + meterText);
+    // 附件块也是 flex 容器，同一个坑 —— 这里一并量。
+    var attachmentBox = document.getElementById('attachments');
+    var chipCount = document.querySelectorAll('#attachments .chip').length;
+    assert('输入框上面的附件块：有附件才露出',
+      visible(attachmentBox) === (chipCount > 0),
+      'visible=' + visible(attachmentBox) + ' 附件=' + chipCount);
     if (!EXPECT.needsPermission) {
       assert('权限区默认是藏着的', !visible(permissionBox));
     }
     if (EXPECT.emptyChrome) {
       assert('没连上时头部不该挂空控件',
-        !visible(configRow) && !visible(presetField) && !visible(meter) && !visible(permissionBox),
-        'config=' + visible(configRow) + ' preset=' + visible(presetField) + ' meter=' + visible(meter) + ' permission=' + visible(permissionBox));
+        !visible(configRow) && !visible(presetField) && !visible(meter) && !visible(permissionBox) && !visible(attachmentBox),
+        'config=' + visible(configRow) + ' preset=' + visible(presetField) + ' meter=' + visible(meter) + ' permission=' + visible(permissionBox) + ' attachments=' + visible(attachmentBox));
     }
     if (presetCount > 0) {
       var presetSelect = document.getElementById('preset-select');
@@ -231,6 +239,69 @@ function assertionsScript(scene) {
     for (var key in ratios) {
       var value = ratios[key];
       assert('对比度可读：' + key, value === null || value >= 2.5, value === null ? '算不出来' : value.toFixed(2) + ':1');
+    }
+
+    // ── 7.5 编辑器上下文（附件块）─────────────────────
+    // 这一段只在带上下文的场景里跑：挂上去看得见吗、点 × 拿得掉吗、
+    // 发出去时带上了吗、发完有没有清空、"发出去的那条消息"回头看还认不认得出。
+    if (EXPECT.needsAttachments) {
+      var chips = document.querySelectorAll('#attachments .chip');
+      assert('挂上的上下文都显示出来了', chips.length === EXPECT.needsAttachments,
+        '有 ' + chips.length + ' 块，期望 ' + EXPECT.needsAttachments);
+
+      var labels = Array.prototype.map.call(chips, function (chip) {
+        return (chip.querySelector('.chip-label') || {}).textContent || '';
+      });
+      assert('文件那块写的是相对路径', labels.indexOf('src/panel/view.js') >= 0, labels.join(' | '));
+      assert('选区那块也写清了是哪个文件', labels.indexOf('src/panel/html.js') >= 0, labels.join(' | '));
+
+      var details = Array.prototype.map.call(chips, function (chip) {
+        return (chip.querySelector('.chip-detail') || {}).textContent || '';
+      });
+      assert('文件那块标了「当前文件」', details.indexOf('当前文件') >= 0, details.join(' | '));
+      assert('选区那块标了选了几行', details.some(function (d) { return d.indexOf('选中') >= 0; }), details.join(' | '));
+      assert('选区那块和文件那块外观可区分（各有自己的类）',
+        !!document.querySelector('#attachments .chip-sel') && !!document.querySelector('#attachments .chip-file'));
+
+      // 每个挂着的小块都要能拿掉 —— 并且是就地拿掉，不用等扩展回话。
+      var closes = document.querySelectorAll('#attachments .chip-close');
+      assert('每一块都有拿掉的按钮', closes.length === chips.length, closes.length + ' vs ' + chips.length);
+      var widthBefore = attachmentBox.getBoundingClientRect().width;
+      closes[0].click();
+      var after = document.querySelectorAll('#attachments .chip').length;
+      assert('点 × 能拿掉一块', after === chips.length - 1, '剩 ' + after);
+      assert('拿掉一块之后没把另一块也弄没了', after > 0);
+      assert('拿掉之后附件块还在（还剩着东西）', visible(attachmentBox));
+      assert('附件块没有横向溢出', attachmentBox.scrollWidth <= attachmentBox.clientWidth + 2,
+        attachmentBox.scrollWidth + ' > ' + attachmentBox.clientWidth + '（宽度 ' + widthBefore + '）');
+
+      // 发出去：附件必须跟着走。
+      // 注意这里自己取 DOM，不要用第 8 段那两个变量 —— var 会提升，
+      // 在这一段还只是 undefined（踩过，整个断言脚本会静默不跑）。
+      var ctxInput = document.getElementById('input');
+      var ctxSend = document.getElementById('send');
+      window.__received.length = 0;
+      ctxInput.value = '这两个文件是干嘛的？';
+      ctxInput.dispatchEvent(new Event('input', { bubbles: true }));
+      ctxSend.click();
+      var withAttach = window.__received.filter(function (m) { return m.type === 'send'; });
+      assert('带附件时照样发得出去', withAttach.length === 1, JSON.stringify(withAttach));
+      if (withAttach.length === 1) {
+        var carried = withAttach[0].attachments || [];
+        assert('附件跟着消息一起发走了', carried.length === 1, JSON.stringify(carried));
+        assert('发走的是没被拿掉的那一块', carried[0] && carried[0].kind === 'selection', JSON.stringify(carried));
+        assert('发走的附件带着正文（选区的内容不能丢）', carried[0] && carried[0].text === '<footer class="composer">',
+          JSON.stringify(carried[0] && carried[0].text));
+      }
+      assert('发完之后挂着的附件清空了', document.querySelectorAll('#attachments .chip').length === 0);
+      assert('清空之后附件块真的藏起来了', !visible(attachmentBox));
+
+      // 回头看对话记录：那条用户消息应该还看得出当时带了什么。
+      var bubbleChips = document.querySelectorAll('.msg-user .bubble .chip');
+      assert('发出去的那条消息里，附件还看得见', bubbleChips.length === EXPECT.needsAttachments,
+        '有 ' + bubbleChips.length + ' 块');
+      assert('历史消息里的附件不带拿掉的按钮（已经发走了）',
+        document.querySelectorAll('.msg-user .bubble .chip-close').length === 0);
     }
 
     // ── 8. 交互：发送 / 换行 / 空输入 / 忙碌时不许发 ──
