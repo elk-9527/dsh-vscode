@@ -83,6 +83,22 @@ function run(command, argv, options = {}) {
   return { out: `${result.stdout || ''}${result.stderr || ''}`, code: result.status };
 }
 
+/** 某个端口上有没有人在听（用来判断是"接入模式"还是"兜底拉起模式"）。 */
+function portIsUp(port) {
+  const net = require('node:net');
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: '127.0.0.1', port });
+    const done = (value) => {
+      socket.destroy();
+      resolve(value);
+    };
+    socket.setTimeout(500);
+    socket.once('connect', () => done(true));
+    socket.once('timeout', () => done(false));
+    socket.once('error', () => done(false));
+  });
+}
+
 /** 当前所有 Code.exe 的 PID。 */
 function codePids() {
   const { out } = run('tasklist', ['/FI', 'IMAGENAME eq Code.exe', '/FO', 'CSV', '/NH']);
@@ -95,24 +111,34 @@ function codePids() {
 }
 
 /**
- * 所有进程的 PID + 命令行。
+ * 所有进程的 PID、名字、父 PID、命令行。
  *
- * 收摊要靠它：只收「启动之后新出现的」进程。宁可多花一秒枚举，
- * 也不能靠猜名字去 taskkill —— 那是会误伤别人进程的做法。
+ * 收摊要靠它：只收「启动之后新出现的**我们自己的**」进程。
+ * 宁可多花一秒枚举，也不能靠猜名字去 taskkill —— 那是会误伤别人进程的做法。
+ *
+ * 为什么还要看名字和父进程（这一夜踩到的）：**用户自己的 DSH Desktop 拉起的内核
+ * 命令行里一样有 `--no-open`** —— 只按命令行匹配，就会把"用户正在用的内核"
+ * 当成"我们拉的"，轻则误报，重则把它杀掉。所以下面还要排除
+ * 「祖先是 DSH Desktop.exe」以及「我们自己的 shell/node」这两类。
  */
 function allProcesses() {
   const { out } = run('powershell', [
     '-NoProfile',
     '-Command',
-    'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId)`t$($_.CommandLine)" }',
+    'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId)`t$($_.ParentProcessId)`t$($_.Name)`t$($_.CommandLine)" }',
   ]);
   const list = [];
   for (const line of out.split('\n')) {
-    const tab = line.indexOf('\t');
-    if (tab < 0) continue;
-    const pid = Number(line.slice(0, tab).trim());
+    const parts = line.split('\t');
+    if (parts.length < 4) continue;
+    const pid = Number(parts[0].trim());
     if (!Number.isFinite(pid) || pid <= 0) continue;
-    list.push({ pid, cmdline: line.slice(tab + 1).trim() });
+    list.push({
+      pid,
+      ppid: Number(parts[1].trim()),
+      name: parts[2].trim(),
+      cmdline: parts.slice(3).join('\t').trim(),
+    });
   }
   return list;
 }
@@ -120,6 +146,48 @@ function allProcesses() {
 /** 启动之后新出现的进程。 */
 function newProcesses(beforePids) {
   return allProcesses().filter((item) => !beforePids.has(item.pid));
+}
+
+/** 往上找几层，看这个进程是不是桌面端（用户自己的 DSH Desktop）的后代。 */
+function belongsToDesktopApp(item, all) {
+  const byPid = new Map(all.map((entry) => [entry.pid, entry]));
+  let current = item;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (!current) return false;
+    if (/^DSH Desktop\.exe$/i.test(current.name)) return true;
+    current = byPid.get(current.ppid);
+  }
+  return false;
+}
+
+/**
+ * 这个新进程是不是「扩展/测试拉起来的 DSH」。
+ *
+ * 现场长这样（实测看来的，别再猜）：
+ *   cmd.exe /d /s /c "dsh --profile desktop --no-open --host 127.0.0.1 --port 0"
+ * 后面才是真正的内核 `DSH Desktop.exe`（它的命令行里反而没有 --profile/--no-open，
+ * 所以认那个 cmd.exe 才是最可靠的信号 —— 一开始我按进程名排除 cmd.exe，结果
+ * 自己拉起来的那个永远认不出来）。
+ *
+ * 排除两类，都是为了不误伤：
+ * - 我们自己的 powershell/node（它们的命令行里**写着**过滤条件，会自我匹配）；
+ * - 祖先是用户自己的 DSH Desktop 的进程。
+ */
+function isOurKernel(item, all) {
+  const cmd = item.cmdline;
+  if (!cmd) return false;
+  if (/^(powershell|pwsh|node)\.exe$/i.test(item.name)) return false;
+  if (!/--no-open/.test(cmd)) return false;
+  if (!/--profile\s+\S+/.test(cmd)) return false;
+  if (!/(^|[\s"'\\/])dsh(\.cmd)?["'\s]/.test(cmd)) return false;
+  if (belongsToDesktopApp(item, all)) return false;
+  return true;
+}
+
+/** 找出这次新拉起的内核。 */
+function ourKernels(beforePids) {
+  const all = allProcesses();
+  return all.filter((item) => !beforePids.has(item.pid) && isOurKernel(item, all));
 }
 
 /** 在隔离目录里找某个日志文件（日志目录带时间戳，所以得递归找）。 */
@@ -192,6 +260,13 @@ async function main() {
     console.log(`  ⏭  找不到已安装的扩展：${INSTALLED}（先装一次再跑）`);
     process.exit(2);
   }
+
+  // 先看 47821 上有没有门在跑，决定这次是验哪条路：
+  // - 有人在听 → 「接入模式」：面板该直接连上它，**不该**另起内核（这是主用例：
+  //   一个进程、一个大脑、同一份记忆）；
+  // - 没人在听 → 「兜底模式」：面板该自己拉一个 desktop 档内核起来。
+  const attached = await portIsUp(PORT);
+  console.log(`  47821 ${attached ? '上有门在跑 → 验「接入模式」' : '上没人 → 验「兜底拉起模式」'}`);
 
   const before = codePids();
   const beforePids = new Set(allProcesses().map((item) => item.pid));
@@ -268,28 +343,40 @@ async function main() {
   check('真的建出了会话（端到端成功）', /已建会话/.test(panelText),
     panelText ? `等了 ${waited} 秒` : `等了 ${waited} 秒还没读到扩展日志`);
 
-  // 兜底内核是按设计用随机端口的，所以这里查"命令行长这样"的新进程，而不是查端口。
-  const kernel = newProcesses(before).find((item) => /--profile\s+desktop/.test(item.cmdline) && /--no-open/.test(item.cmdline));
-  check('兜底拉起的是 desktop 档内核（继承你的插件与记忆）', Boolean(kernel),
-    kernel ? `PID ${kernel.pid}` : '没找到（可能面板连上了你桌面端正在跑的门）');
-  if (kernel) fs.writeFileSync(path.join(sandbox, 'kernel-cmdline.txt'), kernel.cmdline, 'utf8');
+  // 拉起内核这件事：接入模式下必须**没有**新内核，兜底模式下必须有。
+  const kernel = ourKernels(beforePids)[0];
+  if (attached) {
+    check('接入模式：连着正在跑的门，没有另起内核（一个进程、一个大脑）', !kernel,
+      kernel ? `却拉起了 PID ${kernel.pid}` : '没有新内核');
+  } else {
+    // 找不到时把「所有像内核的进程」列出来，方便一眼看出是漏判还是真没起。
+    const suspects = newProcesses(beforePids)
+      .filter((item) => /--no-open/.test(item.cmdline))
+      .map((item) => `${item.pid}(${item.name}: ${item.cmdline.slice(0, 70)})`);
+    check('兜底模式：自己拉起了 DSH 内核（继承你的插件与记忆）', Boolean(kernel),
+      kernel ? `PID ${kernel.pid}（${kernel.cmdline.slice(0, 80)}）`
+        : `没找到；现场有 ${suspects.length} 个 --no-open 进程：${suspects.join(' / ') || '一个都没有'}`);
+    if (kernel) fs.writeFileSync(path.join(sandbox, 'kernel-cmdline.txt'), kernel.cmdline, 'utf8');
+  }
 
   // 收摊：只收这次新出现的进程，只收自己拉起来的内核。
   if (keep) {
     console.log(`\n  --keep：窗口留着，自己关。PID：${newPids.join(', ') || '（没起来）'}`);
   } else {
     for (const pid of newPids) run('taskkill', ['/PID', String(pid), '/T', '/F']);
-    for (const item of newProcesses(before)) {
-      if (/--profile\s+desktop/.test(item.cmdline) && /--no-open/.test(item.cmdline)) {
-        run('taskkill', ['/PID', String(item.pid), '/T', '/F']);
-      }
-    }
+    // 只收"我开的那一个隔离窗口"。**一个内核都不杀**：
+    // 你自己的 DSH Desktop 也用它自己的内核，命令行长得跟扩展拉起来的很像，
+    // 靠名字/参数去分辨、然后 taskkill，是有可能误伤你正在用的内核的 ——
+    // 这种事一次都不该发生。扩展本来就会在自己 dispose 时收掉它拉的内核
+    // （test/fallback.js 专门验过），所以这里只需要**报告**有没有剩。
     sleep(3000);
     const stillThere = [...codePids()].filter((pid) => !before.has(pid));
     check('收摊后没留下窗口', stillThere.length === 0, stillThere.join(', ') || '干净');
-    const orphans = newProcesses(before).filter((item) => /--no-open/.test(item.cmdline));
-    check('收摊后没留下孤儿内核', orphans.length === 0,
-      orphans.map((item) => item.pid).join(', ') || '干净');
+    const orphans = ourKernels(beforePids);
+    check('收摊后没留下孤儿内核（扩展自己收的）', orphans.length === 0,
+      orphans.length
+        ? `${orphans.map((item) => item.pid).join(', ')} 还在（扩展应该自己收掉；这里不替你杀，免得误伤你自己的内核）`
+        : '干净');
     const mine = [...codePids()].filter((pid) => before.has(pid));
     check('你自己那个窗口一直没被动过', mine.length === before.size,
       `你的 PID：${mine.join(', ') || '（原本就没有）'}`);
