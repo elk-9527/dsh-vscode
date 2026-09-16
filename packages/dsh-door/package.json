@@ -1,0 +1,25 @@
+{
+  "name": "dsh-acp-door",
+  "version": "0.0.5",
+  "private": true,
+  "description": "在正在运行的 DeepSeek Harness 内核上，额外开一扇只监听本机的 ACP 门（供 VS Code 面板等外部程序连接）。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^1.4.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

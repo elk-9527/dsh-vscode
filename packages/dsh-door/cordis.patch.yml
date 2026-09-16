@@ -1,0 +1,17 @@
+# Bundle patch layer: the row loads this package's main entry as a host-side
+# Cordis plugin. It adds an extra loopback-only ACP transport on top of the
+# already-running kernel — see README.md.
+- insert:
+    - id: acp-door
+      name: dsh-acp-door
+      config:
+        # 只监听本机回环。改 host 会把门开到局域网上，别改。
+        host: 127.0.0.1
+        port: 47821
+        # 新会话的初始模型；面板连上后可以按会话再改。
+        provider: opencode-go
+        model: deepseek-v4.1-flash
+        # 新会话挂载哪套 agent preset。桌面端把宿主层的工具全关了、改成
+        # 「每个会话按预设挂载」，而 ACP 这条路从不点名预设，所以门要替它补上。
+        # 可选：standard（标准）| ptc（PTC 模式）| cordis（创造模式）| minimal（极简模式）。
+        preset: standard

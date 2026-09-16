@@ -1,12 +1,18 @@
 /**
  * 启动 dsh 的 ACP 内核进程：定位可执行文件、spawn、双向抓包。
  *
- * M0 期间这段逻辑被两个探针共用；M1 会把它提炼成
+ * M0 期间这段逻辑被三个探针共用；M1 会把它提炼成
  * packages/extension/src/dsh/{locate,process}.ts，本文件是它的行为基准。
+ *
+ * profile 由环境变量 DSH_PROFILE 决定：
+ *   - `acp`    官方精简 ACP 面（只有 dsh-base + dsh-acp-app）
+ *   - `vscode` 与桌面端同一套插件 + ACP 出口（记忆/技能/工具与桌面端一致）
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { createWriteStream, mkdirSync, readFileSync } from 'node:fs';
 import { Transform } from 'node:stream';
+
+const PROFILE = process.env.DSH_PROFILE ?? 'acp';
 
 /** 从 dsh.cmd 里抽出 `set "K=V"` 环境变量（只用于复现启动条件，不外传）。 */
 function envFromShim(text) {
@@ -24,7 +30,7 @@ function envFromShim(text) {
  */
 export function locateDsh() {
   if (process.env.DSH_EXECUTABLE) {
-    return { kind: 'explicit', command: process.env.DSH_EXECUTABLE, args: ['--profile', 'acp'], env: {} };
+    return { kind: 'explicit', command: process.env.DSH_EXECUTABLE, args: ['--profile', PROFILE], env: {} };
   }
   const which = process.platform === 'win32' ? 'where' : 'which';
   const found = spawnSync(which, ['dsh'], { encoding: 'utf8' });
@@ -43,13 +49,13 @@ export function locateDsh() {
         kind: 'shim',
         shimPath: first,
         command: m[1],
-        args: ['--expose-internals', m[2], '--profile', 'acp'],
+        args: ['--expose-internals', m[2], '--profile', PROFILE],
         env: envFromShim(text),
       };
     }
-    return { kind: 'shell', command: 'dsh --profile acp', args: [], env: {}, shell: true, shimPath: first };
+    return { kind: 'shell', command: `dsh --profile ${PROFILE}`, args: [], env: {}, shell: true, shimPath: first };
   }
-  return { kind: 'path', command: first, args: ['--profile', 'acp'], env: {} };
+  return { kind: 'path', command: first, args: ['--profile', PROFILE], env: {} };
 }
 
 /** 逐行切分并旁路记录，但原样透传字节。 */
@@ -111,6 +117,7 @@ export function launchDsh({ cwd, captureDir, tag, onStderr }) {
 
   return {
     spec,
+    profile: PROFILE,
     child,
     toChild,
     fromChild,

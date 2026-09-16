@@ -9,3 +9,6 @@ spike/scratch/
 
 .DS_Store
 *.log
+
+# 打包产物（可随时用 npm pack 重新生成）
+*.tgz
