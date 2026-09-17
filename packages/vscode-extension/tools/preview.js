@@ -403,6 +403,20 @@ const SCENARIOS = {
     };
   },
 
+  /**
+   * 历史会话：这个场景本身只摆好「已连上 + 工作目录」，浮层里的清单和回放
+   * 都由 uitest 的断言脚本现场注入 —— 因为真实链路是「点开浮层才去要清单」，
+   * 提前喂的消息会被「浮层没开就不渲染」的护栏丢掉（那道护栏是对的）。
+   */
+  history() {
+    return {
+      steps: [
+        { message: { type: 'status', state: 'ready', detail: '已连上正在运行的 DSH' } },
+        { message: { type: 'meta', cwd: 'D:\\dsh-vscode\\packages\\vscode-extension' } },
+      ],
+    };
+  },
+
   /** 权限询问（内核反过来问客户端）。 */
   permission() {
     return {

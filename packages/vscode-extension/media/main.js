@@ -16,6 +16,11 @@
     statusText: document.getElementById('status-text'),
     barCwd: document.getElementById('bar-cwd'),
     barClock: document.getElementById('bar-clock'),
+    historyBtn: document.getElementById('history-btn'),
+    historyPanel: document.getElementById('history'),
+    historyList: document.getElementById('history-list'),
+    historyMeta: document.getElementById('history-meta'),
+    historyClose: document.getElementById('history-close'),
     configRow: document.getElementById('config-row'),
     modelSelect: document.getElementById('model-select'),
     presetField: document.getElementById('preset-field'),
@@ -84,6 +89,12 @@
         break;
       case 'meta':
         setWorkdir(message.cwd);
+        break;
+      case 'history':
+        renderHistory(message);
+        break;
+      case 'replay':
+        renderReplay(message);
         break;
       case 'user':
         addUser(message.text, message.attachments);
@@ -230,6 +241,186 @@
     if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`;
     const minutes = Math.floor(seconds / 60);
     return `${minutes}分${String(Math.round(seconds % 60)).padStart(2, '0')}秒`;
+  }
+
+  // ── 历史会话 ────────────────────────────────────────
+
+  /**
+   * 打开/关闭历史浮层。打开时总是重新拉清单 —— 会话记录随时在变，
+   * 缓存一份只会让人看到旧数据。
+   */
+  function toggleHistory(open) {
+    const show = open === undefined ? el.historyPanel.hidden : open;
+    el.historyPanel.hidden = !show;
+    el.historyBtn.setAttribute('aria-expanded', show ? 'true' : 'false');
+    if (show) {
+      el.historyList.textContent = '';
+      const loading = document.createElement('div');
+      loading.className = 'history-empty';
+      loading.textContent = '正在读取历史会话…';
+      el.historyList.appendChild(loading);
+      el.historyMeta.textContent = '';
+      post({ type: 'historyList' });
+    }
+  }
+
+  /** 会话时间显示：当年的只显示「月-日 时:分」，往年的带上年份。 */
+  function fmtSessionTime(ms) {
+    if (!Number.isFinite(ms) || ms <= 0) return '';
+    const d = new Date(ms);
+    const pad = (n) => String(n).padStart(2, '0');
+    const now = new Date();
+    const hm = `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    return d.getFullYear() === now.getFullYear() ? hm : `${d.getFullYear()}-${hm}`;
+  }
+
+  /** 工作目录只留尾部一段，列表里够认就行。 */
+  function tailPath(cwd) {
+    if (typeof cwd !== 'string' || !cwd) return '';
+    const parts = cwd.split(/[\\/]/).filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : cwd;
+  }
+
+  /**
+   * 渲染历史清单（或错误 —— 门太旧、读盘失败都要在这一层说清楚）。
+   */
+  function renderHistory(message) {
+    if (el.historyPanel.hidden) return; // 用户已经关掉了，别又把浮层撑开
+    el.historyList.textContent = '';
+    if (message.error) {
+      const box = document.createElement('div');
+      box.className = 'history-empty';
+      box.textContent = message.error;
+      el.historyList.appendChild(box);
+      return;
+    }
+    const sessions = Array.isArray(message.sessions) ? message.sessions : [];
+    if (message.skipped > 0) {
+      el.historyMeta.textContent = `最近 ${sessions.length} 段（更早的 ${message.skipped} 段没列出）`;
+    } else {
+      el.historyMeta.textContent = sessions.length ? `共 ${sessions.length} 段` : '';
+    }
+    if (sessions.length === 0) {
+      const box = document.createElement('div');
+      box.className = 'history-empty';
+      box.textContent = '还没有历史会话。';
+      el.historyList.appendChild(box);
+      return;
+    }
+    for (const card of sessions) {
+      el.historyList.appendChild(historyItem(card));
+    }
+  }
+
+  function historyItem(card) {
+    const row = document.createElement('div');
+    row.className = 'history-item';
+
+    const main = document.createElement('div');
+    main.className = 'history-item-main';
+    const title = document.createElement('p');
+    title.className = 'history-item-title';
+    title.textContent = card.title || card.fallbackTitle || '（无标题）';
+    title.title = title.textContent;
+    const sub = document.createElement('p');
+    sub.className = 'history-item-sub';
+    const when = fmtSessionTime(card.lastTime || card.mtime);
+    const bits = [
+      when,
+      `${card.turns || 0} 回合`,
+      tailPath(card.cwd),
+      card.preset && card.preset !== 'standard' ? card.preset : '',
+    ].filter(Boolean);
+    sub.textContent = bits.join(' · ');
+    if (card.decodeError) sub.title = card.decodeError;
+    main.appendChild(title);
+    main.appendChild(sub);
+    row.appendChild(main);
+
+    const actions = document.createElement('div');
+    actions.className = 'history-item-actions';
+    const replayBtn = document.createElement('button');
+    replayBtn.type = 'button';
+    replayBtn.textContent = '回放';
+    replayBtn.title = '看这段对话的内容（不接回上下文）';
+    replayBtn.addEventListener('click', () => {
+      post({ type: 'historyOpen', id: card.id });
+    });
+    actions.appendChild(replayBtn);
+    const resumeBtn = document.createElement('button');
+    resumeBtn.type = 'button';
+    resumeBtn.textContent = '接回';
+    resumeBtn.title = '回放这段对话，并试着把上下文接回来继续聊';
+    resumeBtn.addEventListener('click', () => {
+      post({ type: 'historyResume', id: card.id });
+    });
+    actions.appendChild(resumeBtn);
+    row.appendChild(actions);
+    return row;
+  }
+
+  /**
+   * 渲染回放：按当年发生的样子重建转录（用户消息、它的回答、工具卡）。
+   *
+   * 工具卡复用 upsertTool：它默认折叠、点开看详情，跟实时对话里一模一样。
+   * 回放是静态的 —— 没有流式光标，也不动画，一眼能看出「这是历史」。
+   */
+  function renderReplay(message) {
+    toggleHistory(false);
+    state.messages.clear();
+    el.messages.textContent = '';
+    el.permission.hidden = true;
+    el.empty.hidden = true;
+    state.pinned = true;
+
+    const entries = Array.isArray(message.entries) ? message.entries : [];
+    let lastAssistantId;
+    for (let i = 0; i < entries.length; i += 1) {
+      const item = entries[i];
+      if (item.kind === 'user') {
+        addUser(item.text);
+        continue;
+      }
+      if (item.kind === 'assistant') {
+        lastAssistantId = `replay-a${i}`;
+        addAssistant(lastAssistantId);
+        const entry = state.messages.get(lastAssistantId);
+        entry.text = item.text || '';
+        if (item.thinking) {
+          entry.thinking.hidden = false;
+          entry.thinkBody.textContent = item.thinking;
+        }
+        finishAssistant(lastAssistantId);
+        continue;
+      }
+      if (item.kind === 'tool') {
+        // 挂到最近一条助手消息里（跟实时对话同构：工具是回答的一部分），
+        // 而不是平铺在消息区顶层 —— 那样消息间距会被撑得忽大忽小。
+        if (state.messages.has(lastAssistantId)) {
+          upsertTool(lastAssistantId, {
+            toolCallId: `replay-t${i}`,
+            kind: 'other',
+            // 工具名在门给的条目里是单独一个字段（不在 args 里），
+            // 而 toolName 只认 rawInput.tool / rawInput.name —— 拼进去。
+            rawInput: { tool: item.name, ...(item.args && typeof item.args === 'object' ? item.args : {}) },
+            content: item.output ? [{ type: 'text', text: item.output }] : [],
+            status: 'completed',
+          });
+        }
+      }
+    }
+
+    const card = message.card || {};
+    const when = fmtSessionTime(card.lastTime || card.mtime);
+    const head = `历史回放：${card.title || card.fallbackTitle || '（无标题）'}${when ? `（${when}）` : ''}`;
+    addNotice(truncatedReplayNote(head, message.truncated === true));
+    scrollToBottom();
+  }
+
+  function truncatedReplayNote(head, truncated) {
+    return truncated
+      ? `${head}。太长了，只回放了靠前的部分。`
+      : `${head}。以上是回放，不是实时对话。`;
   }
 
   // ── 转录区 ──────────────────────────────────────────
@@ -861,6 +1052,8 @@
 
   el.send.addEventListener('click', submit);
   el.stop.addEventListener('click', () => post({ type: 'stop' }));
+  el.historyBtn.addEventListener('click', () => toggleHistory());
+  el.historyClose.addEventListener('click', () => toggleHistory(false));
 
   // 点击链接交给扩展去开外部浏览器（webview 里点链接默认没反应）。
   document.addEventListener('click', (event) => {

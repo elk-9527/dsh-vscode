@@ -52,6 +52,9 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
       <span class="spacer"></span>
       <span id="bar-cwd" class="bar-meta" hidden></span>
       <span id="bar-clock" class="bar-meta" hidden></span>
+      <button id="history-btn" class="icon-btn" type="button" title="历史会话" aria-label="历史会话" aria-expanded="false">
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M8 1.3A6.7 6.7 0 1 0 14.7 8 6.7 6.7 0 0 0 8 1.3Zm0 1.2A5.5 5.5 0 1 1 2.5 8 5.5 5.5 0 0 1 8 2.5ZM7.4 4.3v4l3.2 1.9.6-1-2.6-1.6V4.3Z"/></svg>
+      </button>
     </div>
     <div class="bar-row" id="config-row" hidden>
       <label class="field">
@@ -75,6 +78,19 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
       <p class="empty-hint">直接提问即可。它用的是你正在运行的 DSH —— 同一份记忆、同一份会话记录、同一套工具。</p>
     </div>
   </main>
+
+  <!-- 历史会话浮层：盖住整个面板；列表内容由 main.js 填。 -->
+  <div id="history" class="history" hidden>
+    <div class="history-head">
+      <span class="history-title">历史会话</span>
+      <span id="history-meta" class="history-meta"></span>
+      <span class="spacer"></span>
+      <button id="history-close" class="icon-btn" type="button" title="关闭" aria-label="关闭历史会话">
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M3.7 3 3 3.7 7.3 8 3 12.3l.7.7L8 8.7l4.3 4.3.7-.7L8.7 8 13 3.7l-.7-.7L8 7.3Z"/></svg>
+      </button>
+    </div>
+    <div id="history-list" class="history-list"></div>
+  </div>
 
   <footer class="composer">
     <div class="attachments" id="attachments" hidden></div>

@@ -261,9 +261,27 @@ class DoorClient extends EventEmitter {
     return this.request('session/resume', params);
   }
 
-  /** 列出历史会话。 */
+  /**
+   * 列出历史会话。
+   *
+   * 走门的自定义方法（`dsh-door/sessions/list`）：内核没有公开的「列历史」
+   * 方法，会话文件在本机磁盘上，门读盘应答（需要门 0.0.8+；旧门会回
+   * -32601，上层要按「门太旧」翻译）。
+   *
+   * @returns {Promise<{sessions: object[], skipped: number}>}
+   */
   listSessions() {
-    return this.request('session/list', {});
+    return this.request('dsh-door/sessions/list', {});
+  }
+
+  /**
+   * 取一段历史会话的名片与回放。
+   *
+   * @param {string} id 会话 id。
+   * @returns {Promise<{card: object, entries: object[], truncated: boolean}>}
+   */
+  getHistorySession(id) {
+    return this.request('dsh-door/sessions/get', { id });
   }
 
   /** 关闭会话。 */

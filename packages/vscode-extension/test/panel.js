@@ -70,7 +70,7 @@ require.cache['vscode-mock'] = {
 };
 
 const { DshPanelView } = require('../src/panel/view');
-const { ensureDoor } = require('./helpers/door');
+const { ensureDoor, syncDoor } = require('./helpers/door');
 
 // ── 断言小工具 ──────────────────────────────────────────
 
@@ -144,6 +144,8 @@ function typesOf(items) {
 
   // 内核没开就自己拉一个（跑完负责收摊）。「自动拉起」那条路另有
   // test/fallback.js 专测，所以这里配置里的 autoStart 是关的，免得两处都拉进程。
+  // 门要先跟源码对齐 —— 这里测的正是 dsh-door/sessions 这些新方法。
+  syncDoor({ log });
   const door = await ensureDoor({ log });
 
   section('1. 视图注册与 HTML 生成');
@@ -276,6 +278,10 @@ function typesOf(items) {
       extensionUri: { fsPath: 'D:\\dsh-vscode\\packages\\vscode-extension' },
       log,
     });
+    // 隔离掉自动候选：这一节只测「设置的命令坏了」这条路径 ——
+    // 否则候选清单会带上默认安装位置的 node bin.js（它是好的），
+    // 测试就得等真内核起来，那不是本节要验的事。
+    badPanel.candidatesFor = () => [configValues.dshCommand];
     const badView = makeFakeView();
     badPanel.resolveWebviewView(badView);
 
@@ -460,6 +466,56 @@ function typesOf(items) {
       thrown = error.message;
     }
     check('命令填成空的时候立刻报错（不拖到进程起来之后）', /dshCommand/.test(thrown), thrown);
+  }
+
+  section('8.9 历史会话（dsh-door/sessions 旁路方法，需要门 0.0.8+）');
+  {
+    const beforeHistory = view.messages.length;
+    await panel.onWebviewMessage({ type: 'historyList' });
+    await waitFor(() =>
+      view.messages
+        .slice(beforeHistory)
+        .some((item) => item.message.type === 'history' || item.message.type === 'error'),
+    );
+    const historyMsg = view.messages
+      .slice(beforeHistory)
+      .map((item) => item.message)
+      .find((item) => item.type === 'history');
+    check('界面上收到 history 消息', Boolean(historyMsg), JSON.stringify(view.messages.slice(beforeHistory).map((i) => i.message.type)));
+    const sessions = historyMsg && historyMsg.sessions;
+    check('清单是数组而且非空（这台机器上一定有历史）', Array.isArray(sessions) && sessions.length > 0,
+      historyMsg ? `共 ${Array.isArray(sessions) ? sessions.length : '?'} 段` : '没有 history 消息');
+    if (Array.isArray(sessions) && sessions.length > 0) {
+      const card = sessions[0];
+      check('名片带 id、回合数、时间', Boolean(card.id) && typeof card.turns === 'number'
+        && (typeof card.lastTime === 'number' || typeof card.mtime === 'number'), JSON.stringify(card).slice(0, 200));
+
+      const beforeReplay = view.messages.length;
+      await panel.onWebviewMessage({ type: 'historyOpen', id: card.id });
+      await waitFor(() =>
+        view.messages.slice(beforeReplay).some((item) => item.message.type === 'replay' || item.message.type === 'error'),
+      );
+      const replay = view.messages.slice(beforeReplay).map((item) => item.message)
+        .find((item) => item.type === 'replay');
+      check('回放送到界面', Boolean(replay));
+      check('回放带名片与条目数组', Boolean(replay && replay.card) && Array.isArray(replay.entries),
+        replay ? `条目 ${replay.entries.length}` : '没有 replay');
+      check('回放条目都是认识的形状',
+        Boolean(replay) && replay.entries.every((item) => ['user', 'assistant', 'tool'].includes(item.kind)),
+        replay ? JSON.stringify(replay.entries.find((item) => !['user', 'assistant', 'tool'].includes(item.kind))) : '');
+    }
+
+    // 接回一个不存在的会话：必须失败得清清楚楚，而且面板还活着。
+    const beforeBad = view.messages.length;
+    await panel.onWebviewMessage({ type: 'historyResume', id: 'session-does-not-exist-9f3a' });
+    await waitFor(() =>
+      view.messages.slice(beforeBad).some((item) => item.message.type === 'notice' || item.message.type === 'error'),
+      { totalMs: 20000 },
+    );
+    const badOutcome = view.messages.slice(beforeBad).map((item) => item.message)
+      .find((item) => item.type === 'notice' || item.type === 'error');
+    check('接回不存在的会话会明说（notice 或 error）', Boolean(badOutcome), JSON.stringify(view.messages.slice(beforeBad).map((i) => i.message.type)));
+    check('失败后面板还能继续用', Boolean(panel.client && panel.client.isConnected));
   }
 
   section('9. 收摊');

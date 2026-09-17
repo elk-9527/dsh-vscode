@@ -40,6 +40,8 @@ const EXPECTATIONS = {
   perf: { needsUser: true, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0, perf: true },
   // 内核报错：人话在前、原文在后。这段只有一条用户消息 + 一个错误块。
   error: { needsUser: true, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0, errorShape: true },
+  // 历史会话：浮层、清单、回放、接回 —— 全在断言脚本里现场注入（见那个场景的说明）。
+  history: { needsUser: false, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0, historyScene: true },
 };
 
 /**
@@ -498,6 +500,91 @@ function assertionsScript(scene) {
         assert('人话的对比度可读', !!errAdvice && contrastOf(errAdvice) >= 2.5,
           errAdvice ? String(contrastOf(errAdvice)) : '没有');
       }
+    }
+
+    // ── 7.7 历史会话：浮层 → 清单 → 回放 → 接回 ────────
+    // 真实链路是「点开浮层 → 界面向扩展要清单 → 门读盘应答」。
+    // 这里扮演扩展的那一半：点按钮后由断言脚本 postMessage 应答，
+    // 量的是界面的这一半（浮层、渲染、护栏、按钮发对消息）。
+    if (EXPECT.historyScene) {
+      var overlay = document.getElementById('history');
+      assert('历史浮层默认藏着', !visible(overlay));
+      var hbtn = document.getElementById('history-btn');
+      assert('历史按钮可见', visible(hbtn));
+
+      window.__received.length = 0;
+      hbtn.click();
+      assert('点历史按钮浮层打开', visible(overlay));
+      assert('打开时向扩展要了清单', window.__received.some(function (m) { return m.type === 'historyList'; }));
+
+      // 扮演扩展应答（形状对着门 0.0.8 的应答抄）。
+      window.postMessage({ type: 'history', skipped: 5, sessions: [
+        { id: 'session-alpha', title: '修门插件的依赖注入', turns: 12, lastTime: Date.now() - 3600e3, cwd: 'D:/dsh-vscode', preset: 'standard' },
+        { id: 'session-beta', title: '重写界面的渲染循环', turns: 4, lastTime: Date.now() - 86400e3, cwd: 'D:/dsh-vscode/packages/vscode-extension', preset: 'ptc' },
+        { id: 'session-gamma', title: '', fallbackTitle: '帮我看看这个报错', turns: 1, lastTime: Date.parse('2025-11-02T09:12:00'), cwd: 'C:/Users/Lenovo', decodeError: '有一帧解码失败' },
+      ] }, '*');
+      await new Promise(function (resolve) { setTimeout(resolve, 400); });
+      var items = overlay.querySelectorAll('.history-item');
+      assert('清单渲染出 3 段会话', items.length === 3, items.length + ' 段');
+      assert('统计里写明更早的没列出', (document.getElementById('history-meta').textContent || '').indexOf('5') >= 0,
+        document.getElementById('history-meta').textContent);
+      var firstTitle = overlay.querySelector('.history-item-title');
+      assert('第一条显示内核生成的标题', !!firstTitle && firstTitle.textContent.indexOf('修门插件') === 0,
+        firstTitle ? firstTitle.textContent : '无');
+      var sub2 = overlay.querySelectorAll('.history-item-sub')[1];
+      assert('非默认模式的名字显示在副行', !!sub2 && sub2.textContent.indexOf('ptc') >= 0, sub2 ? sub2.textContent : '无');
+      assert('没标题的会话用第一句话顶上',
+        items[2].querySelector('.history-item-title').textContent.indexOf('帮我看看') >= 0,
+        items[2].querySelector('.history-item-title').textContent);
+      assert('解码出错的会话把原因挂在副行提示里',
+        (items[2].querySelector('.history-item-sub').title || '').indexOf('解码失败') >= 0,
+        items[2].querySelector('.history-item-sub').title);
+
+      // 回放：点「回放」→ 界面发 historyOpen → 扩展送回 replay。
+      window.__received.length = 0;
+      items[0].querySelectorAll('button')[0].click();
+      assert('点回放会向扩展要这段会话（带 id）',
+        window.__received.some(function (m) { return m.type === 'historyOpen' && m.id === 'session-alpha'; }),
+        JSON.stringify(window.__received));
+      window.postMessage({ type: 'replay', truncated: false, card: { id: 'session-alpha', title: '修门插件的依赖注入', turns: 12, lastTime: Date.now() - 3600e3 }, entries: [
+        { kind: 'user', text: '门插件报 cannot get property 是怎么回事？' },
+        { kind: 'assistant', text: '原因是 cordis 不允许在没有 **inject** 的情况下读服务属性。', thinking: '先查 cordis 的服务解析规则。' },
+        { kind: 'tool', name: 'read', args: { file_path: 'lib/index.js' }, output: 'export const inject = [];' },
+        { kind: 'assistant', text: '补上 inject 就好了。' },
+      ] }, '*');
+      await new Promise(function (resolve) { setTimeout(resolve, 500); });
+      assert('回放开始后浮层收起来了', !visible(overlay));
+      assert('回放重建了用户气泡', document.querySelectorAll('.msg-user .bubble').length === 1,
+        document.querySelectorAll('.msg-user .bubble').length + ' 个');
+      var bodies = document.querySelectorAll('.msg-assistant .body');
+      assert('回放重建了两段回答', bodies.length === 2 && bodies[0].textContent.indexOf('cordis') >= 0,
+        bodies.length + ' 段');
+      assert('回放的思考块也在（且默认可见）', document.querySelectorAll('details.thinking:not([hidden])').length === 1);
+      var replayTools = document.querySelectorAll('.tool');
+      assert('回放重建了工具卡（默认折叠）', replayTools.length === 1 && !replayTools[0].classList.contains('open'),
+        replayTools.length + ' 张');
+      assert('回放的工具卡写着工具名', replayTools[0] && replayTools[0].querySelector('.tool-name').textContent === 'read',
+        replayTools[0] ? replayTools[0].querySelector('.tool-name').textContent : '无');
+      var noteText = (document.querySelector('.msg-note') || {}).textContent || '';
+      assert('回放末尾说明了这是回放', noteText.indexOf('回放') >= 0, noteText);
+
+      // 接回：重新打开浮层点「接回」——界面要发 historyResume。
+      // 重新打开会清列表显示「正在读取…」，所以再应答一次清单。
+      window.__received.length = 0;
+      hbtn.click();
+      assert('回放之后还能再打开浮层', visible(overlay));
+      window.postMessage({ type: 'history', skipped: 5, sessions: [
+        { id: 'session-alpha', title: '修门插件的依赖注入', turns: 12, lastTime: Date.now() - 3600e3, cwd: 'D:/dsh-vscode', preset: 'standard' },
+      ] }, '*');
+      await new Promise(function (resolve) { setTimeout(resolve, 400); });
+      var again = overlay.querySelectorAll('.history-item');
+      var resumeBtn = again[0] ? again[0].querySelectorAll('button')[1] : null;
+      if (resumeBtn) resumeBtn.click();
+      assert('点接回会发 historyResume（带 id）',
+        window.__received.some(function (m) { return m.type === 'historyResume' && m.id === 'session-alpha'; }),
+        JSON.stringify(window.__received));
+      document.getElementById('history-close').click();
+      assert('关闭按钮能收起浮层', !visible(overlay));
     }
 
     // ── 8. 交互：发送 / 换行 / 空输入 / 忙碌时不许发 ──

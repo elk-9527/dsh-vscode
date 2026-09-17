@@ -162,6 +162,15 @@ class DshPanelView {
         case 'permission':
           if (this.session) this.session.answerPermission(message.requestId, message.optionId);
           break;
+        case 'historyList':
+          await this.sendHistoryList();
+          break;
+        case 'historyOpen':
+          await this.sendHistoryReplay(message.id);
+          break;
+        case 'historyResume':
+          await this.resumeHistory(message.id);
+          break;
         case 'openLink':
           this.openLink(message.href);
           break;
@@ -224,6 +233,14 @@ class DshPanelView {
   }
 
   /**
+   * 兜底拉起要试的候选命令（单独成方法：测试里可以隔离掉自动候选，
+   * 只测「命令坏了」这条路径）。
+   */
+  candidatesFor(cfg) {
+    return dshCommandCandidates({ dshCommand: cfg.dshCommand, homedir: os.homedir() });
+  }
+
+  /**
    * 后台拉起 DSH：按候选命令逐个试，谁先开出门就用谁。
    *
    * 为什么是「逐个试」而不是只信设置里的那一条：默认值是裸的 `dsh`，
@@ -246,7 +263,7 @@ class DshPanelView {
     this.log('info', '门连不上，按设置自动拉起后台 DSH');
     if (this.background) this.background.dispose();
 
-    const candidates = dshCommandCandidates({ dshCommand: cfg.dshCommand, homedir: os.homedir() });
+    const candidates = this.candidatesFor(cfg);
     if (candidates.length === 0) {
       return {
         ok: false,
@@ -513,6 +530,88 @@ class DshPanelView {
     // 从这一刻起这段会话「说过话」了：换预设时就不能再悄悄重开它。
     this.turnSent = true;
     await session.send(text, { attachments: items });
+  }
+
+  // ── 历史会话（门 0.0.8+ 的旁路方法）──────────────────────
+
+  /**
+   * 把历史会话清单送给界面。
+   *
+   * 门太旧（0.0.8 之前没有这个方法，回 -32601）时要**说人话**：告诉用户
+   * 该升级/重启门，而不是甩一句英文方法不存在。
+   */
+  async sendHistoryList() {
+    const session = await this.ensureConnection();
+    if (!session) return;
+    try {
+      const result = await this.client.listSessions();
+      this.post({
+        type: 'history',
+        sessions: Array.isArray(result && result.sessions) ? result.sessions : [],
+        skipped: (result && result.skipped) || 0,
+      });
+    } catch (error) {
+      const text = this.errText(error);
+      if (error && (error.code === -32601 || /不支持.*dsh-door\/sessions|method not found/i.test(text))) {
+        this.post({
+          type: 'history',
+          error: '门插件太旧（需要 dsh-acp-door 0.0.8 以上）。重启桌面端 DSH（或重装门插件）后再试。',
+        });
+      } else {
+        this.post({ type: 'history', error: `读历史会话失败：${text}` });
+      }
+    }
+  }
+
+  /** 把一段历史会话的回放送给界面。 */
+  async sendHistoryReplay(id) {
+    const session = await this.ensureConnection();
+    if (!session) return;
+    try {
+      const result = await this.client.getHistorySession(String(id || ''));
+      this.post({
+        type: 'replay',
+        card: result && result.card ? result.card : {},
+        entries: Array.isArray(result && result.entries) ? result.entries : [],
+        truncated: Boolean(result && result.truncated),
+      });
+    } catch (error) {
+      this.postError(this.errText(error));
+    }
+  }
+
+  /**
+   * 从历史里接回一段会话：先回放，再试 `session/resume` 把上下文接回来。
+   *
+   * 为什么两件事一起做：用户点「接回」要的是「接着上次聊」，只有上下文
+   * 没有记录（或只有记录没有上下文）都是残缺的。resume 失败（内核重启过、
+   * 内存里没有这段）时明确说明「上面只是回放」，绝不假装接上了。
+   */
+  async resumeHistory(id) {
+    const session = await this.ensureConnection();
+    if (!session) return;
+    await this.sendHistoryReplay(id);
+    if (session.busy) {
+      this.post({ type: 'notice', text: '它正在工作，等这回合结束后再接回历史。' });
+      return;
+    }
+    try {
+      await session.resume(String(id || ''), this.workdir(), { preset: this.wantedPreset() });
+      this.turnSent = true;
+      this.resumeTarget = undefined;
+      this.post({
+        type: 'status',
+        state: 'ready',
+        detail: '已接回这段历史会话，它记得上面说过的内容',
+      });
+    } catch (error) {
+      this.post({
+        type: 'notice',
+        text:
+          `这段历史没能接回上下文（${this.errText(error)}）。` +
+          '上面只是回放；你可以继续在这里发新消息。',
+      });
+    }
   }
 
   // ── 编辑器上下文（当前文件 / 选中的代码）────────────────

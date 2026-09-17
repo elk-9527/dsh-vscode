@@ -562,6 +562,117 @@ body {
   font-style: normal;
 }
 
+/* ── 历史会话浮层 ───────────────────────────────────── */
+
+/*
+ * 盖住整个面板（fixed 全屏）：列表有自己的头和关闭按钮，
+ * 打开期间底下那套状态条/输入框都看不见 —— 逻辑最简单，也不会抢焦点。
+ */
+.history {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: var(--vscode-sideBar-background);
+  display: flex;
+  flex-direction: column;
+  animation: fade-in var(--dsh-dur) ease;
+}
+
+.history-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px var(--dsh-pad);
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.history-title {
+  font-weight: 600;
+  font-size: 1em;
+}
+
+.history-meta {
+  color: var(--vscode-descriptionForeground);
+  font-size: var(--dsh-fs-xs);
+}
+
+.history-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: var(--dsh-pad);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: var(--dsh-radius);
+  min-width: 0;
+}
+
+.history-item:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.history-item-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.history-item-title {
+  margin: 0;
+  font-size: var(--dsh-fs-s);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-item-sub {
+  margin: 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: var(--dsh-fs-xs);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-item-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 4px;
+}
+
+.history-item-actions button {
+  padding: 4px 8px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: var(--dsh-radius-s);
+  background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
+  color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
+  font-family: inherit;
+  font-size: var(--dsh-fs-xs);
+  cursor: pointer;
+}
+
+.history-item-actions button:hover {
+  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground));
+}
+
+.history-empty {
+  margin: auto;
+  text-align: center;
+  color: var(--vscode-descriptionForeground);
+  font-size: var(--dsh-fs-s);
+  max-width: 260px;
+}
+
 /* ── 输入区 ─────────────────────────────────────────── */
 
 .composer {
