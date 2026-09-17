@@ -348,6 +348,120 @@ function typesOf(items) {
     configValues.cwd = savedCwd;
   }
 
+  section('8.7 内核的错误必须说人话，而且不能吞掉原文');
+  {
+    // 背景：内核的报错是**原样**穿过 ACP 的，以前用户看到的就是一段英文 JSON
+    // （最典型的是 429 额度限制）。那段文字对用户没有用 —— 既不说发生了什么，
+    // 也不说下一步干什么，看多了只会得出「这插件没法用」的结论。
+    const { describeError } = require('../src/dsh/errors');
+
+    const cases = [
+      {
+        name: '429 额度限制',
+        text: '回合失败：Internal error: turn failed: 429: {"type":"GoUsageLimitError","message":"5-hour usage limit reached. Resets in 12min..."}',
+        kind: 'usage-limit',
+        title: /额度|频率限制/,
+        advice: /12 分钟/,
+      },
+      {
+        name: '鉴权失败',
+        text: 'Internal error: turn failed: 401: {"error":{"message":"Incorrect API key provided"}}',
+        kind: 'auth',
+        title: /密钥|权限/,
+        advice: /settings\.yaml/,
+      },
+      {
+        name: '连不上内核',
+        text: 'fetch failed: connect ECONNREFUSED 127.0.0.1:47821',
+        kind: 'connection',
+        title: /连不上|断了/,
+        advice: /重新连接/,
+      },
+      {
+        name: '端口被占',
+        text: 'listen EADDRINUSE: address already in use 127.0.0.1:47821',
+        kind: 'port',
+        title: /端口/,
+        advice: /47821/,
+      },
+      {
+        name: '命令不存在',
+        text: 'spawn dsh ENOENT',
+        kind: 'command',
+        title: /命令/,
+        advice: /PATH|dshCommand/,
+      },
+    ];
+
+    for (const item of cases) {
+      const human = describeError(item.text);
+      check(`${item.name} → 分类对了`, human.kind === item.kind, `实际分类是 ${human.kind}`);
+      check(`${item.name} → 说清了发生了什么`, item.title.test(human.title), human.title);
+      check(`${item.name} → 说清了你能做什么`, item.advice.test(human.advice), human.advice);
+      check(`${item.name} → 原文一个字都没少`, human.raw === item.text);
+    }
+
+    // 认不出来的错误：也必须有一句人话开头，而且原文照旧留着 ——
+    // 「翻译不了」不等于「可以把信息丢掉」。
+    const weird = '💥 内核吐了一坨没见过的玩意儿 at 0xDEADBEEF';
+    const other = describeError(weird);
+    check('认不出来的错误也有人话开头', other.known === false && other.title.length > 0, other.title);
+    check('认不出来的错误原文照旧保留', other.raw === weird);
+    check('认不出来时告诉用户去看日志或把原文发回来', /日志|发给我/.test(other.advice), other.advice);
+
+    // 端到端：错误从会话层冒出来，界面拿到的必须是「人话 + 原文」两样都有。
+    const fake = cases[0].text;
+    const before = view.messages.length;
+    panel.session.emit('error', { message: fake });
+    const posted = view.messages
+      .slice(before)
+      .map((item) => item.message)
+      .find((item) => item.type === 'error');
+    check('错误经过面板时带上了人话', Boolean(posted && posted.human && posted.human.title), JSON.stringify(posted));
+    check(
+      '人话的分类也传到了界面',
+      Boolean(posted && posted.human && posted.human.kind === 'usage-limit'),
+      posted && posted.human ? posted.human.kind : '没有 human',
+    );
+    check('原文跟着人话一起发出去（没被吞掉）', Boolean(posted && posted.message === fake));
+  }
+
+  section('8.8 dshCommand 可以带参数（本机 dsh 不在 PATH 上时就得这么写）');
+  {
+    // 实测过的坑：把「node D:\...\bin.js」**整串**当成一个程序名去加引号，
+    // cmd.exe 会去找一个名字里带空格的程序，直接以退出码 1 失败
+    // （原文是「不是内部或外部命令」）。所以命令必须先拆开再逐段加引号。
+    const { splitCommand, commandLine } = require('../src/door/locate');
+
+    check('普通的命令名原样保留', JSON.stringify(splitCommand('dsh')) === JSON.stringify(['dsh']));
+    const parts = splitCommand('node C:/x/dsh/lib/bin.js');
+    check(
+      '「程序 + 脚本」能拆成两段',
+      parts.length === 2 && parts[0] === 'node' && parts[1] === 'C:/x/dsh/lib/bin.js',
+      JSON.stringify(parts),
+    );
+    check('首尾空白会被清掉', JSON.stringify(splitCommand('  dsh  ')) === JSON.stringify(['dsh']));
+    check(
+      '带空格的路径可以用引号整体括起来',
+      JSON.stringify(splitCommand('"C:/Program Files/DSH/dsh.cmd"')) ===
+        JSON.stringify(['C:/Program Files/DSH/dsh.cmd']),
+      JSON.stringify(splitCommand('"C:/Program Files/DSH/dsh.cmd"')),
+    );
+
+    const line = commandLine('node C:/x/bin.js', ['--profile', 'dshdoor']);
+    check('拼出来的命令行里，程序没有被整串括起来', line.startsWith('node C:/x/bin.js'), line);
+    check('带空格的参数各自加引号', commandLine('dsh', ['--profile', 'a b']).includes('"a b"'),
+      commandLine('dsh', ['--profile', 'a b']));
+
+    let thrown = '';
+    try {
+      commandLine('   ', []);
+    } catch (error) {
+      thrown = error.message;
+    }
+    check('命令填成空的时候立刻报错（不拖到进程起来之后）', /dshCommand/.test(thrown), thrown);
+  }
+
   section('9. 收摊');
   panel.dispose();
   door.stop();

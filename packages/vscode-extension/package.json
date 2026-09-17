@@ -134,7 +134,7 @@
         "dshPanel.dshCommand": {
           "type": "string",
           "default": "dsh",
-          "description": "dsh 命令行程序的名字或完整路径。"
+          "description": "dsh 命令行程序的名字或完整路径。可以带参数 —— 例如本机 dsh 不在 PATH 上时，填「node C:\\Users\\你\\.dsh\\profiles\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js」；路径里有空格就用双引号把整段括起来。"
         },
         "dshPanel.provider": {
           "type": "string",

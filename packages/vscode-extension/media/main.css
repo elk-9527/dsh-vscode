@@ -481,6 +481,28 @@ body {
   word-break: break-word;
 }
 
+/* 错误的人话部分：先一句「发生了什么」，再一句「你能做什么」。
+   内核原文跟在下面（.err-raw），一定要看得见，不能被折叠掉。 */
+.err-title {
+  margin: 0;
+  font-weight: 500;
+}
+
+.err-advice {
+  margin: 2px 0 0;
+  color: var(--vscode-foreground);
+}
+
+.err-raw {
+  margin: 4px 0 0;
+  padding: 3px 6px;
+  border-left: 2px solid var(--vscode-panel-border);
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family, monospace);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .msg-note {
   color: var(--vscode-descriptionForeground);
   font-size: 0.9em;

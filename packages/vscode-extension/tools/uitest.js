@@ -38,6 +38,8 @@ const EXPECTATIONS = {
   context: { needsUser: true, needsAssistant: true, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 10, needsAttachments: 2 },
   // 压力场景：正文由断言脚本自己灌（要计时），所以这里不要求已有正文和光标。
   perf: { needsUser: true, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0, perf: true },
+  // 内核报错：人话在前、原文在后。这段只有一条用户消息 + 一个错误块。
+  error: { needsUser: true, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0, errorShape: true },
 };
 
 /**
@@ -467,6 +469,35 @@ function assertionsScript(scene) {
       var afterSendGap = messagesNode.scrollHeight - messagesNode.scrollTop - messagesNode.clientHeight;
       assert('你自己发消息时，视图会回到底部（差 < 40px）', afterSendGap < 40,
         '差 ' + Math.round(afterSendGap) + 'px');
+    }
+
+    // ── 7.6 内核报错：人话在前，原文在后 ──────────────
+    // 这一段是给「错误提示改中文人话」立的护栏。以前内核的 429 是原样贴出来的，
+    // 用户看到的是一段英文 JSON，只会得出「这插件没法用」。这里量三件事：
+    // 人话在前、原文一个字都没少、长 JSON 不会把面板撑破。
+    if (EXPECT.errorShape) {
+      var errBox = document.querySelector('.msg-error');
+      assert('错误块渲染出来了', !!errBox);
+      if (errBox) {
+        var errTitle = errBox.querySelector('.err-title');
+        var errAdvice = errBox.querySelector('.err-advice');
+        var errRaw = errBox.querySelector('.err-raw');
+        assert('先用一句人话说清发生了什么', !!errTitle && errTitle.textContent.trim().length > 0,
+          errTitle ? errTitle.textContent : '没有');
+        assert('人话里没有把英文 JSON 当正文', !!errTitle && errTitle.textContent.indexOf('{') === -1,
+          errTitle ? errTitle.textContent : '没有');
+        assert('再说清你能做什么', !!errAdvice && errAdvice.textContent.trim().length > 0,
+          errAdvice ? errAdvice.textContent : '没有');
+        assert('内核原文也留着（没被吞掉）',
+          !!errRaw && errRaw.textContent.indexOf('GoUsageLimitError') >= 0,
+          errRaw ? errRaw.textContent.slice(0, 48) : '没有');
+        assert('人话排在原文前面',
+          !!errTitle && !!errRaw && (errTitle.compareDocumentPosition(errRaw) & 4) !== 0);
+        assert('原文块是等宽 + 自动换行的（长 JSON 不横向溢出）',
+          !!errRaw && getComputedStyle(errRaw).whiteSpace === 'pre-wrap');
+        assert('人话的对比度可读', !!errAdvice && contrastOf(errAdvice) >= 2.5,
+          errAdvice ? String(contrastOf(errAdvice)) : '没有');
+      }
     }
 
     // ── 8. 交互：发送 / 换行 / 空输入 / 忙碌时不许发 ──

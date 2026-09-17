@@ -59,5 +59,5 @@
 
 - `node tools/design-audit.js`：字号/间距/行高/圆角的种类数（应当明显下降）。
 - `node tools/shots.js`：14 张图（7 个场景 × 深/浅主题）改前改后对比。
-- `node tools/uitest.js`：275 项界面断言必须仍然全绿（文字不截断、按钮点得到、
+- `node tools/uitest.js`：321 项界面断言必须仍然全绿（文字不截断、按钮点得到、
   浮层不越界、间距一致、对比度够）。

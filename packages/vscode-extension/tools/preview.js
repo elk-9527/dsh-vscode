@@ -21,6 +21,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { renderHtml, makeNonce } = require('../src/panel/html');
+const { describeError } = require('../src/dsh/errors');
 
 const ROOT = path.resolve(__dirname, '..');
 const OUT = path.join(ROOT, 'build', 'preview');
@@ -190,6 +191,13 @@ const longAnswer = [
   '\n',
   '要我直接把改动写进去吗？\n',
 ];
+
+/**
+ * 一段真实的 429 报错原文（额度用完时内核就是这么回的，一字不改）。
+ * 用它来画错误场景：以前这段英文 JSON 是直接甩给用户的。
+ */
+const ERROR_RAW =
+  '回合失败：Internal error: turn failed: 429: {"type":"GoUsageLimitError","message":"5-hour usage limit reached. Resets in 12min..."}';
 
 const SCENARIOS = {
   /**
@@ -426,6 +434,29 @@ const SCENARIOS = {
             },
           },
         },
+      ],
+    };
+  },
+
+  /**
+   * 内核报错：界面上必须**先说人话，再给原文**。
+   *
+   * `human` 这一段不是手抄的，是**真的调一次** `src/dsh/errors.js` 里的
+   * 分类器算出来的 —— 所以这个预览页画的就是生产路径会给用户看的东西。
+   */
+  error() {
+    return {
+      steps: [
+        { message: { type: 'status', state: 'ready', detail: '已连上正在运行的 DSH' } },
+        { message: { type: 'user', text: '帮我看看这个报错是怎么回事。' } },
+        {
+          message: {
+            type: 'error',
+            message: ERROR_RAW,
+            human: describeError(ERROR_RAW),
+          },
+        },
+        { message: { type: 'busy', busy: false } },
       ],
     };
   },

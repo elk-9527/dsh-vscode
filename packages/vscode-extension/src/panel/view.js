@@ -17,6 +17,7 @@ const vscode = require('vscode');
 const path = require('node:path');
 const { DoorClient } = require('../door/client');
 const { DshSession } = require('../dsh/session');
+const { describeError } = require('../dsh/errors');
 const { probePort, spawnBackgroundDsh } = require('../door/locate');
 const { renderHtml, makeNonce } = require('../panel/html');
 
@@ -113,6 +114,19 @@ class DshPanelView {
     });
   }
 
+  /**
+   * 报一个错误给界面，**顺便把它翻成人话**。
+   *
+   * 为什么不能直接把 `error.message` 发过去：内核的报错是原样穿过 ACP 的，
+   * 用户看到的就是一段英文 JSON（最典型的是 429 额度限制）。面板存在的意义
+   * 就是别让他去读那种东西。分类的活交给 `dsh/errors.js`（纯函数，好测），
+   * 这里只负责把「人话 + 原文」一起发出去 —— 原文一个字都不删。
+   */
+  postError(message) {
+    const human = describeError(message);
+    this.post({ type: 'error', message: human.raw, human });
+  }
+
   // ── 界面发来的消息 ──────────────────────────────────
 
   async onWebviewMessage(message) {
@@ -154,7 +168,7 @@ class DshPanelView {
     } catch (error) {
       const text = error && error.message ? error.message : String(error);
       this.log('error', `处理界面消息出错（${message.type}）：${text}`);
-      this.post({ type: 'error', message: text });
+      this.postError(text);
       this.post({ type: 'busy', busy: false });
     }
   }
@@ -383,7 +397,7 @@ class DshPanelView {
         detail: payload.busy ? 'DSH 正在工作…' : '已连上',
       });
     });
-    session.on('error', (payload) => this.post({ type: 'error', message: payload.message }));
+    session.on('error', (payload) => this.postError(payload.message));
     session.on('session', (payload) => this.log('info', `当前会话 ${payload.sessionId}`));
 
     client.on('permission', (requestId, params) =>

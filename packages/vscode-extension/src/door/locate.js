@@ -66,6 +66,59 @@ function quoteArg(value) {
   return /[\s"&|<>^]/.test(text) ? `"${text.replace(/"/g, '\\"')}"` : text;
 }
 
+/**
+ * 把设置里的 `dshCommand` 拆成「程序 + 它自带的参数」。
+ *
+ * 为什么要拆：`dshCommand` 允许写成**带参数的完整命令**，最典型的是
+ * `node D:\...\@deepseek-ai\dsh\lib\bin.js` —— 本机 `dsh` 不在 PATH 上时
+ * 就得这么写。而把整串当成一个程序名加引号丢给 cmd.exe，cmd 会去找一个
+ * 名字里带空格的程序，直接以退出码 1 失败（实测：
+ * `"...\node.exe ...\bin.js" --version` 报「不是内部或外部命令」）。
+ * 所以先按空白拆开，再逐段加引号。
+ *
+ * 支持用双引号或单引号把带空格的整段括起来（例如
+ * `"C:\Program Files\DSH\dsh.cmd"`）。
+ */
+function splitCommand(command) {
+  const text = String(command === undefined || command === null ? '' : command).trim();
+  if (!text) return [];
+  const parts = [];
+  let current = '';
+  let quote = '';
+  for (const ch of text) {
+    if (quote) {
+      if (ch === quote) quote = '';
+      else current += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (current) parts.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  if (current) parts.push(current);
+  return parts;
+}
+
+/**
+ * 把「程序 + 它自带的参数 + 本次要传的参数」拼成一整条命令行，每段各自加引号。
+ *
+ * @throws {Error} 命令为空时 —— 早点说清楚，别让用户对着「正在启动…」等两分钟。
+ */
+function commandLine(command, args = []) {
+  const parts = splitCommand(command);
+  if (parts.length === 0) {
+    throw new Error('dsh 命令是空的：请检查设置 dshPanel.dshCommand');
+  }
+  return [...parts, ...args].map(quoteArg).join(' ');
+}
+
 function spawnBackgroundDsh({ command, profile, log, extraArgs = [] }) {
   if (!SAFE_PROFILE.test(String(profile))) {
     throw new Error(`profile 名不合法：${profile}（只允许字母、数字、点、下划线、连字符）`);
@@ -85,7 +138,9 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [] }) {
     '--port',
     '0',
   ];
-  log('info', `后台拉起 DSH：${command} ${args.join(' ')}`);
+  // 先拼命令行：命令写错时在这里就抛，别拖到进程起来之后。
+  const line = commandLine(command, args);
+  log('info', `后台拉起 DSH：${line}`);
 
   /*
    * 为什么不直接用 `spawn(command, args, { shell: true })`：
@@ -96,12 +151,15 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [] }) {
    */
   const child =
     process.platform === 'win32'
-      ? spawn(
-          process.env.ComSpec || 'cmd.exe',
-          ['/d', '/s', '/c', [quoteArg(command), ...args.map(quoteArg)].join(' ')],
-          { windowsHide: true, stdio: 'ignore', detached: false },
-        )
-      : spawn(command, args, { stdio: 'ignore', detached: false });
+      ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', line], {
+          windowsHide: true,
+          stdio: 'ignore',
+          detached: false,
+        })
+      : spawn(splitCommand(command)[0], [...splitCommand(command).slice(1), ...args], {
+          stdio: 'ignore',
+          detached: false,
+        });
 
   let disposed = false;
   child.on('error', (error) => {
@@ -159,7 +217,7 @@ function killTree(child) {
  * @returns {string} stdout
  */
 function runDshSync({ command, args = [], timeoutMs = 120000 }) {
-  const quoted = [quoteArg(command), ...args.map(quoteArg)].join(' ');
+  const quoted = commandLine(command, args);
   try {
     if (process.platform === 'win32') {
       return execFileSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', quoted], {
@@ -168,7 +226,8 @@ function runDshSync({ command, args = [], timeoutMs = 120000 }) {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     }
-    return execFileSync(command, args, {
+    const parts = splitCommand(command);
+    return execFileSync(parts[0], [...parts.slice(1), ...args], {
       encoding: 'utf8',
       timeout: timeoutMs,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -179,4 +238,13 @@ function runDshSync({ command, args = [], timeoutMs = 120000 }) {
   }
 }
 
-module.exports = { probePort, waitForPort, spawnBackgroundDsh, runDshSync, delay };
+module.exports = {
+  probePort,
+  waitForPort,
+  spawnBackgroundDsh,
+  runDshSync,
+  delay,
+  quoteArg,
+  splitCommand,
+  commandLine,
+};

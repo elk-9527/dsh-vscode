@@ -115,7 +115,7 @@
         showPermission(message);
         break;
       case 'error':
-        addError(message.message);
+        addError(message.message, message.human);
         break;
       case 'notice':
         addNotice(message.text);
@@ -434,10 +434,38 @@
     return div;
   }
 
-  function addError(text) {
+  /**
+   * 显示一条错误。
+   *
+   * `human` 是扩展那边翻好的「人话」（`src/dsh/errors.js`）：一句话说清
+   * 发生了什么、一句话说你能做什么。**内核原文永远跟在后面显示**，一个字
+   * 都不删 —— 人话是为了让人一眼看懂，不是为了让信息消失；认不出来的错误
+   * 更是只能靠原文。
+   *
+   * `human` 缺失时（例如消息来自别处）退回只显示原文，行为跟以前一样。
+   */
+  function addError(text, human) {
     const div = document.createElement('div');
     div.className = 'msg msg-error';
-    div.textContent = text;
+    if (!human || !human.title) {
+      div.textContent = text;
+      appendNode(div);
+      return;
+    }
+    const title = document.createElement('p');
+    title.className = 'err-title';
+    title.textContent = human.title;
+    div.appendChild(title);
+    if (human.advice) {
+      const advice = document.createElement('p');
+      advice.className = 'err-advice';
+      advice.textContent = human.advice;
+      div.appendChild(advice);
+    }
+    const raw = document.createElement('pre');
+    raw.className = 'err-raw';
+    raw.textContent = text || human.raw || '';
+    div.appendChild(raw);
     appendNode(div);
   }
 

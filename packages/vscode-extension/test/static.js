@@ -379,7 +379,8 @@ check(
   // 真正会被 VS Code 加载的文件：任何语法错误都会让整套功能静默消失。
   const { execFileSync } = require('node:child_process');
   const files = ['src/extension.js', 'src/panel/view.js', 'src/panel/html.js', 'src/door/client.js',
-    'src/door/locate.js', 'src/dsh/session.js', 'src/dsh/blocks.js', 'media/main.js', 'media/markdown.js'];
+    'src/door/locate.js', 'src/dsh/session.js', 'src/dsh/blocks.js', 'src/dsh/errors.js',
+    'media/main.js', 'media/markdown.js'];
   const broken = [];
   for (const file of files) {
     try {
