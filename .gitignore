@@ -29,3 +29,6 @@ spike/door-*.yml
 # WorkBuddy 的项目记忆（agent 工作数据，本机专属，不入库）
 .workbuddy/
 
+# 会话勘察报告（含用户会话标题等个人信息，不入库；工具本身在 spike/session-survey.cjs）
+spike/session-survey-report.txt
+
