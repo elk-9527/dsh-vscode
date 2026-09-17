@@ -26,3 +26,6 @@ backup/
 # 试验台用的临时配置（每次现写现删）
 spike/door-*.yml
 
+# WorkBuddy 的项目记忆（agent 工作数据，本机专属，不入库）
+.workbuddy/
+
