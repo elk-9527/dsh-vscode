@@ -52,9 +52,6 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
       <span class="spacer"></span>
       <span id="bar-cwd" class="bar-meta" hidden></span>
       <span id="bar-clock" class="bar-meta" hidden></span>
-      <button id="new-session" class="icon-btn" type="button" title="新建对话" aria-label="新建对话">
-        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M8 2.5a.75.75 0 0 1 .75.75v4h4a.75.75 0 0 1 0 1.5h-4v4a.75.75 0 0 1-1.5 0v-4h-4a.75.75 0 0 1 0-1.5h4v-4A.75.75 0 0 1 8 2.5Z"/></svg>
-      </button>
     </div>
     <div class="bar-row" id="config-row" hidden>
       <label class="field">

@@ -20,7 +20,6 @@
     modelSelect: document.getElementById('model-select'),
     presetField: document.getElementById('preset-field'),
     presetSelect: document.getElementById('preset-select'),
-    newSession: document.getElementById('new-session'),
     messages: document.getElementById('messages'),
     empty: document.getElementById('empty'),
     input: document.getElementById('input'),
@@ -862,7 +861,6 @@
 
   el.send.addEventListener('click', submit);
   el.stop.addEventListener('click', () => post({ type: 'stop' }));
-  el.newSession.addEventListener('click', () => post({ type: 'newSession' }));
 
   // 点击链接交给扩展去开外部浏览器（webview 里点链接默认没反应）。
   document.addEventListener('click', (event) => {
