@@ -392,6 +392,32 @@ check(
   check('会被加载的每个 js 文件都能解析', broken.length === 0, broken.join(' | '));
 }
 {
+  // 兜底拉起的候选命令：设置里填的永远第一，默认安装位置其次，去重保序。
+  // 这条链路修过一次「用户被迫先开桌面端」的毛病（裸 dsh 不在 PATH 上），
+  // 焊死行为免得回退。
+  const { dshCommandCandidates } = require(path.join(ROOT, 'src/door/locate.js'));
+  const tmp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'dsh-candidates-'));
+  const binDir = path.join(tmp, '.dsh', 'profiles', 'node_modules', '@deepseek-ai', 'dsh', 'lib');
+  fs.mkdirSync(binDir, { recursive: true });
+  const bin = path.join(binDir, 'bin.js');
+  fs.writeFileSync(bin, '// fake\n');
+
+  const withBoth = dshCommandCandidates({ dshCommand: 'dsh', homedir: tmp });
+  check('候选清单：设置里的命令排第一', withBoth[0] === 'dsh', withBoth.join(' | '));
+  check('候选清单：默认安装位置会被发现（node bin.js）',
+    withBoth.some((item) => item.startsWith('node ') && item.includes('bin.js')), withBoth.join(' | '));
+
+  const onlyBin = dshCommandCandidates({ dshCommand: '', homedir: tmp });
+  check('候选清单：设置填空也不至于没有候选', onlyBin.length === 1 && onlyBin[0].startsWith('node '), onlyBin.join(' | '));
+
+  const noBin = dshCommandCandidates({ dshCommand: 'dsh', homedir: path.join(tmp, 'empty') });
+  check('候选清单：默认位置不存在时不硬凑', noBin.length === 1 && noBin[0] === 'dsh', noBin.join(' | '));
+
+  const dup = dshCommandCandidates({ dshCommand: `node ${bin}`, homedir: tmp });
+  check('候选清单：重复命令去重', dup.length === 1, dup.join(' | '));
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+{
   // vsix 里带的文件必须齐全 —— 少一个（比如忘了 media/markdown.js），
   // 装上去是个残废扩展，而且只在运行时才发现。
   const vsixFiles = ['package.json', 'README.md', 'src/extension.js', 'media/main.js', 'media/main.css', 'media/markdown.js', 'media/dsh.svg'];

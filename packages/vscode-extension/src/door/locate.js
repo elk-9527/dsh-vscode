@@ -12,6 +12,8 @@
  */
 
 const net = require('node:net');
+const path = require('node:path');
+const fs = require('node:fs');
 const { spawn, execFileSync } = require('node:child_process');
 
 /** 探测一个端口是否能连上（不握手，只探 TCP）。 */
@@ -42,6 +44,46 @@ async function waitForPort(host, port, { totalMs = 90000, intervalMs = 400 } = {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * 兜底拉起要依次尝试的命令清单。
+ *
+ * ── 为什么不止试一个 ──────────────────────────────────────────────
+ * 设置里 `dshCommand` 的默认值是裸的 `dsh`，而本机 `dsh` 多半不在 VS Code
+ * 进程看得见的 PATH 上（实测：用户面板里报「后台 DSH 刚启动就退出了
+ * （命令：「dsh」）」）。只试一个，失败就死 —— 于是用户被迫「先开桌面端
+ * 才能用面板」，这不该是必要条件。
+ *
+ * 所以这里给出一串候选：
+ *   1. 设置里填的命令（用户明确指定的，永远最优先）；
+ *   2. `<主目录>/.dsh/profiles/node_modules/@deepseek-ai/dsh/lib/bin.js`
+ *      用 `node` 跑 —— 这是 DSH 自装目录里的入口（存在才加进去），
+ *      实测就是测试配方里验证过的那条启动命令。
+ *
+ * 纯函数：给测试直接喂参数，不碰文件系统以外的任何东西。
+ *
+ * @param {object} options
+ * @param {string} options.dshCommand 设置里的 dshPanel.dshCommand。
+ * @param {string} options.homedir 用户主目录。
+ * @returns {string[]} 去重后的候选清单（可能为空）。
+ */
+function dshCommandCandidates({ dshCommand, homedir }) {
+  const list = [];
+  const configured = String(dshCommand || '').trim();
+  if (configured) list.push(configured);
+  const bin = path.join(
+    String(homedir || ''),
+    '.dsh',
+    'profiles',
+    'node_modules',
+    '@deepseek-ai',
+    'dsh',
+    'lib',
+    'bin.js',
+  );
+  if (bin && fs.existsSync(bin)) list.push(`node ${bin}`);
+  return [...new Set(list)];
 }
 
 /**
@@ -247,4 +289,5 @@ module.exports = {
   quoteArg,
   splitCommand,
   commandLine,
+  dshCommandCandidates,
 };

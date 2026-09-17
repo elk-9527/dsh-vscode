@@ -15,10 +15,11 @@
 
 const vscode = require('vscode');
 const path = require('node:path');
+const os = require('node:os');
 const { DoorClient } = require('../door/client');
 const { DshSession } = require('../dsh/session');
 const { describeError } = require('../dsh/errors');
-const { probePort, spawnBackgroundDsh } = require('../door/locate');
+const { probePort, spawnBackgroundDsh, dshCommandCandidates } = require('../door/locate');
 const { renderHtml, makeNonce } = require('../panel/html');
 
 const VIEW_ID = 'dshPanel.chat';
@@ -223,6 +224,89 @@ class DshPanelView {
   }
 
   /**
+   * 后台拉起 DSH：按候选命令逐个试，谁先开出门就用谁。
+   *
+   * 为什么是「逐个试」而不是只信设置里的那一条：默认值是裸的 `dsh`，
+   * 本机多半没把它放进 VS Code 看得见的 PATH（用户的面板就是这么挂的），
+   * 只试一条等于逼用户「先开桌面端才能用面板」。候选清单见
+   * {@link dshCommandCandidates}：设置里填的优先，然后是默认安装位置的
+   * `node …/@deepseek-ai/dsh/lib/bin.js`。
+   *
+   * 等待时间：还有下一个候选时只等 30 秒（起不来的命令几乎都是秒退，
+   * 不值得为它耗两分钟）；最后一个候选等满 120 秒 —— 真内核冷启动也可能慢。
+   *
+   * @returns {Promise<{ok: boolean, command?: string, detail?: string}>}
+   */
+  async spawnFallback(cfg) {
+    this.post({
+      type: 'status',
+      state: 'connecting',
+      detail: `桌面端没在跑，正在后台启动 DSH（档：${cfg.fallbackProfile}）…`,
+    });
+    this.log('info', '门连不上，按设置自动拉起后台 DSH');
+    if (this.background) this.background.dispose();
+
+    const candidates = dshCommandCandidates({ dshCommand: cfg.dshCommand, homedir: os.homedir() });
+    if (candidates.length === 0) {
+      return {
+        ok: false,
+        detail:
+          '不知道怎么启动 DSH：设置 dshPanel.dshCommand 是空的，' +
+          '默认安装位置（~/.dsh/profiles/node_modules/@deepseek-ai/dsh/lib/bin.js）也没找到。' +
+          '装好 DSH 后在设置里把 dshPanel.dshCommand 填成完整启动命令。',
+      };
+    }
+
+    const failures = [];
+    for (let i = 0; i < candidates.length; i += 1) {
+      const command = candidates[i];
+      const hasMore = i + 1 < candidates.length;
+      this.post({
+        type: 'status',
+        state: 'connecting',
+        detail: `正在后台启动 DSH（命令：${command}）…`,
+      });
+      let background;
+      try {
+        background = spawnBackgroundDsh({ command, profile: cfg.fallbackProfile, log: this.log });
+      } catch (error) {
+        failures.push(`「${command}」起不来：${this.errText(error)}`);
+        continue;
+      }
+      this.background = background;
+      const outcome = await this.waitForFallbackDoor(
+        background.child,
+        cfg.host,
+        cfg.port,
+        hasMore ? 30000 : 120000,
+      );
+      if (outcome.ok) return { ok: true, command };
+      // 没成：收掉这个进程再试下一条（killTree 连子孙一起杀，不留孤儿）。
+      background.dispose();
+      this.background = undefined;
+      failures.push(
+        fallbackFailureText({
+          command,
+          profile: cfg.fallbackProfile,
+          host: cfg.host,
+          port: cfg.port,
+          exitedEarly: outcome.exitedEarly,
+        }),
+      );
+      if (!hasMore) break;
+    }
+
+    return {
+      ok: false,
+      detail:
+        `后台启动 DSH 没成功（试了 ${candidates.length} 条命令）：\n` +
+        failures.join('\n\n') +
+        '\n\n出路：在设置里把 dshPanel.dshCommand 填成能用的完整启动命令' +
+        '（例如：node C:\\Users\\你\\.dsh\\profiles\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js）。',
+    };
+  }
+
+  /**
    * 等兜底拉起的那个内核把门开起来；它**刚启动就退出**的话早点说清楚。
    *
    * 为什么不能只等 waitForPort：命令写错（最典型的是 dsh 不在 PATH 里、
@@ -264,47 +348,12 @@ class DshPanelView {
 
     let reachable = await probePort(cfg.host, cfg.port);
     if (!reachable && cfg.autoStart) {
-      this.post({
-        type: 'status',
-        state: 'connecting',
-        detail: `桌面端没在跑，正在后台启动 DSH（档：${cfg.fallbackProfile}）…`,
-      });
-      this.log('info', '门连不上，按设置自动拉起后台 DSH');
-      if (this.background) this.background.dispose();
-      let background;
-      try {
-        background = spawnBackgroundDsh({
-          command: cfg.dshCommand,
-          profile: cfg.fallbackProfile,
-          log: this.log,
-        });
-      } catch (error) {
-        this.post({
-          type: 'status',
-          state: 'error',
-          detail:
-            `拉不起后台 DSH：${this.errText(error)}。` +
-            `检查设置 dshPanel.dshCommand（现在是「${cfg.dshCommand}」）是不是 dsh 的完整路径。`,
-        });
+      const spawned = await this.spawnFallback(cfg);
+      if (!spawned.ok) {
+        this.post({ type: 'status', state: 'error', detail: spawned.detail });
         return undefined;
       }
-      this.background = background;
-      const outcome = await this.waitForFallbackDoor(background.child, cfg.host, cfg.port);
-      reachable = outcome.ok;
-      if (!reachable) {
-        this.post({
-          type: 'status',
-          state: 'error',
-          detail: fallbackFailureText({
-            command: cfg.dshCommand,
-            profile: cfg.fallbackProfile,
-            host: cfg.host,
-            port: cfg.port,
-            exitedEarly: outcome.exitedEarly,
-          }),
-        });
-        return undefined;
-      }
+      reachable = true;
       this.post({ type: 'status', state: 'connecting', detail: '后台 DSH 就绪，正在握手…' });
     }
 
