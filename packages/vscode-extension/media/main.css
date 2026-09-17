@@ -6,12 +6,21 @@
  * 唯一的例外是等宽字体下的字号微调与间距，那些跟主题无关。
  */
 
+/*
+ * 尺度基线（收过一次，别再随手加值）：
+ *   间距只用 2/4/8/12/16px；字号只用 1em / --dsh-fs-s / --dsh-fs-xs 三档；
+ *   行高只用 1.45（紧凑界面）和 1.55（正文）两档；圆角 --dsh-radius / -s 两档。
+ */
 :root {
   --dsh-radius: 6px;
+  --dsh-radius-s: 4px;
   --dsh-gap: 8px;
-  --dsh-pad: 10px;
+  --dsh-pad: 8px;
+  --dsh-fs-s: 0.9em;
+  --dsh-fs-xs: 0.82em;
   /* 动效统一走这里，方便一处调；下面还有 prefers-reduced-motion 的兜底。 */
   --dsh-dur: 140ms;
+  --dsh-dur-fold: 180ms;
 }
 
 * {
@@ -53,10 +62,10 @@ body {
 .bar {
   flex: 0 0 auto;
   border-bottom: 1px solid var(--vscode-panel-border);
-  padding: 6px var(--dsh-pad);
+  padding: 4px var(--dsh-pad);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 
 .bar-row {
@@ -104,23 +113,35 @@ body {
 
 .status {
   color: var(--vscode-descriptionForeground);
-  font-size: 0.92em;
+  font-size: var(--dsh-fs-s);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+/* 顶栏右侧的元信息：工作目录、回合时间戳/耗时 */
+.bar-meta {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--vscode-descriptionForeground);
+  font-size: var(--dsh-fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
 .field {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
   flex: 1 1 auto;
 }
 
 .field-label {
   color: var(--vscode-descriptionForeground);
-  font-size: 0.92em;
+  font-size: var(--dsh-fs-s);
   flex: 0 0 auto;
 }
 
@@ -130,10 +151,10 @@ body {
   color: var(--vscode-dropdown-foreground);
   background: var(--vscode-dropdown-background);
   border: 1px solid var(--vscode-dropdown-border, transparent);
-  border-radius: 4px;
+  border-radius: var(--dsh-radius-s);
   padding: 2px 4px;
   font-family: inherit;
-  font-size: 0.95em;
+  font-size: var(--dsh-fs-s);
 }
 
 .select:focus {
@@ -152,7 +173,7 @@ body {
   color: var(--vscode-icon-foreground, var(--vscode-foreground));
   background: transparent;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--dsh-radius-s);
   cursor: pointer;
   transition: background var(--dsh-dur) ease;
 }
@@ -170,7 +191,7 @@ body {
 .meter {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   flex: 0 0 auto;
 }
 
@@ -192,7 +213,7 @@ body {
 }
 
 .meter-text {
-  font-size: 0.85em;
+  font-size: var(--dsh-fs-xs);
   color: var(--vscode-descriptionForeground);
   font-variant-numeric: tabular-nums;
 }
@@ -206,7 +227,7 @@ body {
   padding: var(--dsh-pad);
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
   scrollbar-width: thin;
 }
 
@@ -222,21 +243,21 @@ body {
 }
 
 .empty-title {
-  margin: 0 0 6px;
-  font-size: 1.05em;
+  margin: 0 0 4px;
+  font-size: 1em;
   color: var(--vscode-foreground);
 }
 
 .empty-hint {
   margin: 0;
-  font-size: 0.92em;
-  line-height: 1.5;
+  font-size: var(--dsh-fs-s);
+  line-height: 1.55;
 }
 
 .msg {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
   animation: fade-in var(--dsh-dur) ease;
 }
@@ -255,7 +276,7 @@ body {
 .msg-user .bubble {
   align-self: flex-end;
   max-width: 92%;
-  padding: 6px 10px;
+  padding: 4px 8px;
   border-radius: var(--dsh-radius);
   background: var(--vscode-input-background);
   border: 1px solid var(--vscode-input-border);
@@ -284,7 +305,7 @@ body {
 .body ul,
 .body ol {
   margin: 0 0 8px;
-  padding-left: 20px;
+  padding-left: 16px;
 }
 
 .body li {
@@ -295,7 +316,7 @@ body {
 .body h2,
 .body h3,
 .body h4 {
-  margin: 12px 0 6px;
+  margin: 12px 0 4px;
   font-size: 1em;
   font-weight: 600;
 }
@@ -311,15 +332,15 @@ body {
 
 .body code {
   font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 0.94em;
+  font-size: var(--dsh-fs-s);
   background: var(--vscode-textCodeBlock-background);
-  border-radius: 3px;
-  padding: 1px 4px;
+  border-radius: var(--dsh-radius-s);
+  padding: 2px 4px;
 }
 
 .body pre {
   margin: 0 0 8px;
-  padding: 8px 10px;
+  padding: 8px;
   overflow-x: auto;
   border-radius: var(--dsh-radius);
   background: var(--vscode-textCodeBlock-background);
@@ -329,13 +350,13 @@ body {
 .body pre code {
   background: none;
   padding: 0;
-  font-size: 0.92em;
+  font-size: var(--dsh-fs-s);
   line-height: 1.45;
 }
 
 .body blockquote {
   margin: 0 0 8px;
-  padding: 2px 0 2px 10px;
+  padding: 2px 0 2px 8px;
   border-left: 2px solid var(--vscode-panel-border);
   color: var(--vscode-descriptionForeground);
 }
@@ -350,7 +371,7 @@ body {
 .thinking > summary {
   cursor: pointer;
   color: var(--vscode-descriptionForeground);
-  font-size: 0.9em;
+  font-size: var(--dsh-fs-s);
   list-style: none;
   user-select: none;
 }
@@ -373,15 +394,19 @@ body {
 .thinking .think-body {
   margin-top: 4px;
   color: var(--vscode-descriptionForeground);
-  font-size: 0.92em;
+  font-size: var(--dsh-fs-s);
   white-space: pre-wrap;
   word-break: break-word;
   max-height: 240px;
   overflow-y: auto;
 }
 
-/* 工具卡片 */
-
+/*
+ * 工具卡片：默认折叠，点头部展开。
+ *
+ * 折叠动画用 grid-template-rows 0fr↔1fr 过渡 —— 内容高度未知也能平滑收放，
+ * Chromium（VS Code 的 webview 内核）原生支持这个写法，不用去量 scrollHeight。
+ */
 .tool {
   border: 1px solid var(--vscode-panel-border);
   border-radius: var(--dsh-radius);
@@ -389,11 +414,21 @@ body {
   overflow: hidden;
 }
 
+.tool-fold {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--dsh-dur-fold) ease;
+}
+
+.tool.open .tool-fold {
+  grid-template-rows: 1fr;
+}
+
 .tool-head {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 5px 8px;
+  gap: 4px;
+  padding: 4px 8px;
   cursor: pointer;
   user-select: none;
 }
@@ -404,14 +439,14 @@ body {
 
 .tool-name {
   font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 0.92em;
+  font-size: var(--dsh-fs-s);
   font-weight: 600;
   flex: 0 0 auto;
 }
 
 .tool-title {
   color: var(--vscode-descriptionForeground);
-  font-size: 0.9em;
+  font-size: var(--dsh-fs-s);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -420,7 +455,7 @@ body {
 .tool-status {
   margin-left: auto;
   flex: 0 0 auto;
-  font-size: 0.85em;
+  font-size: var(--dsh-fs-xs);
   color: var(--vscode-descriptionForeground);
 }
 
@@ -438,19 +473,21 @@ body {
 }
 
 .tool-body {
-  border-top: 1px solid var(--vscode-panel-border);
-  padding: 6px 8px;
+  min-height: 0;
+  overflow: auto;
+  border-top: 1px solid transparent;
+  padding: 2px 8px;
   font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 0.9em;
+  font-size: var(--dsh-fs-s);
   white-space: pre-wrap;
   word-break: break-word;
   max-height: 320px;
-  overflow: auto;
   color: var(--vscode-descriptionForeground);
 }
 
-.tool-body[hidden] {
-  display: none;
+/* 展开时才画出头顶那条分隔线（收起时格子高度是 0，线会单独漏出来）。 */
+.tool.open .tool-body {
+  border-top-color: var(--vscode-panel-border);
 }
 
 /* 光标：表示正在往外吐字 */
@@ -476,7 +513,7 @@ body {
 
 .msg-error {
   color: var(--vscode-testing-iconFailed, var(--vscode-charts-red));
-  font-size: 0.92em;
+  font-size: var(--dsh-fs-s);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -495,7 +532,7 @@ body {
 
 .err-raw {
   margin: 4px 0 0;
-  padding: 3px 6px;
+  padding: 4px 8px;
   border-left: 2px solid var(--vscode-panel-border);
   color: var(--vscode-descriptionForeground);
   font-family: var(--vscode-editor-font-family, monospace);
@@ -505,7 +542,7 @@ body {
 
 .msg-note {
   color: var(--vscode-descriptionForeground);
-  font-size: 0.9em;
+  font-size: var(--dsh-fs-s);
   font-style: italic;
 }
 
@@ -519,7 +556,7 @@ body {
 .msg-system .msg-note {
   border: 1px solid var(--vscode-panel-border);
   border-radius: 999px;
-  padding: 3px 10px;
+  padding: 4px 8px;
   max-width: 92%;
   text-align: center;
   font-style: normal;
@@ -530,7 +567,7 @@ body {
 .composer {
   flex: 0 0 auto;
   border-top: 1px solid var(--vscode-panel-border);
-  padding: 8px var(--dsh-pad) 6px;
+  padding: 8px var(--dsh-pad) 4px;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -566,13 +603,13 @@ body {
   gap: 4px;
   max-width: 100%;
   min-width: 0;
-  padding: 2px 6px;
+  padding: 2px 8px;
   border-radius: 999px;
   border: 1px solid var(--vscode-panel-border);
   background: var(--vscode-badge-background, var(--vscode-editorWidget-background, transparent));
   color: var(--vscode-badge-foreground, var(--vscode-foreground));
-  font-size: 11px;
-  line-height: 1.6;
+  font-size: var(--dsh-fs-xs);
+  line-height: 1.45;
 }
 
 .chip-sel {
@@ -582,7 +619,6 @@ body {
 .chip-icon {
   flex: 0 0 auto;
   opacity: 0.85;
-  font-size: 10px;
 }
 
 .chip-label {
@@ -608,7 +644,7 @@ body {
   cursor: pointer;
   padding: 0 2px;
   border-radius: 999px;
-  font-size: 13px;
+  font-size: 1em;
   line-height: 1;
   opacity: 0.7;
 }
@@ -636,7 +672,7 @@ body {
 .composer-box {
   display: flex;
   align-items: flex-end;
-  gap: 6px;
+  gap: 4px;
   background: var(--vscode-input-background);
   border: 1px solid var(--vscode-input-border);
   border-radius: var(--dsh-radius);
@@ -676,7 +712,7 @@ body {
   height: 26px;
   padding: 0;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--dsh-radius-s);
   cursor: pointer;
   color: var(--vscode-button-foreground);
   background: var(--vscode-button-background);
@@ -710,7 +746,7 @@ body {
 
 .hint {
   color: var(--vscode-descriptionForeground);
-  font-size: 0.82em;
+  font-size: var(--dsh-fs-xs);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -734,17 +770,17 @@ body {
   padding: 8px var(--dsh-pad);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 
 .permission-title {
   font-weight: 600;
-  font-size: 0.95em;
+  font-size: 1em;
 }
 
 .permission-body {
   color: var(--vscode-descriptionForeground);
-  font-size: 0.9em;
+  font-size: var(--dsh-fs-s);
   max-height: 120px;
   overflow: auto;
   white-space: pre-wrap;
@@ -754,17 +790,17 @@ body {
 .permission-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 4px;
 }
 
 .permission-actions button {
-  padding: 3px 10px;
+  padding: 4px 8px;
   border: 1px solid var(--vscode-button-border, transparent);
-  border-radius: 4px;
+  border-radius: var(--dsh-radius-s);
   background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
   color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
   font-family: inherit;
-  font-size: 0.9em;
+  font-size: var(--dsh-fs-s);
   cursor: pointer;
 }
 
@@ -777,8 +813,8 @@ body {
 .tools {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-bottom: 6px;
+  gap: 4px;
+  margin-bottom: 4px;
 }
 
 .tool-args,
@@ -789,7 +825,7 @@ body {
 }
 
 .tool-out {
-  margin-top: 6px;
+  margin-top: 4px;
   color: var(--vscode-foreground);
 }
 

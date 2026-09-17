@@ -136,6 +136,8 @@ class DshPanelView {
         case 'ready': {
           // 界面可能是刚打开，也可能是被重新加载（会话还活着）——
           // 后一种情况要把当前状态补一遍，否则界面上是空的。
+          // 顶栏的工作目录不依赖连接，先发。
+          this.post({ type: 'meta', cwd: this.workdir() });
           const existing = this.session;
           await this.ensureConnection();
           if (existing) this.pushSnapshot();

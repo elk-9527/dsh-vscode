@@ -189,11 +189,11 @@ function assertionsScript(scene) {
       assert('工具卡片有名字', (card.querySelector('.tool-name').textContent || '').trim().length > 0);
       assert('工具卡片有状态', (card.querySelector('.tool-status').textContent || '').trim().length > 0);
       var head = card.querySelector('.tool-head');
-      var cardBody = card.querySelector('.tool-body');
-      var before = cardBody.hidden;
+      assert('工具卡片默认折叠', !card.classList.contains('open'));
       head.click();
-      assert('点卡片能折叠/展开', cardBody.hidden !== before, before + ' → ' + cardBody.hidden);
+      assert('点卡片能展开', card.classList.contains('open'));
       head.click();
+      assert('再点一下能收起来', !card.classList.contains('open'));
     }
 
     // ── 4. 流式光标 ──────────────────────────────────

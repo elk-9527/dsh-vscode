@@ -14,6 +14,8 @@
   const el = {
     statusDot: document.getElementById('status-dot'),
     statusText: document.getElementById('status-text'),
+    barCwd: document.getElementById('bar-cwd'),
+    barClock: document.getElementById('bar-clock'),
     configRow: document.getElementById('config-row'),
     modelSelect: document.getElementById('model-select'),
     presetField: document.getElementById('preset-field'),
@@ -80,6 +82,9 @@
     switch (message.type) {
       case 'status':
         setStatus(message.state, message.detail);
+        break;
+      case 'meta':
+        setWorkdir(message.cwd);
         break;
       case 'user':
         addUser(message.text, message.attachments);
@@ -171,6 +176,61 @@
     el.stop.hidden = !busy;
     el.input.disabled = false;
     if (!busy) el.input.focus();
+    // 回合开始/结束驱动顶栏的时间戳和耗时。
+    if (busy) startTurnClock();
+    else stopTurnClock();
+  }
+
+  // ── 顶栏元信息：工作目录、回合时间戳/耗时 ─────────────
+
+  /** 工作目录只显示尾部两段（太长的路径顶栏放不下），完整路径放在悬浮提示里。 */
+  function setWorkdir(cwd) {
+    if (!cwd || typeof cwd !== 'string') return;
+    const parts = cwd.split(/[\\/]/).filter(Boolean);
+    const short = parts.length > 2 ? `…/${parts.slice(-2).join('/')}` : cwd;
+    el.barCwd.textContent = short;
+    el.barCwd.title = cwd;
+    el.barCwd.hidden = false;
+  }
+
+  let turnClockTimer = 0;
+
+  /** 回合开始：记下起始时间，顶栏显示「开始时刻 · 已耗时」，每 200ms 刷新。 */
+  function startTurnClock() {
+    stopTurnClock();
+    const started = Date.now();
+    const tick = () => {
+      el.barClock.textContent = `${hhmm(started)} · ${fmtDuration((Date.now() - started) / 1000)}`;
+      el.barClock.title = `本回合开始于 ${hhmm(started)}，已耗时 ${((Date.now() - started) / 1000).toFixed(1)} 秒`;
+      el.barClock.hidden = false;
+    };
+    tick();
+    turnClockTimer = setInterval(tick, 200);
+  }
+
+  /**
+   * 停掉计时。
+   *
+   * 回合正常结束时**保留**最后的显示 —— 「这个回合是什么时候开始、花了多久」
+   * 是回头看记录时有用的信息；只有新建对话（reset）才把显示清掉。
+   */
+  function stopTurnClock() {
+    if (turnClockTimer) {
+      clearInterval(turnClockTimer);
+      turnClockTimer = 0;
+    }
+  }
+
+  function hhmm(timestamp) {
+    const d = new Date(timestamp);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  function fmtDuration(seconds) {
+    if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`;
+    const minutes = Math.floor(seconds / 60);
+    return `${minutes}分${String(Math.round(seconds % 60)).padStart(2, '0')}秒`;
   }
 
   // ── 转录区 ──────────────────────────────────────────
@@ -185,6 +245,9 @@
     el.permission.hidden = true;
     el.meter.hidden = true;
     el.usageInline.textContent = '';
+    // 新对话是新的开始，上一回合的「开始时刻 · 耗时」不再有意义。
+    stopTurnClock();
+    el.barClock.hidden = true;
     state.pinned = true;
   }
 
@@ -499,6 +562,7 @@
       card.dataset.tool = tool.toolCallId;
       const head = document.createElement('div');
       head.className = 'tool-head';
+      head.setAttribute('aria-expanded', 'false');
       const name = document.createElement('span');
       name.className = 'tool-name';
       const title = document.createElement('span');
@@ -510,12 +574,16 @@
       head.appendChild(status);
       const body = document.createElement('div');
       body.className = 'tool-body';
-      body.hidden = true;
+      // 折叠动画包一层 grid（见 main.css 里 .tool-fold 的说明）。
+      const fold = document.createElement('div');
+      fold.className = 'tool-fold';
+      fold.appendChild(body);
       head.addEventListener('click', () => {
-        body.hidden = !body.hidden;
+        const open = card.classList.toggle('open');
+        head.setAttribute('aria-expanded', open ? 'true' : 'false');
       });
       card.appendChild(head);
-      card.appendChild(body);
+      card.appendChild(fold);
       host.appendChild(card);
     }
 
@@ -530,14 +598,6 @@
     statusEl.textContent = statusInfo.text;
     statusEl.className = `tool-status ${statusInfo.cls}`;
     bodyEl.innerHTML = renderToolBody(tool);
-
-    // 工具跑完就自动展开一次，方便直接看到结果；用户手动收起来后就不再动它。
-    if (!card.dataset.touched) {
-      if (tool.status === 'completed' || tool.status === 'failed') bodyEl.hidden = false;
-      card.querySelector('.tool-head').addEventListener('click', () => {
-        card.dataset.touched = '1';
-      });
-    }
     scrollIfPinned();
   }
 

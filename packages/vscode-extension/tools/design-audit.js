@@ -96,8 +96,10 @@ function main() {
 
   const spacingValues = sorted(spacing);
   console.log(`间距值（${spacingValues.length} 种）：${spacingValues.map((v) => `${v}px`).join(' / ')}`);
-  const offScale = spacingValues.filter((value) => value % 4 !== 0);
-  console.log(`  不在 4px 尺度上的：${offScale.length ? offScale.map((v) => `${v}px`).join(' / ') : '没有'}`);
+  // 基线：2px 刻度（2/4/8/12/16）。不查 4px 是因为下拉框、小块这类
+  // 紧凑元素合法地用 2px，4px 判据会把它们误报成出格。
+  const offScale = spacingValues.filter((value) => value % 2 !== 0);
+  console.log(`  不在 2px 刻度上的：${offScale.length ? offScale.map((v) => `${v}px`).join(' / ') : '没有'}`);
 
   const fontSizes = [...fontSize.keys()].sort();
   console.log(`\n字号（${fontSizes.length} 种）：${fontSizes.join(' / ')}`);
