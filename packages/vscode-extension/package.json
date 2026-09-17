@@ -2,7 +2,7 @@
   "name": "dsh-panel",
   "displayName": "DSH Panel",
   "description": "在 VS Code 侧边栏里使用你正在运行的 DeepSeek Harness（同一个内核、同一份记忆、同一份会话记录）。",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
   "publisher": "local",
   "license": "UNLICENSED",

@@ -55,7 +55,10 @@ const CODE_EXE_CANDIDATES = [
   path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Microsoft VS Code', 'Code.exe'),
   path.join(process.env.ProgramFiles || '', 'Microsoft VS Code', 'Code.exe'),
 ];
-const INSTALLED = path.join(os.homedir(), '.vscode', 'extensions', 'local.dsh-panel-0.0.1');
+// 安装目录名跟着清单版本走（local.dsh-panel-<version>），提版本号时这里不用改。
+const MANIFEST = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+const EXT_DIR_NAME = `local.dsh-panel-${MANIFEST.version}`;
+const INSTALLED = path.join(os.homedir(), '.vscode', 'extensions', EXT_DIR_NAME);
 
 let CODE_EXE = CODE_EXE_CANDIDATES.find((candidate) => candidate && fs.existsSync(candidate));
 
@@ -278,7 +281,7 @@ async function main() {
   const extensions = path.join(sandbox, 'extensions');
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-e2e-ws-'));
   fs.mkdirSync(userData, { recursive: true });
-  copyDir(INSTALLED, path.join(extensions, 'local.dsh-panel-0.0.1'));
+  copyDir(INSTALLED, path.join(extensions, EXT_DIR_NAME));
   console.log(`  隔离目录：${sandbox}`);
   console.log(`  扩展目录里只放这一份：${fs.readdirSync(extensions).join(', ')}`);
 
