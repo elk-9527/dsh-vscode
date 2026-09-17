@@ -30,6 +30,11 @@ import { ndJsonStream } from '@agentclientprotocol/sdk';
 import * as acp from '@deepseek-ai/dsh-acp';
 import {
   FALLBACK_PRESETS,
+  doorSessionsError,
+  doorSessionsMethod,
+  doorSessionsResult,
+  DOOR_SESSIONS_PREFIX,
+  isDoorSessionsRequest,
   isNewSessionRequest,
   isResponseTo,
   normalizePresets,
@@ -37,6 +42,7 @@ import {
   requestedPreset,
   withPresetMeta,
 } from './frames.js';
+import { DEFAULT_LIST_LIMIT, getSession, listSessions, resolveSessionsRoot } from './sessions.js';
 
 export const name = 'acp-door';
 
@@ -292,6 +298,12 @@ function gatePrompts(source, state, diag) {
         while ((index = buffer.indexOf('\n')) >= 0) {
           const line = buffer.slice(0, index + 1);
           buffer = buffer.slice(index + 1);
+          // 门自己的方法（历史会话）在这里就地应答、不转发内核；
+          // 其余帧照旧走闸。
+          if (line.includes(DOOR_SESSIONS_PREFIX)) {
+            const handled = await handleDoorSessions(line, state, diag);
+            if (handled) continue;
+          }
           rememberSessionRequest(line, state, diag);
           await holdUntilMounted(line, state, diag);
           controller.enqueue(encoder.encode(line));
@@ -333,6 +345,43 @@ function rememberSessionRequest(line, state, diag) {
   }
 }
 
+/**
+ * 就地应答门自己的历史会话请求（`dsh-door/sessions/list|get`）。
+ *
+ * 为什么由门答而不是转发内核：内核没有「列出历史会话」的公开方法，
+ * 而会话文件就在本机磁盘上 —— 门读盘（lib/sessions.js，只读）就够了。
+ * 应答帧从 `state.respond` 走唯一的写出口，请求帧本身**吞掉不转发**
+ * （内核会把它当成不认识的方法而报错，白费一圈）。
+ *
+ * @param {string} line 原始 NDJSON 行。
+ * @param {object} state 本连接共享状态（要 state.respond / state.sessionsHandler）。
+ * @param {(message: string) => void} diag
+ * @returns {Promise<boolean>} true = 这帧是门的方法、已应答，调用方不要再转发。
+ */
+async function handleDoorSessions(line, state, diag) {
+  const frame = parseLine(line);
+  if (!isDoorSessionsRequest(frame)) return false;
+  const method = doorSessionsMethod(frame);
+  const handler = state.sessionsHandler;
+  if (!handler || typeof handler[method] !== 'function') {
+    state.respond(doorSessionsError(frame.id, -32601, `门不支持 ${frame.method}（门版本太旧或方法名不对）`));
+    return true;
+  }
+  try {
+    const result =
+      method === 'get'
+        ? await handler.get(frame.params ? frame.params.id : undefined)
+        : await handler.list(frame.params || {});
+    state.respond(doorSessionsResult(frame.id, result));
+    diag(`旁路应答 ${frame.method}（请求 ${frame.id}）成功`);
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    state.respond(doorSessionsError(frame.id, -32000, message));
+    diag(`旁路应答 ${frame.method}（请求 ${frame.id}）失败：${message}`);
+  }
+  return true;
+}
+
 /** 若这一行是尚未挂完预设的会话的 `session/prompt`，等它挂完再放行。 */
 async function holdUntilMounted(line, state, diag) {
   if (state.pending.size === 0) return;
@@ -360,8 +409,13 @@ async function holdUntilMounted(line, state, diag) {
  * 顺带解决一件事：这里会**等这个会话的预设挂完**再放行回复，所以客户端
  * 一拿到 sessionId，工具就已经齐了（入站闸是第二道保险，不是唯一一道）。
  *
+ * 这一层还掌管**唯一的 socket 写出口**：内核的回复和门自己的旁路应答
+ * （`dsh-door/sessions/*`，见 {@link handleDoorSessions}）都进同一个队列、
+ * 由一个泵顺序写。为什么不能各写各的：WritableStream 同时只允许一个
+ * writer，而两个来源交错写会让一整行 JSON 被劈成两半。
+ *
  * @param sink - socket 的出站可写流。
- * @param state - 本连接的共享状态。
+ * @param state - 本连接的共享状态；这里会把 `state.respond(frame)` 装好。
  * @param diag - 诊断日志函数。
  * @returns 一个字节可写流，交给 ndJsonStream 当输出。
  */
@@ -369,25 +423,52 @@ function decorateSessionResponses(sink, state, diag) {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = '';
+
+  /** 待写进 socket 的字节行。 */
+  const queue = [];
+  let writer = null;
+  let draining = false;
+  async function drain() {
+    if (draining) return;
+    draining = true;
+    try {
+      if (!writer) writer = sink.getWriter();
+      while (queue.length > 0) {
+        await writer.write(queue.shift());
+      }
+    } catch (error) {
+      diag(`出站管道断开：${String(error)}`);
+    } finally {
+      draining = false;
+    }
+  }
+  state.respond = (frame) => {
+    queue.push(encoder.encode(`${JSON.stringify(frame)}\n`));
+    drain();
+  };
+
   // ndJsonStream 的输出侧是「消息对象级」的流：它在内部把对象编码成
-  // NDJSON 行再写进这里。所以这一层的输入输出都是字节。
+  // NDJSON 行再写进这里。装饰完不再走 controller（那会引入背压），直接进队列。
   const relay = new TransformStream({
-    async transform(chunk, controller) {
+    async transform(chunk) {
       buffer += decoder.decode(chunk, { stream: true });
       let index;
       while ((index = buffer.indexOf('\n')) >= 0) {
         const line = buffer.slice(0, index + 1);
         buffer = buffer.slice(index + 1);
-        controller.enqueue(encoder.encode(await decorateLine(line, state, diag)));
+        try {
+          queue.push(encoder.encode(await decorateLine(line, state, diag)));
+        } catch (error) {
+          // 装饰失败不该吞掉内核的回复 —— 原样放行。
+          diag(`装饰出站帧失败（原样放行）：${String(error)}`);
+          queue.push(encoder.encode(line));
+        }
       }
     },
-    flush(controller) {
-      if (buffer) controller.enqueue(encoder.encode(buffer));
+    flush() {
+      if (buffer) queue.push(encoder.encode(buffer));
     },
   });
-  // 变换后的字节写进 socket；连接断了这里会 reject，不能让它变成
-  // 未处理的 rejection（内核会当成崩溃）。
-  relay.readable.pipeTo(sink).catch((error) => diag(`出站管道断开：${String(error)}`));
   return relay.writable;
 }
 
@@ -480,6 +561,28 @@ export function apply(ctx, config = {}) {
     typeof config.preset === 'string' && config.preset ? config.preset : DEFAULT_PRESET;
   const diag = makeDiag(config.diagLog ?? process.env.DSH_ACP_DOOR_DIAG);
 
+  // 历史会话：目录与内核同一套判定（DSH_HOME 或 ~/.dsh）。只读，见 lib/sessions.js。
+  const sessionsRoot =
+    typeof config.sessionsDir === 'string' && config.sessionsDir
+      ? config.sessionsDir
+      : resolveSessionsRoot();
+  const sessionsHandler = {
+    /** 列出历史会话（按修改时间从新到旧）。 */
+    async list(params = {}) {
+      const limit =
+        typeof params.limit === 'number' && Number.isFinite(params.limit) && params.limit > 0
+          ? Math.min(Math.floor(params.limit), 500)
+          : DEFAULT_LIST_LIMIT;
+      const { sessions, skipped, error } = listSessions(sessionsRoot, { limit });
+      if (error) throw new Error(error);
+      return { sessions, skipped };
+    },
+    /** 取一段会话的名片与回放。 */
+    async get(id) {
+      return getSession(sessionsRoot, id, {});
+    },
+  };
+
   // 配置里没点名模型时，内核就不知道该找谁说话：会话照样建得起来，
   // 但**第一个回合直接失败**（实测原文：`agent "…" has no provider/model`）。
   // 这个坑很隐蔽（建会话是成功的、门也开得好好的），而且很容易踩 ——
@@ -539,6 +642,8 @@ export function apply(ctx, config = {}) {
       defaultPreset: preset,
       /** 可用预设清单；连接挂上内核服务后才有值。 */
       listPromise: undefined,
+      /** 门自己的历史会话方法（见 handleDoorSessions）。 */
+      sessionsHandler,
     };
 
     // 出站方向加一道「补预设清单」的闸，入站方向加一道「压 prompt」的闸。

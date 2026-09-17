@@ -20,6 +20,38 @@
 export const DOOR_META_KEY = 'dsh-door';
 
 /**
+ * 门自定义方法的前缀：`dsh-door/sessions/list`、`dsh-door/sessions/get`。
+ *
+ * 为什么不叫 `session/list`：那是内核可能自己长出来的方法名，撞上了就说不清
+ * 是谁在应答。前缀带上 `dsh-door`，命名空间是门的，内核永远不会有这个方法。
+ */
+export const DOOR_SESSIONS_PREFIX = 'dsh-door/sessions/';
+
+/**
+ * 是不是门自己要接的「历史会话」请求（带 id 的 JSON-RPC 请求）。
+ * @param {object} frame
+ */
+export function isDoorSessionsRequest(frame) {
+  return Boolean(frame) && frame.id !== undefined && typeof frame.method === 'string'
+    && frame.method.startsWith(DOOR_SESSIONS_PREFIX);
+}
+
+/** 取方法名里前缀后面的部分：'list' 或 'get'。 */
+export function doorSessionsMethod(frame) {
+  return isDoorSessionsRequest(frame) ? frame.method.slice(DOOR_SESSIONS_PREFIX.length) : undefined;
+}
+
+/** 门对历史会话请求的成功应答帧（一行 JSON，不带尾随换行 —— 调用方自己拼）。 */
+export function doorSessionsResult(id, result) {
+  return { jsonrpc: '2.0', id, result };
+}
+
+/** 门对历史会话请求的错误应答帧。 */
+export function doorSessionsError(id, code, message) {
+  return { jsonrpc: '2.0', id, error: { code, message } };
+}
+
+/**
  * 内核自带预设的兜底清单。
  *
  * 正常情况下用的是 `agentPresets.list()` 的真实结果（带中文名与说明）；

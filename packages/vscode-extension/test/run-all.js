@@ -26,6 +26,7 @@ const withDsh = args.includes('--all');
 const suites = [
   { name: '静态契约', file: 'test/static.js', always: true },
   { name: '门的看帧判断（纯函数）', file: '../dsh-door/test/frames.js', always: true },
+  { name: '门的会话读取（纯函数）', file: '../dsh-door/test/sessions.js', always: true },
   { name: 'Markdown 渲染器', file: 'test/markdown.js', always: true },
   { name: '编辑器上下文拼块（纯函数）', file: 'test/blocks.js', always: true },
   { name: '会话层边界（假客户端）', file: 'test/session.js', always: true },
