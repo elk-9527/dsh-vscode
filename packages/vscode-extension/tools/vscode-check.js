@@ -326,10 +326,12 @@ async function main() {
   check('扩展真的被激活了（扩展宿主日志里有它）',
     /_doActivateExtension local\.dsh-panel/.test(exthostText),
     exthost ? '看过扩展宿主日志' : '没有扩展宿主日志');
-  check('五个命令都注册上了',
-    ['newSession', 'reconnect', 'showLog', 'attachFile', 'attachSelection']
-      .every((name) => exthostText.includes(`dshPanel.${name}`)),
-    '');
+  // 命令清单从清单文件里读，别在这里再抄一份 —— 抄一份就会漏掉后加的
+  // （「打开面板」就是这么被漏掉的：这正是早上"找不到入口"的那个坑）。
+  const declaredCommands = require('../package.json').contributes.commands.map((item) => item.command);
+  check(`六个命令都注册上了（${declaredCommands.length} 个）`,
+    declaredCommands.every((name) => exthostText.includes(name)),
+    declaredCommands.filter((name) => !exthostText.includes(name)).join(', '));
 
   const renderer = findLog(userData, 'views.log');
   const rendererText = renderer ? fs.readFileSync(renderer, 'utf8') : '';

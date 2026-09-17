@@ -45,6 +45,11 @@
     },
     "commands": [
       {
+        "command": "dshPanel.open",
+        "title": "DSH：打开面板",
+        "category": "DSH"
+      },
+      {
         "command": "dshPanel.newSession",
         "title": "DSH：新建对话",
         "icon": "$(add)"
@@ -94,6 +99,9 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "dshPanel.open"
+        },
         {
           "command": "dshPanel.attachSelection",
           "when": "editorHasSelection"

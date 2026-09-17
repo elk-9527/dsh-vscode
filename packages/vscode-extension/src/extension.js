@@ -78,6 +78,17 @@ function activate(context) {
     vscode.commands.registerCommand('dshPanel.showLog', () => {
       channel.show(true);
     }),
+    /**
+     * 「DSH：打开面板」—— 把侧边栏面板展开并聚焦。
+     *
+     * 为什么必须有这个命令：面板挂在活动栏里，得先发现那个图标才能点开。
+     * 早上真机试的时候，扩展明明激活了，但"面板从来没被打开过"（日志里只有
+     * 启动那一行）—— 找不到入口，就等于这东西不存在。所以补一条命令：
+     * 命令面板里搜 "DSH" 就能进来。
+     */
+    vscode.commands.registerCommand('dshPanel.open', async () => {
+      await vscode.commands.executeCommand(`${VIEW_ID}.focus`);
+    }),
     // 编辑器上下文：右键菜单和命令面板都能用。
     vscode.commands.registerCommand('dshPanel.attachFile', () => attachFromEditor('file')),
     vscode.commands.registerCommand('dshPanel.attachSelection', () => attachFromEditor('selection')),
@@ -89,6 +100,30 @@ function activate(context) {
     }),
     { dispose: () => view.dispose() },
   );
+
+  /*
+   * 第一次装上之后给一条提示。
+   *
+   * 理由同上：装完不重启/不留意，活动栏里多出来的图标很容易被忽略，
+   * 用户看到的就是"装了个没用的东西"。只在**从没打开过面板**时提示一次，
+   * 之后永远不再打扰（记在 globalState 里）。
+   */
+  const HINT_KEY = 'dshPanel.openHintShown';
+  if (!context.globalState.get(HINT_KEY)) {
+    context.globalState.update(HINT_KEY, true);
+    log('info', '首次启动：提示用户面板在哪里');
+    vscode.window
+      .showInformationMessage(
+        'DSH 面板已就绪：点左侧活动栏里的对话气泡图标，或按 Ctrl+Shift+P 搜「DSH：打开面板」。',
+        '现在就打开',
+      )
+      .then((choice) => {
+        if (choice === '现在就打开') {
+          return vscode.commands.executeCommand(`${VIEW_ID}.focus`);
+        }
+        return undefined;
+      });
+  }
 
   /*
    * 自检开关：设了 DSH_PANEL_AUTOFOCUS=1 时，启动后自动把面板打开一次。

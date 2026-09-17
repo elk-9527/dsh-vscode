@@ -297,6 +297,57 @@ function typesOf(items) {
     Object.assign(configValues, saved);
   }
 
+  section('8.6 兜底失败的两种情形，各说各的话（这条分支以前从没被测过）');
+  {
+    // 为什么以前测不到：要跑到「进程活着、但门一直没开」这条分支，正常情况下
+    // 得等满 120 秒 —— 所以它一直躺在代码里没人验。给 waitForFallbackDoor 加了
+    // 一个只在测试里用的超时参数，几秒就能跑到。
+    const { fallbackFailureText } = require('../src/panel/view');
+    const emitter = require('node:events');
+
+    // (1) 进程活着但端口没开 → 等到超时，且必须分辨出这不是"命令错"。
+    const aliveChild = new emitter.EventEmitter();
+    const startedAt = Date.now();
+    const timedOut = await panel.waitForFallbackDoor(aliveChild, '127.0.0.1', 47844, 900);
+    const waited = Date.now() - startedAt;
+    check('端口一直不开时会等到超时，并说明是超时（不是命令错）',
+      timedOut.ok === false && timedOut.exitedEarly === false,
+      JSON.stringify(timedOut));
+    check('超时是按给它的时间来的（0.9 秒的活干完就返回）', waited < 4000, `等了 ${waited}ms`);
+
+    // (2) 进程立刻退出 → 立刻返回，且标明是"刚启动就退出"。
+    const deadChild = new emitter.EventEmitter();
+    const quick = panel.waitForFallbackDoor(deadChild, '127.0.0.1', 47844, 30000);
+    setTimeout(() => deadChild.emit('exit', 1, null), 50);
+    const died = await quick;
+    check('进程刚退出时立刻返回（不把 30 秒等满）',
+      died.ok === false && died.exitedEarly === true,
+      JSON.stringify(died));
+
+    // (3) 两种情形的话必须不一样，而且各自指出正确的出路。
+    const boot = fallbackFailureText({
+      command: 'dsh', profile: 'desktop', host: '127.0.0.1', port: 47821, exitedEarly: true,
+    });
+    const noDoor = fallbackFailureText({
+      command: 'dsh', profile: 'desktop', host: '127.0.0.1', port: 47821, exitedEarly: false,
+    });
+    check('两句话不一样（否则等于没区分）', boot !== noDoor);
+    check('"命令错"那句提到 PATH 与 dshCommand', /PATH/.test(boot) && /dshCommand/.test(boot), boot);
+    check('"门没开"那句提到门插件与端口',
+      /dsh-acp-door/.test(noDoor) && /plugin --profile desktop list/.test(noDoor) && /port/.test(noDoor),
+      noDoor);
+
+    // (4) 设置里填了几个空格，不该被当成路径发给内核
+    //     （内核会回 "cwd must be an absolute path: "，然后用户看到的是一句莫名其妙的话）。
+    const savedCwd = configValues.cwd;
+    configValues.cwd = '   ';
+    const resolved = panel.workdir();
+    check('cwd 只填了空格时退回工作区目录（不把空格发过去）',
+      resolved === savedCwd,
+      `${JSON.stringify(resolved)}，工作区目录是 ${JSON.stringify(savedCwd)}`);
+    configValues.cwd = savedCwd;
+  }
+
   section('9. 收摊');
   panel.dispose();
   door.stop();

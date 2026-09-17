@@ -186,7 +186,10 @@ class DshPanelView {
   }
 
   workdir() {
-    const configured = this.config().cwd;
+    // 用 trim 过的值：内核会拒绝空 cwd（"cwd must be an absolute path: "），
+    // 而设置项里填了几个空格是很容易发生的事 —— 那种情况应该退回工作区/主目录，
+    // 而不是把一串空格当成路径发过去。
+    const configured = String(this.config().cwd || '').trim();
     if (configured) return configured;
     const folders = vscode.workspace.workspaceFolders;
     if (folders && folders.length > 0) return folders[0].uri.fsPath;
@@ -211,15 +214,18 @@ class DshPanelView {
    * 而 waitForPort 会老老实实等满 120 秒 —— 用户对着"正在后台启动 DSH…"
    * 干等两分钟，最后只换来一句"没开门"，还得自己猜为什么。
    * 既然进程都已经退出了，就没有必要再等。
+   *
+   * `timeoutMs` 只是为了让测试能在几秒内跑到"等超时"那条分支 ——
+   * 生产路径不传它，就是两分钟。
    */
-  async waitForFallbackDoor(child, host, port) {
+  async waitForFallbackDoor(child, host, port, timeoutMs = 120000) {
     let exit = null;
     const onExit = (code, signal) => {
       exit = { code, signal };
     };
     if (child && typeof child.once === 'function') child.once('exit', onExit);
     try {
-      const deadline = Date.now() + 120000;
+      const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
         if (await probePort(host, port)) return { ok: true };
         if (exit) {
@@ -273,12 +279,13 @@ class DshPanelView {
         this.post({
           type: 'status',
           state: 'error',
-          detail: outcome.exitedEarly
-            ? `后台 DSH 刚启动就退出了（命令：「${cfg.dshCommand}」，profile=${cfg.fallbackProfile}）。` +
-              '多半是 dsh 不在 PATH 里，或者 dshPanel.dshCommand 指错了 —— ' +
-              '先开个终端跑一次 dsh --version 确认，再把它的完整路径填进设置。'
-            : `后台 DSH 起来了，但 ${cfg.host}:${cfg.port} 上没开门（profile=${cfg.fallbackProfile}）。` +
-              '如果你改过端口，门插件里的 port 也要一起改。',
+          detail: fallbackFailureText({
+            command: cfg.dshCommand,
+            profile: cfg.fallbackProfile,
+            host: cfg.host,
+            port: cfg.port,
+            exitedEarly: outcome.exitedEarly,
+          }),
         });
         return undefined;
       }
@@ -608,4 +615,27 @@ class DshPanelView {
   }
 }
 
-module.exports = { DshPanelView, VIEW_ID };
+/**
+ * 兜底拉起失败时给用户看的那句话（纯函数，好测）。
+ *
+ * 两种失败要说成两件不同的事，因为**出路不一样**：
+ * - 进程刚启动就退出 → 命令不对（dsh 不在 PATH、dshCommand 指错）；
+ * - 进程活着但端口没开 → 这个档里可能没装门插件，或者门被指到了别的端口。
+ * 把它们混成一句"没开门"，用户就只能自己猜。
+ */
+function fallbackFailureText({ command, profile, host, port, exitedEarly }) {
+  if (exitedEarly) {
+    return (
+      `后台 DSH 刚启动就退出了（命令：「${command}」，profile=${profile}）。` +
+      '多半是 dsh 不在 PATH 里，或者 dshPanel.dshCommand 指错了 —— ' +
+      '先开个终端跑一次 dsh --version 确认，再把它的完整路径填进设置。'
+    );
+  }
+  return (
+    `后台 DSH 起来了，但 ${host}:${port} 上一直没开门（profile=${profile}）。` +
+    `两种可能：这个档里没装门插件（用 dsh plugin --profile ${profile} list 看一眼，` +
+    '应当有 dsh-acp-door）；或者你改过端口，门插件里的 port 也要跟着改。'
+  );
+}
+
+module.exports = { DshPanelView, VIEW_ID, fallbackFailureText };
