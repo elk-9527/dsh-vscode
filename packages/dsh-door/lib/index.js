@@ -30,6 +30,7 @@ import { ndJsonStream } from '@agentclientprotocol/sdk';
 import * as acp from '@deepseek-ai/dsh-acp';
 import {
   FALLBACK_PRESETS,
+  createOutboundRelay,
   doorSessionsError,
   doorSessionsMethod,
   doorSessionsResult,
@@ -40,7 +41,6 @@ import {
   normalizePresets,
   parseLine,
   requestedPreset,
-  withPresetMeta,
 } from './frames.js';
 import { DEFAULT_LIST_LIMIT, getSession, listSessions, resolveSessionsRoot } from './sessions.js';
 
@@ -63,14 +63,6 @@ const DEFAULT_PORT = 47821;
 
 /** 新会话默认挂载的 agent preset（客户端没点名时用它）。 */
 const DEFAULT_PRESET = 'standard';
-
-/**
- * 等会话的预设挂完，最多等这么久。
- *
- * 为什么要有上限：这个等待发生在出站方向上，卡住就等于客户端拿不到
- * session/new 的回复。宁可给它一份「还没挂完」的清单，也不能让回复不来。
- */
-const MOUNT_WAIT_MS = 15000;
 
 /**
  * 可选的诊断日志。
@@ -398,134 +390,6 @@ async function holdUntilMounted(line, state, diag) {
   await waiting.catch(() => {});
   diag(`入站闸：放行（等了 ${Date.now() - startedAt}ms）`);
 }
-
-/**
- * 出站方向：把 `session/new` / `session/resume` 的回复补上一份预设清单。
- *
- * 为什么不另开一个自定义方法：ACP 的 `_meta` 就是给这种事准备的官方扩展点，
- * 客户端不认识它也能照常用（原有字段一个不动）；而且这样正好省掉一次往返 ——
- * 客户端拿到 sessionId 的同一次回复里，就能知道有哪些预设、这次用的是哪个。
- *
- * 顺带解决一件事：这里会**等这个会话的预设挂完**再放行回复，所以客户端
- * 一拿到 sessionId，工具就已经齐了（入站闸是第二道保险，不是唯一一道）。
- *
- * 这一层还掌管**唯一的 socket 写出口**：内核的回复和门自己的旁路应答
- * （`dsh-door/sessions/*`，见 {@link handleDoorSessions}）都进同一个队列、
- * 由一个泵顺序写。为什么不能各写各的：WritableStream 同时只允许一个
- * writer，而两个来源交错写会让一整行 JSON 被劈成两半。
- *
- * @param sink - socket 的出站可写流。
- * @param state - 本连接的共享状态；这里会把 `state.respond(frame)` 装好。
- * @param diag - 诊断日志函数。
- * @returns 一个字节可写流，交给 ndJsonStream 当输出。
- */
-function decorateSessionResponses(sink, state, diag) {
-  const decoder = new TextDecoder();
-  const encoder = new TextEncoder();
-  let buffer = '';
-
-  /** 待写进 socket 的字节行。 */
-  const queue = [];
-  let writer = null;
-  let draining = false;
-  async function drain() {
-    if (draining) return;
-    draining = true;
-    try {
-      if (!writer) writer = sink.getWriter();
-      while (queue.length > 0) {
-        await writer.write(queue.shift());
-      }
-    } catch (error) {
-      diag(`出站管道断开：${String(error)}`);
-    } finally {
-      draining = false;
-    }
-  }
-  state.respond = (frame) => {
-    queue.push(encoder.encode(`${JSON.stringify(frame)}\n`));
-    drain();
-  };
-
-  // ndJsonStream 的输出侧是「消息对象级」的流：它在内部把对象编码成
-  // NDJSON 行再写进这里。装饰完不再走 controller（那会引入背压），直接进队列。
-  const relay = new TransformStream({
-    async transform(chunk) {
-      buffer += decoder.decode(chunk, { stream: true });
-      let index;
-      while ((index = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, index + 1);
-        buffer = buffer.slice(index + 1);
-        try {
-          queue.push(encoder.encode(await decorateLine(line, state, diag)));
-        } catch (error) {
-          // 装饰失败不该吞掉内核的回复 —— 原样放行。
-          diag(`装饰出站帧失败（原样放行）：${String(error)}`);
-          queue.push(encoder.encode(line));
-        }
-      }
-    },
-    flush() {
-      if (buffer) queue.push(encoder.encode(buffer));
-    },
-  });
-  return relay.writable;
-}
-
-/** 若这一行是某个建会话/恢复会话请求的回复，就补上预设清单后返回；否则原样返回。 */
-async function decorateLine(line, state, diag) {
-  // 便宜的预筛：没有跟踪中的请求、或这行没有 result，就不是我们要看的回复。
-  if (state.replies.size === 0 || !line.includes('"result"')) return line;
-  const frame = parseLine(line);
-  // 这里把 state.replies（Map）当 id 集合用：Map 也有 has()。
-  if (!isResponseTo(frame, state.replies)) return line;
-  const asked = state.replies.get(frame.id);
-  state.replies.delete(frame.id);
-
-  const sessionId = frame.result?.sessionId ?? asked?.sessionId;
-  const mounting = typeof sessionId === 'string' ? state.pending.get(sessionId) : undefined;
-  if (mounting) await withTimeout(mounting, MOUNT_WAIT_MS);
-
-  try {
-    const presets = await (state.listPromise ?? Promise.resolve(FALLBACK_PRESETS));
-    const current =
-      (typeof sessionId === 'string' &&
-        (state.applied.get(sessionId) ?? state.sessionPresets.get(sessionId))) ||
-      state.defaultPreset;
-    const decorated = withPresetMeta(frame, {
-      presets,
-      current,
-      requested: asked?.preset,
-      fallback: asked?.fallback === true ? true : undefined,
-    });
-    diag(
-      `回复 ${asked?.sessionId ? 'session/resume' : 'session/new'}（请求 ${frame.id} 会话 ${sessionId}）：` +
-        `requested=${asked?.preset ?? '-'} current=${current}` +
-        `${asked?.fallback ? '（点名的不存在，已退回默认）' : ''}`,
-    );
-    return `${JSON.stringify(decorated)}\n`;
-  } catch (error) {
-    // 补清单失败不该影响这个会话本身 —— 回复原样放行。
-    diag(`补预设清单失败（不影响会话）：${String(error)}`);
-    return line;
-  }
-}
-
-/** 等一个 promise 落定，但最多等 ms 毫秒。 */
-async function withTimeout(promise, ms) {
-  let timer;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise((resolve) => {
-        timer = setTimeout(resolve, ms);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 /** 判定内核「已经开过的会话不许换预设」的拒绝。 */
 function isPresetLocked(error) {
   return (
@@ -549,7 +413,7 @@ function isPresetLocked(error) {
  *   客户端可以在 `session/new` 的 `params._meta['dsh-door'].preset` 里点名
  *   要用哪个（见 {@link choosePreset}）；这个配置是**没点名时**用的默认值。
  *   可选的 id 由内核的 `agentPresets.list()` 实时给出，随回复的 `_meta` 一起
- *   告诉客户端（见 {@link decorateSessionResponses}）。
+ *   告诉客户端（见 {@link createOutboundRelay}）。
  * @param config.diagLog - 可选：诊断日志文件路径（也可用环境变量
  *   `DSH_ACP_DOOR_DIAG`）。不配则完全不写。
  */
@@ -648,7 +512,7 @@ export function apply(ctx, config = {}) {
 
     // 出站方向加一道「补预设清单」的闸，入站方向加一道「压 prompt」的闸。
     const stream = ndJsonStream(
-      decorateSessionResponses(writable, state, diag),
+      createOutboundRelay(writable, state, diag),
       gatePrompts(readable, state, diag),
     );
 

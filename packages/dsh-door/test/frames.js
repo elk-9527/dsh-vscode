@@ -11,6 +11,8 @@
 import {
   DOOR_META_KEY,
   FALLBACK_PRESETS,
+  createOutboundRelay,
+  doorSessionsResult,
   isNewSessionRequest,
   isResponseTo,
   normalizePresets,
@@ -179,6 +181,100 @@ const roundTrip = withPresetMeta(
 equal('点名什么，回来就是什么', readPresetMeta(roundTrip).current, 'minimal');
 
 // ─────────────────────────────────────────────────────────────
+// 出站中继是异步管道，放 async 段里测；总结在最后统一打。
+async function relayTests() {
+  section('8. createOutboundRelay：写进来的行必须真的从 sink 出来');
+  const encoder = new TextEncoder();
+  // 假 sink：收字节，攒成一个字符串。真 socket 在 web 化之后长这样。
+  const chunks = [];
+  const sink = new WritableStream({
+    write(chunk) {
+      chunks.push(chunk);
+    },
+  });
+
+  function makeState() {
+    return {
+      pending: new Map(),
+      replies: new Map(),
+      applied: new Map(),
+      sessionPresets: new Map(),
+      defaultPreset: 'standard',
+      listPromise: Promise.resolve(FALLBACK_PRESETS),
+    };
+  }
+
+  const state = makeState();
+  const relay = createOutboundRelay(sink, state, () => {});
+  const writer = relay.getWriter();
+
+  // (1) 普通回复：原样通过。
+  await writer.write(encoder.encode('{"jsonrpc":"2.0","id":7,"result":{"ok":true}}\n'));
+  await flushRelay();
+  equal('普通回复一字不改地通过', text(chunks), '{"jsonrpc":"2.0","id":7,"result":{"ok":true}}\n');
+
+  // (2) session/new 的回复：要补上预设清单。
+  state.replies.set(8, { request: 8, preset: undefined });
+  await writer.write(encoder.encode('{"jsonrpc":"2.0","id":8,"result":{"sessionId":"s1"}}\n'));
+  await flushRelay();
+  const lines = text(chunks).split('\n').filter(Boolean);
+  const decorated = parseLine(lines[lines.length - 1]);
+  check('session/new 回复带上了 _meta 清单', Boolean(readPresetMeta(decorated)), text(chunks));
+  equal('清单里是兜底四项', readPresetMeta(decorated).presets.length, FALLBACK_PRESETS.length);
+  equal('current 报默认预设', readPresetMeta(decorated).current, 'standard');
+  equal('sessionId 没被动过', decorated.result.sessionId, 's1');
+
+  // (3) 门自己的旁路应答（state.respond）跟内核回复走**同一个**写出口，
+  //     而且先后顺序不乱 —— 两个来源交错写会把一行 JSON 劈成两半。
+  chunks.length = 0;
+  state.respond(doorSessionsResult(99, { sessions: [], skipped: 0 }));
+  await writer.write(encoder.encode('{"jsonrpc":"2.0","id":10,"result":{}}\n'));
+  await flushRelay();
+  equal('旁路应答与内核回复都从同一出口出来且各占一行',
+    text(chunks),
+    '{"jsonrpc":"2.0","id":99,"result":{"sessions":[],"skipped":0}}\n{"jsonrpc":"2.0","id":10,"result":{}}\n');
+
+  // (4) 半截行（没有换行）不提前出站；close 时吐出来。
+  chunks.length = 0;
+  await writer.write(encoder.encode('{"partial":'));
+  await flushRelay();
+  equal('半截行不出站', text(chunks), '');
+  writer.releaseLock();
+  await relay.close();
+  await flushRelay();
+  equal('close 时把半截行吐出来', text(chunks), '{"partial":');
+
+  // (5) 坏行也不炸：装饰抛错就原样放行。
+  const state2 = makeState();
+  const sink2Chunks = [];
+  const relay2 = createOutboundRelay(
+    new WritableStream({ write(c) { sink2Chunks.push(c); } }),
+    state2,
+    () => {},
+  );
+  const writer2 = relay2.getWriter();
+  await writer2.write(encoder.encode('这不是 JSON\n'));
+  await flushRelay();
+  equal('坏行原样放行不炸', text(sink2Chunks), '这不是 JSON\n');
+  writer2.releaseLock();
+  await relay2.close();
+
+  function text(list) {
+    return Buffer.concat(list.map((item) => Buffer.from(item))).toString('utf8');
+  }
+  async function flushRelay() {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+try {
+  await relayTests();
+} catch (error) {
+  failures.push(`出站中继测试自己抛错了：${error && error.message ? error.message : error}`);
+  console.error(error);
+}
+
 console.log(`\n${'═'.repeat(56)}`);
 if (failures.length === 0) {
   console.log(`✅ frames.js 全部通过：${passed} 项检查`);

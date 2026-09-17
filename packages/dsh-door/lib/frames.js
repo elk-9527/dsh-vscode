@@ -160,3 +160,143 @@ export function withPresetMeta(frame, info) {
 export function readPresetMeta(frame) {
   return frame?.result?._meta?.[DOOR_META_KEY] ?? frame?._meta?.[DOOR_META_KEY];
 }
+
+/**
+ * 等会话的预设挂完，最多等这么久（出站方向上卡住就等于客户端拿不到
+ * session/new 的回复，必须有上限）。
+ */
+export const MOUNT_WAIT_MS = 15000;
+
+/** 等一个 promise 落定，但最多等 ms 毫秒（到点就放行，不报错）。 */
+export async function withTimeout(promise, ms) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * 若这一行是某个建会话/恢复会话请求的回复，就补上预设清单后返回；否则原样返回。
+ *
+ * @param {string} line 原始 NDJSON 行（带尾随换行）。
+ * @param {object} state 本连接共享状态。
+ * @param {(message: string) => void} diag
+ * @returns {Promise<string>} 要写进 socket 的行。
+ */
+export async function decorateLine(line, state, diag) {
+  // 便宜的预筛：没有跟踪中的请求、或这行没有 result，就不是我们要看的回复。
+  if (state.replies.size === 0 || !line.includes('"result"')) return line;
+  const frame = parseLine(line);
+  // 这里把 state.replies（Map）当 id 集合用：Map 也有 has()。
+  if (!isResponseTo(frame, state.replies)) return line;
+  const asked = state.replies.get(frame.id);
+  state.replies.delete(frame.id);
+
+  const sessionId = frame.result?.sessionId ?? asked?.sessionId;
+  const mounting = typeof sessionId === 'string' ? state.pending.get(sessionId) : undefined;
+  if (mounting) await withTimeout(mounting, MOUNT_WAIT_MS);
+
+  try {
+    const presets = await (state.listPromise ?? Promise.resolve(FALLBACK_PRESETS));
+    const current =
+      (typeof sessionId === 'string' &&
+        (state.applied.get(sessionId) ?? state.sessionPresets.get(sessionId))) ||
+      state.defaultPreset;
+    const decorated = withPresetMeta(frame, {
+      presets,
+      current,
+      requested: asked?.preset,
+      fallback: asked?.fallback === true ? true : undefined,
+    });
+    diag(
+      `回复 ${asked?.sessionId ? 'session/resume' : 'session/new'}（请求 ${frame.id} 会话 ${sessionId}）：` +
+        `requested=${asked?.preset ?? '-'} current=${current}` +
+        `${asked?.fallback ? '（点名的不存在，已退回默认）' : ''}`,
+    );
+    return `${JSON.stringify(decorated)}\n`;
+  } catch (error) {
+    // 补清单失败不该影响这个会话本身 —— 回复原样放行。
+    diag(`补预设清单失败（不影响会话）：${String(error)}`);
+    return line;
+  }
+}
+
+/**
+ * 出站方向的中继：内核回复补预设清单，门自己的旁路应答走同一个写出口。
+ *
+ * 这一层掌管**唯一的 socket 写出口**：内核的回复和门自己的旁路应答
+ * （`dsh-door/sessions/*`）都进同一个队列、由一个泵顺序写。为什么不能
+ * 各写各的：WritableStream 同时只允许一个 writer，两个来源交错写会把
+ * 一整行 JSON 劈成两半。
+ *
+ * ⚠️ 实测踩过的坑（正是这个函数写错过一次的教训）：返回值必须是
+ * **WritableStream**（ndJsonStream 会自己 getWriter 往里写）。最初写成
+ * TransformStream 却没人消费 readable —— transform 永远不执行，内核的
+ * 回复永远出不去，客户端看起来就是「门接了线但死不吭声」。所以这里
+ * 必须有一条测试断言「写进来的行一定会从 sink 出来」。
+ *
+ * @param sink - socket 的出站可写流（web 流）。
+ * @param state - 本连接的共享状态；这里会把 `state.respond(frame)` 装好。
+ * @param diag - 诊断日志函数。
+ * @returns {WritableStream} 交给 ndJsonStream 当输出端。
+ */
+export function createOutboundRelay(sink, state, diag) {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffer = '';
+
+  /** 待写进 socket 的字节行。 */
+  const queue = [];
+  let writer = null;
+  let draining = false;
+  async function drain() {
+    if (draining) return;
+    draining = true;
+    try {
+      if (!writer) writer = sink.getWriter();
+      while (queue.length > 0) {
+        await writer.write(queue.shift());
+      }
+    } catch (error) {
+      diag(`出站管道断开：${String(error)}`);
+    } finally {
+      draining = false;
+    }
+  }
+  state.respond = (frame) => {
+    queue.push(encoder.encode(`${JSON.stringify(frame)}\n`));
+    drain();
+  };
+
+  return new WritableStream({
+    async write(chunk) {
+      buffer += decoder.decode(chunk, { stream: true });
+      let index;
+      while ((index = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, index + 1);
+        buffer = buffer.slice(index + 1);
+        let out;
+        try {
+          out = await decorateLine(line, state, diag);
+        } catch (error) {
+          // 装饰失败不该吞掉内核的回复 —— 原样放行。
+          diag(`装饰出站帧失败（原样放行）：${String(error)}`);
+          out = line;
+        }
+        queue.push(encoder.encode(out));
+      }
+      drain();
+    },
+    close() {
+      if (buffer) queue.push(encoder.encode(buffer));
+      drain();
+    },
+  });
+}
