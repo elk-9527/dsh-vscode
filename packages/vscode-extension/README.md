@@ -125,6 +125,8 @@ node test/run-all.js --all  # 再加上真 DSH 进程的兜底拉起、模式、
 ```powershell
 node test/static.js      # 静态契约：HTML id ↔ 取元素、消息协议双向、CSS 类、零硬编码颜色
                          #   以及「扩展默认端口/主机 = 门实际监听端口/主机」这类跨文件约定
+node test/sessions-parity.js  # 两份「历史会话读取」实现（门的 ESM + 面板的 CJS）必须逐项一致
+node test/spawn-quote.js # 带空格的命令路径（真进程）：造一个带空格的 .cmd 垫片实际跑一遍
 node test/markdown.js    # Markdown 渲染器：语法、注入安全、病态输入不死循环、真实耗时
 node test/blocks.js      # 编辑器上下文拼块：选区正文、resource_link、围栏加长、脏数据
 node test/session.js     # 会话层边界（假客户端）：切模型信内核回复、用量帧只给一半、帧的归属与合并
@@ -134,7 +136,7 @@ node test/resume.js      # 断线后 session/resume 到底能不能把上下文�
 node test/presets.js     # 模式（agent preset）：新会话挂上、恢复会话补挂、工具没丢
 node test/smoke.js       # 端到端：协议、真回合、工具调用、中断、切模型、多轮、
                          #   以及编辑器上下文（选中代码里的暗号 + 带进来的文件里的暗号）
-node tools/uitest.js     # 无头 Chrome 里对界面做 283 项断言（7 个场景，含通用视觉体检：
+node tools/uitest.js     # 无头 Chrome 里对界面做 387 项断言（9 个场景，含通用视觉体检：
                          # 文字截断 / 按钮太小 / 浮层跑出面板 / 消息间距不一致）
 node tools/uitest.js context  # 只跑「带编辑器上下文」那个场景
 node tools/shots.js      # 把每个场景 × 深/浅主题拍成图（shots/*.png），

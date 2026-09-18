@@ -12,7 +12,8 @@
  *
  * 这两半的共同点是：**拼出来的字符串看起来完全正确**。所以只测
  * `commandLine()` 的返回值是抓不住它们的 —— 必须真的把进程拉起来，
- * 看它有没有跑到。
+ * 看它有没有跑到。（路径被劈开时 cmd 的原话是
+ * `'C:\Users\…\Roaming\DSH' is not recognized as an internal or external command`。）
  *
  * 这也是它存在的理由：本机 dsh 的真路径就带空格
  * （`…\AppData\Roaming\DSH Desktop\host-commands\…\dsh.cmd`），

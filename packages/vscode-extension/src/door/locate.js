@@ -192,7 +192,9 @@ function rejoinExisting(parts) {
  *
  * 为什么不能只按空白拆：`dshPanel.dshCommand` 的说明和面板自己的报错文案
  * 都让用户「把完整路径填进设置」，用户照做填的是**裸路径**；只按空白拆会把
- * 它劈成两段 —— 实测报「'C:\Users\…\Roaming\DSH' 不是内部或外部命令」。
+ * 它劈成两段 —— 实测 cmd 的原话是
+ * `'C:\Users\…\Roaming\DSH' is not recognized as an internal or external command`
+ * （面板会把它翻成中文人话再给用户看，见 `src/dsh/errors.js`）。
  * 用户不该为了填个路径还要先学引号规则。
  *
  * @param {string} command
