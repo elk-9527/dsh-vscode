@@ -207,13 +207,16 @@ async function runOnce(round) {
     console.log('     （只有一个模型可选，跳过）');
   }
 
-  // ── 7. 会话列表 ────────────────────────────────────
+  // ── 7. 内核自己的会话列表（ACP session/list）─────────
   // 实测语义：session/list 只返回**已经落盘**的会话，而且只有
   // {sessionId, cwd} 两个字段（没有标题、没有时间）。刚建的空会话不在里面。
   // 所以这里的断言是「接口形状正确」，而不是「一定能找到刚建的会话」。
-  section('7. 会话列表');
+  //
+  // 注意别把它和「历史会话」混起来：历史会话走的是门的旁路方法
+  // （dsh-door/sessions/list，第 7.5 节），两者返回的形状**完全不同**。
+  section('7. 内核会话列表（session/list）');
   try {
-    const list = await client.listSessions();
+    const list = await client.listKernelSessions();
     const sessions = list && Array.isArray(list.sessions) ? list.sessions : [];
     check('session/list 有回应', Boolean(list), JSON.stringify(list).slice(0, 120));
     check(
@@ -227,6 +230,33 @@ async function runOnce(round) {
     );
   } catch (error) {
     check('session/list 能调通', false, error.message);
+  }
+
+  // ── 7.5 历史会话（门的旁路方法，需要门 0.0.8+）───────
+  // 这一节**允许**环境不满足：门是装在用户档里的插件，而那个档由桌面端自己
+  // 管理（实测会把依赖重写回旧版），所以「门太旧」是常态。门旧就让这一节
+  // 明确报「跳过」，不算失败 —— 面板那边有自己读盘的兜底（见 panel.js 8.9），
+  // 那才是用户能用到的路径。以前这里直接断言成功、门一旧整条套件就红，
+  // 而红的原因跟被测代码无关，属于「测试自己错了」。
+  section('7.5 历史会话（dsh-door/sessions/list，需要门 0.0.8+）');
+  try {
+    const history = await client.listHistory();
+    const items = history && Array.isArray(history.sessions) ? history.sessions : [];
+    check('门的旁路方法有回应', Boolean(history));
+    check(
+      '历史名片形状是 {id, title?, turns}',
+      items.length === 0 || items.every((item) => typeof item.id === 'string'),
+      items.length ? JSON.stringify(items[0]).slice(0, 160) : '（列表为空）',
+    );
+    console.log(`     门报回 ${items.length} 段历史会话，跳过了 ${(history && history.skipped) || 0} 段`);
+  } catch (error) {
+    const text = error && error.message ? error.message : String(error);
+    if (/-32601|method not found/i.test(text)) {
+      console.log('     ⏭  这一轮连着的门是 0.0.7（没有旁路方法），跳过这一节；');
+      console.log('        面板自己读盘的那条路在「面板层」套件 8.9 里验。');
+    } else {
+      check('历史会话能调通', false, text);
+    }
   }
 
   // ── 8. 再跑一个回合（多轮上下文）────────────────────

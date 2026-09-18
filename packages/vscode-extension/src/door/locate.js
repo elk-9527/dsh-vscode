@@ -102,10 +102,110 @@ function dshCommandCandidates({ dshCommand, homedir }) {
 /** profile 名只允许这些字符 —— 它会进命令行，不能有注入的空间。 */
 const SAFE_PROFILE = /^[A-Za-z0-9._-]+$/;
 
-/** 按 Windows 命令行的规则给参数加引号（只在需要时加）。 */
+/**
+ * 按 **cmd.exe 的引号规则**给一段加引号（只在需要时加）。
+ *
+ * 为什么内部**不**做反斜杠转义：cmd.exe 不认 `\"`。以前这里写的是
+ * `text.replace(/"/g, '\\"')`，然后整条命令行又被 Node 的 argv 规则转义了一遍
+ * （Node 会把内嵌的 `"` 变成 `\"`），cmd 看到的是 `\"C:\Program Files\…` ——
+ * 它把 `\` 当普通字符、引号配错，于是报「不是内部或外部命令」。
+ * 现在有两道保证：① 这里只按 cmd 的规矩包引号；② 调用 spawn 时带
+ * `windowsVerbatimArguments: true`，让 Node **原样**传，不再动手。
+ * 实测（`node build/repro-locate.cjs`）：修之前带空格的路径「裸写」「加引号」
+ * 两种都起不来，修之后两种都能起来。
+ */
 function quoteArg(value) {
-  const text = String(value);
-  return /[\s"&|<>^]/.test(text) ? `"${text.replace(/"/g, '\\"')}"` : text;
+  const text = String(value === undefined || value === null ? '' : value);
+  if (!text) return '""';
+  return /[\s"&|<>^]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+/** 去掉整串外层成对的引号（用户可能写成 `"C:\…\dsh.cmd"`）。 */
+function stripOuterQuotes(text) {
+  const s = String(text === undefined || text === null ? '' : text);
+  if (s.length >= 2) {
+    const first = s[0];
+    if ((first === '"' || first === "'") && s[s.length - 1] === first) return s.slice(1, -1);
+  }
+  return s;
+}
+
+/** 这个路径上真的有东西吗（不存在、或路径里有非法字符都算「没有」）。 */
+function existsAsFile(candidate) {
+  try {
+    return Boolean(candidate) && fs.existsSync(candidate);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 把被空格劈开的片段**重新粘回**成「真的存在的那一段」。
+ *
+ * 为什么需要：`splitCommand` 只会按空白硬拆，面对
+ * `C:\…\DSH Desktop\…\dsh.cmd --profile desktop` 这种「路径里有空格」的写法，
+ * 它会把程序名劈成两半。但光靠「整串是不是文件」不够 —— 用户也可能在带空格的
+ * 路径后面再写参数（本机真实场景：dsh 就装在 `…\DSH Desktop\…` 下面）。
+ * 所以这里做一遍贪心回接，**只在拼出来的东西真的存在于磁盘上时才粘**：
+ *
+ *   `node C:\x y\bin.js`   → ['node', 'C:\x y\bin.js']   （脚本路径粘回去）
+ *   `C:\x y\dsh.cmd --v`   → ['C:\x y\dsh.cmd', '--v']   （程序名粘回去）
+ *   `dsh --profile a b`    → 原样（没有任何前缀真的存在，绝不乱粘）
+ *
+ * 只会**少拆**、不会**多粘**：粘的依据是磁盘上真有那个文件，不是猜。
+ *
+ * @param {string[]} parts
+ * @returns {string[]}
+ */
+function rejoinExisting(parts) {
+  const out = [];
+  const has = (text) => Boolean(text) && existsAsFile(text);
+  let i = 0;
+  while (i < parts.length) {
+    let joined = parts[i];
+    let j = i;
+    // 当前这段不是文件时，往后吞词，直到拼出一个真的存在的路径。
+    while (!has(joined) && j + 1 < parts.length) {
+      j += 1;
+      joined += ` ${parts[j]}`;
+    }
+    if (has(joined)) {
+      out.push(joined);
+      i = j + 1;
+    } else {
+      out.push(parts[i]);
+      i += 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * 把设置里的命令解析成「程序 + 它自带的参数」。
+ *
+ * 规则（按优先级）：
+ *   1. **整串本身就是一个存在的文件** → 它就是程序，一个参数都不带
+ *      （Windows 上 dsh 的真实路径里就带空格：`…\DSH Desktop\…\dsh.cmd`）；
+ *   2. 整串是 `"…"` 这样整体加引号的 → 剥掉引号再看第 1 条；
+ *   3. 否则按空白拆，再把「拆坏了的、磁盘上真实存在的那一段」粘回去
+ *      （见 {@link rejoinExisting}）。
+ *
+ * 为什么不能只按空白拆：`dshPanel.dshCommand` 的说明和面板自己的报错文案
+ * 都让用户「把完整路径填进设置」，用户照做填的是**裸路径**；只按空白拆会把
+ * 它劈成两段 —— 实测报「'C:\Users\…\Roaming\DSH' 不是内部或外部命令」。
+ * 用户不该为了填个路径还要先学引号规则。
+ *
+ * @param {string} command
+ * @returns {string[]} 程序 + 自带参数；空数组表示命令是空的。
+ */
+function resolveCommand(command) {
+  const text = String(command === undefined || command === null ? '' : command).trim();
+  if (!text) return [];
+  const bare = stripOuterQuotes(text);
+  if (existsAsFile(bare)) return [bare];
+  const parts = splitCommand(text);
+  if (parts.length <= 1) return parts;
+  return rejoinExisting(parts);
 }
 
 /**
@@ -154,7 +254,7 @@ function splitCommand(command) {
  * @throws {Error} 命令为空时 —— 早点说清楚，别让用户对着「正在启动…」等两分钟。
  */
 function commandLine(command, args = []) {
-  const parts = splitCommand(command);
+  const parts = resolveCommand(command);
   if (parts.length === 0) {
     throw new Error('dsh 命令是空的：请检查设置 dshPanel.dshCommand');
   }
@@ -190,18 +290,30 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [] }) {
    * 「shell:true + 参数数组」在 Node 里已经废弃（DEP0190），因为它只是把
    * 参数拼成字符串、并不转义 —— profile 名来自设置项，那就是一个注入点。
    * 这里改成显式调用 cmd.exe，并且参数自己加引号。
+   *
+   * `windowsVerbatimArguments: true` 是**必须的**，不是可选项：不加这一条，
+   * Node 会拿上面那条标准 cmd 命令行当普通参数再转义一遍（内嵌的 `"` 变 `\"`），
+   * cmd 于是解析错乱 —— 这就是「命令路径带空格时后台 DSH 起不来」的根因，
+   * 而且它**两种写法都中招**（裸路径被 splitCommand 劈开、加引号被 Node 转义）。
+   * 外面再包一层引号是给 cmd `/s` 用的：`/s` 会剥掉最外层的一对引号，
+   * 剩下的原样执行（这样路径自身的引号才能活下来）。
    */
+  const winArgs = ['/d', '/s', '/c', `"${line}"`];
   const child =
     process.platform === 'win32'
-      ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', line], {
+      ? spawn(process.env.ComSpec || 'cmd.exe', winArgs, {
           windowsHide: true,
           stdio: 'ignore',
           detached: false,
+          windowsVerbatimArguments: true,
         })
-      : spawn(splitCommand(command)[0], [...splitCommand(command).slice(1), ...args], {
-          stdio: 'ignore',
-          detached: false,
-        });
+      : (() => {
+          const parts = resolveCommand(command);
+          return spawn(parts[0], [...parts.slice(1), ...args], {
+            stdio: 'ignore',
+            detached: false,
+          });
+        })();
 
   let disposed = false;
   child.on('error', (error) => {
@@ -262,13 +374,16 @@ function runDshSync({ command, args = [], timeoutMs = 120000 }) {
   const quoted = commandLine(command, args);
   try {
     if (process.platform === 'win32') {
-      return execFileSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', quoted], {
+      // 和 spawnBackgroundDsh 同一套：自己拼命令行 + 原样传递给 cmd.exe。
+      // 少任何一半，带空格的命令路径都会起不来。
+      return execFileSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${quoted}"`], {
         encoding: 'utf8',
         timeout: timeoutMs,
         stdio: ['ignore', 'pipe', 'pipe'],
+        windowsVerbatimArguments: true,
       });
     }
-    const parts = splitCommand(command);
+    const parts = resolveCommand(command);
     return execFileSync(parts[0], [...parts.slice(1), ...args], {
       encoding: 'utf8',
       timeout: timeoutMs,
@@ -288,6 +403,8 @@ module.exports = {
   delay,
   quoteArg,
   splitCommand,
+  stripOuterQuotes,
+  resolveCommand,
   commandLine,
   dshCommandCandidates,
 };

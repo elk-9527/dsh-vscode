@@ -673,6 +673,27 @@ body {
   max-width: 260px;
 }
 
+/*
+ * 读历史失败时的那块话。
+ *
+ * 刻意**不复用 .history-empty**：那套居中灰字是「这里什么都没有」的语气，
+ * 拿它报错会被读成"你没有历史会话"，而这两件事的出路完全不同（一个是没事，
+ * 一个是得去修）。错误靠左、带一条警示色边 —— 跟对话里那块 .msg-error 同一个语气，
+ * 而且错误句子通常两三行，居中的长句最难读。
+ */
+.history-error {
+  margin: 4px 0;
+  padding: 8px;
+  text-align: left;
+  font-size: var(--dsh-fs-s);
+  line-height: 1.45;
+  color: var(--vscode-foreground);
+  border-left: 2px solid var(--vscode-testing-iconFailed, var(--vscode-charts-red));
+  border-radius: var(--dsh-radius-s);
+  background: var(--vscode-inputValidation-errorBackground, transparent);
+  word-break: break-word;
+}
+
 /* ── 输入区 ─────────────────────────────────────────── */
 
 .composer {

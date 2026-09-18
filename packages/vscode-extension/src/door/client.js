@@ -262,25 +262,42 @@ class DoorClient extends EventEmitter {
   }
 
   /**
-   * 列出历史会话。
+   * 内核自己的会话清单（ACP 的 `session/list`）。
    *
-   * 走门的自定义方法（`dsh-door/sessions/list`）：内核没有公开的「列历史」
-   * 方法，会话文件在本机磁盘上，门读盘应答（需要门 0.0.8+；旧门会回
-   * -32601，上层要按「门太旧」翻译）。
+   * 形状是 `{sessionId, cwd}`，只包含**已经落盘**的会话，而且**没有**标题和时间
+   * —— 所以它做不了「历史会话列表」的界面（那要标题/时间/回放）。
+   * 要历史会话请用 {@link listHistory}。
+   *
+   * ⚠️ 曾经这里叫 `listSessions()`、后来被改成走门的旁路方法，于是
+   * `test/smoke.js` 里那段「验 ACP session/list 的形状」的断言变成了在验另一件
+   * 事（而注释没改），门一旧就红。现在两个方法名字分开、各管各的，别再合并。
+   *
+   * @returns {Promise<{sessions: Array<{sessionId: string, cwd?: string}>}>}
+   */
+  listKernelSessions() {
+    return this.request('session/list', {});
+  }
+
+  /**
+   * 列出历史会话（**门的旁路方法**，不是内核的 ACP 接口）。
+   *
+   * `dsh-door/sessions/list`：内核没有公开的「列历史」方法，会话文件在磁盘上，
+   * 门读盘应答（需要门 0.0.8+；旧门会回 -32601，上层要按「门太旧」翻译 ——
+   * 或者干脆自己读盘，见 `src/dsh/sessions.js`）。
    *
    * @returns {Promise<{sessions: object[], skipped: number}>}
    */
-  listSessions() {
+  listHistory() {
     return this.request('dsh-door/sessions/list', {});
   }
 
   /**
-   * 取一段历史会话的名片与回放。
+   * 取一段历史会话的名片与回放（门的旁路方法）。
    *
    * @param {string} id 会话 id。
    * @returns {Promise<{card: object, entries: object[], truncated: boolean}>}
    */
-  getHistorySession(id) {
+  getHistory(id) {
     return this.request('dsh-door/sessions/get', { id });
   }
 

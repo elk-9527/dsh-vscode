@@ -21,6 +21,7 @@ const { DshSession } = require('../dsh/session');
 const { describeError } = require('../dsh/errors');
 const { probePort, spawnBackgroundDsh, dshCommandCandidates } = require('../door/locate');
 const { renderHtml, makeNonce } = require('../panel/html');
+const localSessions = require('../dsh/sessions');
 
 const VIEW_ID = 'dshPanel.chat';
 
@@ -28,6 +29,25 @@ const VIEW_ID = 'dshPanel.chat';
 function pathIsInside(target, base) {
   const rel = path.relative(base, target);
   return Boolean(rel) && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+/**
+ * 这个地址是「本机」吗？
+ *
+ * 为什么关心：历史会话的数据在**内核那台机器**的磁盘上。连的是本机时，
+ * 面板自己就能读（所以不依赖门的新旧）；连的是别的机器时，只能问那台机器上的
+ * 门 —— 本地读出来的会是**这台机器**的会话，完全是另一回事，绝不能当兜底。
+ */
+function isLoopbackHost(host) {
+  const text = String(host || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  return text === '' || text === 'localhost' || text === '::1' || text === '0:0:0:0:0:0:0:1'
+    || text.startsWith('127.');
+}
+
+/** 这个错是不是「对面没有这个方法」（门 0.0.8 之前的历史旁路方法）。 */
+function isMissingMethod(error, text) {
+  return Boolean(error && (error.code === -32601 || /-32601/.test(text)))
+    || /method not found|不支持.*dsh-door\/sessions/i.test(String(text || ''));
 }
 
 class DshPanelView {
@@ -77,6 +97,15 @@ class DshPanelView {
     this.turnSent = false;
     /** 门最近一次报的预设清单，界面重新加载时补发用。 */
     this.lastPresets = undefined;
+    /**
+     * 历史会话这一轮连接是从哪儿读的：'door' | 'local' | undefined（还没定）。
+     *
+     * 缓存它是为了别每次点历史都多打一次注定失败的往返：门太旧是**常态**
+     * （用户档里的门会被桌面端重写回旧版），第一次问到 -32601 之后就改走本地，
+     * 这一轮连接里不再问门。重连时清掉，好让升级过门的人有机会用回门。
+     * @type {'door'|'local'|undefined}
+     */
+    this.historyVia = undefined;
   }
 
   // ── 视图 ────────────────────────────────────────────
@@ -532,52 +561,104 @@ class DshPanelView {
     await session.send(text, { attachments: items });
   }
 
-  // ── 历史会话（门 0.0.8+ 的旁路方法）──────────────────────
+  // ── 历史会话 ──────────────────────────────────────────
+  //
+  // 数据在 `$DSH_HOME/sessions` 里（内核那台机器的磁盘上）。两条来路：
+  //   1. 门 0.0.8+ 的旁路方法 `dsh-door/sessions/list|get`（对「门在别的机器上」也对）；
+  //   2. 面板自己读盘 —— 只在连的是本机时成立。
+  //
+  // 为什么必须有第 2 条：门是装在用户档里的插件，而**那个档由 DSH 桌面端自己
+  // 管理**（实测 2026-09-19：那个档里装的门还是 0.0.7，而 `dsh plugin --profile
+  // desktop` 的增删会被拒），所以「门太旧、没有旁路方法」是常态而不是异常。
+  // 以前只有第 1 条时，历史会话在**最常用的那种模式**（接着桌面端那一个内核）下
+  // 直接不可用，还让用户去「重启桌面端」—— 重启一次回来还是同样一句，等于把
+  // 扩展自己的依赖问题转嫁给用户。面板本来就和内核同机，没有理由不自己读。
+
+  /**
+   * 读一次历史会话。
+   *
+   * @param {'list'|'get'} kind
+   * @param {string} [id] kind==='get' 时的会话 id。
+   * @returns {Promise<{result: object, via: 'door'|'local'}>}
+   */
+  async readHistory(kind, id) {
+    const localRoot = isLoopbackHost(this.config().host) ? localSessions.resolveSessionsRoot() : undefined;
+    const client = this.client;
+
+    // 门能问就问门：它对远程门也对，而且是这份数据的「官方」来路。
+    // `historyVia === 'local'` 说明这一轮连接里已经确认门没有这个方法，
+    // 就别每次点历史都多打一次注定失败的往返。
+    if (this.historyVia !== 'local' && client && client.isConnected) {
+      try {
+        const result = kind === 'list'
+          ? await client.listHistory()
+          : await client.getHistory(String(id || ''));
+        this.historyVia = 'door';
+        return { result, via: 'door' };
+      } catch (error) {
+        const text = this.errText(error);
+        if (!isMissingMethod(error, text) || !localRoot) throw error;
+        this.historyVia = 'local';
+        this.log('info', '门没有历史会话的旁路方法（需要 0.0.8+），改成面板自己读 $DSH_HOME/sessions');
+      }
+    }
+
+    if (!localRoot) {
+      throw new Error('面板没有连上 DSH，而设置里的门在别的机器上（dshPanel.host），读不了那台机器的历史会话');
+    }
+    if (!localSessions.hasZstdSupport()) {
+      throw new Error('本机的 Node 没有 zstd 支持（zlib.zstdDecompressSync），解不了会话文件；或者把门升到 0.0.8+ 由门来解');
+    }
+    const result = kind === 'list'
+      ? localSessions.listSessions(localRoot)
+      : localSessions.getSession(localRoot, String(id || ''));
+    return { result, via: 'local' };
+  }
 
   /**
    * 把历史会话清单送给界面。
    *
-   * 门太旧（0.0.8 之前没有这个方法，回 -32601）时要**说人话**：告诉用户
-   * 该升级/重启门，而不是甩一句英文方法不存在。
+   * 「门太旧」这件事只在**门在别的机器上**时才需要用户出手（那时本地读是错的，
+   * 只能去升级那台机器上的门）；连本机时上面已经自己读盘兜住了，用户什么都不用做。
    */
   async sendHistoryList() {
-    const session = await this.ensureConnection();
-    if (!session) return;
     try {
-      const result = await this.client.listSessions();
-      this.post({
-        type: 'history',
-        sessions: Array.isArray(result && result.sessions) ? result.sessions : [],
-        skipped: (result && result.skipped) || 0,
-      });
+      const { result, via } = await this.readHistory('list');
+      const sessions = Array.isArray(result && result.sessions) ? result.sessions : [];
+      // 本地读失败时（目录不可读等）会把原因写在 error 上，别当成「一段都没有」。
+      if (sessions.length === 0 && result && result.error) throw new Error(result.error);
+      this.post({ type: 'history', via, sessions, skipped: (result && result.skipped) || 0 });
     } catch (error) {
-      const text = this.errText(error);
-      if (error && (error.code === -32601 || /不支持.*dsh-door\/sessions|method not found/i.test(text))) {
-        this.post({
-          type: 'history',
-          error: '门插件太旧（需要 dsh-acp-door 0.0.8 以上）。重启桌面端 DSH（或重装门插件）后再试。',
-        });
-      } else {
-        this.post({ type: 'history', error: `读历史会话失败：${text}` });
-      }
+      this.post({ type: 'history', error: this.historyErrorText(error) });
     }
   }
 
   /** 把一段历史会话的回放送给界面。 */
   async sendHistoryReplay(id) {
-    const session = await this.ensureConnection();
-    if (!session) return;
     try {
-      const result = await this.client.getHistorySession(String(id || ''));
+      const { result, via } = await this.readHistory('get', id);
       this.post({
         type: 'replay',
+        via,
         card: result && result.card ? result.card : {},
         entries: Array.isArray(result && result.entries) ? result.entries : [],
         truncated: Boolean(result && result.truncated),
       });
     } catch (error) {
-      this.postError(this.errText(error));
+      this.postError(this.historyErrorText(error));
     }
+  }
+
+  /** 读历史失败时给用户的那句话（纯函数，好测）。 */
+  historyErrorText(error) {
+    const text = this.errText(error);
+    if (isMissingMethod(error, text)) {
+      return (
+        '连着的门插件太旧了（需要 dsh-acp-door 0.0.8 以上），而它装在别的机器上，' +
+        '面板没法替你读那台机器的会话记录。在那台机器上升级门插件后再试。'
+      );
+    }
+    return `读历史会话失败：${text}`;
   }
 
   /**
@@ -767,6 +848,8 @@ class DshPanelView {
       this.client.close();
       this.client = undefined;
     }
+    // 下一轮连接重新判断历史会话从哪儿读（用户可能刚好升级了门）。
+    this.historyVia = undefined;
   }
 
   dispose() {
@@ -802,4 +885,10 @@ function fallbackFailureText({ command, profile, host, port, exitedEarly }) {
   );
 }
 
-module.exports = { DshPanelView, VIEW_ID, fallbackFailureText };
+module.exports = {
+  DshPanelView,
+  VIEW_ID,
+  fallbackFailureText,
+  isLoopbackHost,
+  isMissingMethod,
+};

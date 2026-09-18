@@ -27,9 +27,15 @@ const suites = [
   { name: '静态契约', file: 'test/static.js', always: true },
   { name: '门的看帧判断（纯函数）', file: '../dsh-door/test/frames.js', always: true },
   { name: '门的会话读取（纯函数）', file: '../dsh-door/test/sessions.js', always: true },
+  // 两份「历史会话读取」实现（门的 ESM + 面板的 CJS）必须逐项一致 ——
+  // 见 test/sessions-parity.js 的说明：改了一边忘另一边，这条先炸。
+  { name: '两份会话读取实现是否一致', file: 'test/sessions-parity.js', always: true },
   { name: 'Markdown 渲染器', file: 'test/markdown.js', always: true },
   { name: '编辑器上下文拼块（纯函数）', file: 'test/blocks.js', always: true },
   { name: '会话层边界（假客户端）', file: 'test/session.js', always: true },
+  // 「命令路径里有空格」的那两个坑只在真进程里暴露（拼出来的字符串看着是对的），
+  // 所以它必须真的 spawn 一次 —— 见 test/spawn-quote.js 的说明。
+  { name: '带空格的命令路径（真进程）', file: 'test/spawn-quote.js', always: true },
   { name: '界面（真浏览器）', file: 'tools/uitest.js', always: false, needs: withUi, hint: '加 --ui 才跑' },
   { name: '兜底拉起（真进程）', file: 'test/fallback.js', always: false, needs: withDsh, hint: '加 --all 才跑（要求 47821 空着）' },
   { name: '断线接回（真 DSH）', file: 'test/resume.js', always: false, needs: withDsh, hint: '加 --all 才跑' },

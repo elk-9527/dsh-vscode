@@ -79,8 +79,10 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
     </div>
   </main>
 
-  <!-- 历史会话浮层：盖住整个面板；列表内容由 main.js 填。 -->
-  <div id="history" class="history" hidden>
+  <!-- 历史会话浮层：盖住整个面板；列表内容由 main.js 填。
+       role/aria-modal：它确实盖住了底下所有东西（不只是视觉上），
+       所以要告诉读屏软件「现在只在这个框里」，别让它继续念底下的输入框。 -->
+  <div id="history" class="history" role="dialog" aria-modal="true" aria-label="历史会话" hidden>
     <div class="history-head">
       <span class="history-title">历史会话</span>
       <span id="history-meta" class="history-meta"></span>

@@ -248,9 +248,17 @@
   /**
    * 打开/关闭历史浮层。打开时总是重新拉清单 —— 会话记录随时在变，
    * 缓存一份只会让人看到旧数据。
+   *
+   * 焦点要跟着走：浮层盖住整个面板，打开后焦点若还留在底下那些**看不见**的
+   * 控件上，键盘用户按 Tab 就会在空气里游走。所以打开时把焦点交给关闭按钮
+   * （浮层里第一个能操作的东西），关掉时还回那个历史按钮 —— 不还的话焦点会
+   * 掉到 body 上，用户就"丢"了位置。
    */
   function toggleHistory(open) {
     const show = open === undefined ? el.historyPanel.hidden : open;
+    // 藏之前先记住焦点在不在浮层里：元素一旦 hidden，焦点会自动掉到 body，
+    // 那时再查就永远是 false 了。
+    const focusWasInside = el.historyPanel.contains(document.activeElement);
     el.historyPanel.hidden = !show;
     el.historyBtn.setAttribute('aria-expanded', show ? 'true' : 'false');
     if (show) {
@@ -260,8 +268,11 @@
       loading.textContent = '正在读取历史会话…';
       el.historyList.appendChild(loading);
       el.historyMeta.textContent = '';
+      el.historyClose.focus();
       post({ type: 'historyList' });
+      return;
     }
+    if (focusWasInside) el.historyBtn.focus();
   }
 
   /** 会话时间显示：当年的只显示「月-日 时:分」，往年的带上年份。 */
@@ -288,8 +299,11 @@
     if (el.historyPanel.hidden) return; // 用户已经关掉了，别又把浮层撑开
     el.historyList.textContent = '';
     if (message.error) {
+      // 读失败**不用** .history-empty：那套居中灰字是"这里什么都没有"的语气，
+      // 拿它报错会被当成"没有历史会话"，而这两种情况的出路完全不一样。
       const box = document.createElement('div');
-      box.className = 'history-empty';
+      box.className = 'history-error';
+      box.setAttribute('role', 'alert');
       box.textContent = message.error;
       el.historyList.appendChild(box);
       return;
@@ -364,6 +378,13 @@
    *
    * 工具卡复用 upsertTool：它默认折叠、点开看详情，跟实时对话里一模一样。
    * 回放是静态的 —— 没有流式光标，也不动画，一眼能看出「这是历史」。
+   *
+   * 两处刻意的顺序选择：
+   * - **「这是回放」那句话放在开头**，不放结尾。它要防的是一件真会出事的事：
+   *   用户对着历史内容直接打字，以为在跟那段上下文说话。放在结尾意味着要先
+   *   滚到底才看得见 —— 而这句提示越早出现越好。它同时也是这份转录的标题。
+   * - **停在开头**，不滚到底。回放是拿来读的，读的顺序就是从第一句开始；
+   *   落在底部等于让人从最后一句倒着看。实时对话才需要跟到底部。
    */
   function renderReplay(message) {
     toggleHistory(false);
@@ -371,7 +392,13 @@
     el.messages.textContent = '';
     el.permission.hidden = true;
     el.empty.hidden = true;
-    state.pinned = true;
+    // 不复用 scrollToBottom：那个会把 pinned 设成 true 并拽到底部。
+    state.pinned = false;
+
+    const card = message.card || {};
+    const when = fmtSessionTime(card.lastTime || card.mtime);
+    const head = `历史回放：${card.title || card.fallbackTitle || '（无标题）'}${when ? `（${when}）` : ''}`;
+    addNotice(truncatedReplayNote(head, message.truncated === true));
 
     const entries = Array.isArray(message.entries) ? message.entries : [];
     let lastAssistantId;
@@ -410,17 +437,21 @@
       }
     }
 
-    const card = message.card || {};
-    const when = fmtSessionTime(card.lastTime || card.mtime);
-    const head = `历史回放：${card.title || card.fallbackTitle || '（无标题）'}${when ? `（${when}）` : ''}`;
-    addNotice(truncatedReplayNote(head, message.truncated === true));
-    scrollToBottom();
+    el.messages.scrollTop = 0;
+    // 焦点移到转录区（它本身 tabindex=0）：接着按 Tab 就从第一段内容开始，
+    // 而不是从面板顶栏的那个历史按钮开始。preventScroll 保住上面的"停在开头"。
+    try {
+      el.messages.focus({ preventScroll: true });
+      el.messages.scrollTop = 0;
+    } catch {
+      el.messages.focus();
+    }
   }
 
   function truncatedReplayNote(head, truncated) {
     return truncated
-      ? `${head}。太长了，只回放了靠前的部分。`
-      : `${head}。以上是回放，不是实时对话。`;
+      ? `${head}。这份转录太长，只回放了靠前的部分 —— 以下是回放，不是实时对话。`
+      : `${head}。以下是回放，不是实时对话；对着它打字不会回到那段上下文里。`;
   }
 
   // ── 转录区 ──────────────────────────────────────────
@@ -1054,6 +1085,15 @@
   el.stop.addEventListener('click', () => post({ type: 'stop' }));
   el.historyBtn.addEventListener('click', () => toggleHistory());
   el.historyClose.addEventListener('click', () => toggleHistory(false));
+
+  // Esc 关掉历史浮层。它是盖住整个面板的浮层，而"按 Esc 退出"是浮层的通用约定 ——
+  // 少了它，键盘用户只能一路 Tab 找到右上角那个关闭按钮才能出去。
+  // 只处理浮层开着的情况，Esc 在别处（比如输入框里）不拦，免得抢掉 VS Code 的默认行为。
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || el.historyPanel.hidden) return;
+    event.preventDefault();
+    toggleHistory(false);
+  });
 
   // 点击链接交给扩展去开外部浏览器（webview 里点链接默认没反应）。
   document.addEventListener('click', (event) => {

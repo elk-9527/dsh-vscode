@@ -566,7 +566,13 @@ function assertionsScript(scene) {
       assert('回放的工具卡写着工具名', replayTools[0] && replayTools[0].querySelector('.tool-name').textContent === 'read',
         replayTools[0] ? replayTools[0].querySelector('.tool-name').textContent : '无');
       var noteText = (document.querySelector('.msg-note') || {}).textContent || '';
-      assert('回放末尾说明了这是回放', noteText.indexOf('回放') >= 0, noteText);
+      assert('回放开头就说明了这是回放（不用先滚到底）',
+        noteText.indexOf('回放') >= 0
+          && document.querySelector('.msg-note').closest('.msg') === document.querySelector('#messages .msg'),
+        noteText);
+      assert('回放停在开头，不是底部',
+        document.getElementById('messages').scrollTop === 0,
+        'scrollTop=' + document.getElementById('messages').scrollTop);
 
       // 接回：重新打开浮层点「接回」——界面要发 historyResume。
       // 重新打开会清列表显示「正在读取…」，所以再应答一次清单。
@@ -585,6 +591,68 @@ function assertionsScript(scene) {
         JSON.stringify(window.__received));
       document.getElementById('history-close').click();
       assert('关闭按钮能收起浮层', !visible(overlay));
+
+      // 焦点与键盘：浮层盖住整个面板，所以焦点必须跟着走 ——
+      // 打开时进浮层，关掉时回到那个按钮（不然焦点掉到 body，键盘用户就丢了位置）。
+      hbtn.click();
+      assert('打开浮层时焦点移进了浮层（不在底下的控件上）',
+        overlay.contains(document.activeElement),
+        document.activeElement ? (document.activeElement.id || document.activeElement.tagName) : '无');
+
+      // Esc 关掉浮层：浮层的通用约定，没它键盘用户只能一路 Tab 到关闭按钮。
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      assert('按 Esc 能关掉浮层', !visible(overlay));
+      assert('关掉后焦点还回了历史按钮', document.activeElement === hbtn,
+        document.activeElement ? (document.activeElement.id || document.activeElement.tagName) : '无');
+
+      // 读失败要长得像"出事了"，不能长得像"你没有历史会话"。
+      hbtn.click();
+      window.postMessage({ type: 'history', error: '连着的门插件太旧了，读不了历史会话。' }, '*');
+      await new Promise(function (resolve) { setTimeout(resolve, 300); });
+      var errBox = document.querySelector('#history-list .history-error');
+      assert('读失败渲染成错误块（不是空状态）', !!errBox, errBox ? errBox.textContent : '（没有 .history-error）');
+      assert('错误块和"还没有历史会话"不是同一套样式',
+        !!errBox && errBox.className.indexOf('history-empty') < 0, errBox ? errBox.className : '无');
+      assert('错误块带 role=alert（读屏会念出来）', !!errBox && errBox.getAttribute('role') === 'alert');
+
+      // 光有 class 不算数：选择器写错、或者被后面某条规则盖掉，class 照样在，
+      // 用户看到的却还是"什么都没有"那套样子。这个项目真踩过一次同类坑
+      // （hidden 属性被组件自己的 display 盖掉，空控件一直露在界面上）。
+      // 所以这里读**计算出来的样式**，并且拿空状态当对照组。
+      window.postMessage({ type: 'history', sessions: [] }, '*');
+      await new Promise(function (resolve) { setTimeout(resolve, 300); });
+      var emptyBox = document.querySelector('#history-list .history-empty');
+      assert('空列表渲染成空状态块（对照组成立）', !!emptyBox,
+        emptyBox ? emptyBox.textContent : '（没有 .history-empty）');
+      var emptyStyle = emptyBox ? window.getComputedStyle(emptyBox) : null;
+      assert('空状态是居中的', !!emptyStyle && emptyStyle.textAlign === 'center',
+        emptyStyle ? emptyStyle.textAlign : '取不到');
+      // 取值要**当场取成字符串**：等这个节点被错误块替换掉之后，
+      // 那个 CSSStyleDeclaration 会解析成空串 —— 拿它去比较会"因为空而不等"，
+      // 断言看着通过、其实什么都没验（这个套件里真这么错过一次）。
+      var emptyColor = emptyStyle ? emptyStyle.color : '';
+
+      window.postMessage({ type: 'history', error: '连着的门插件太旧了，读不了历史会话。' }, '*');
+      await new Promise(function (resolve) { setTimeout(resolve, 300); });
+      var errStyled = document.querySelector('#history-list .history-error');
+      var errStyle = errStyled ? window.getComputedStyle(errStyled) : null;
+      assert('错误块靠左（跟居中的空状态分得开）',
+        !!errStyle && errStyle.textAlign === 'left', errStyle ? errStyle.textAlign : '取不到');
+      assert('错误块真有一条左边线（说明规则生效了）',
+        !!errStyle && parseFloat(errStyle.borderLeftWidth) > 0, errStyle ? errStyle.borderLeftWidth : '取不到');
+      var probe = document.createElement('span');
+      probe.style.color = 'var(--vscode-testing-iconFailed)';
+      document.body.appendChild(probe);
+      var warnColor = window.getComputedStyle(probe).color;
+      document.body.removeChild(probe);
+      assert('那条边用的是主题里的警示色（不是写死的颜色）',
+        !!errStyle && errStyle.borderLeftColor === warnColor,
+        errStyle ? (errStyle.borderLeftColor + ' vs ' + warnColor) : '取不到');
+      assert('错误块的正文颜色跟空状态不一样（两件事语气不同）',
+        !!errStyle && emptyColor !== '' && errStyle.color !== emptyColor,
+        errStyle ? (errStyle.color + ' vs ' + (emptyColor || '（空状态的颜色没取到）')) : '取不到');
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      assert('出过错之后 Esc 照样能关', !visible(overlay));
     }
 
     // ── 8. 交互：发送 / 换行 / 空输入 / 忙碌时不许发 ──
