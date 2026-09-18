@@ -14,7 +14,7 @@ spike/scratch/
 *.tgz
 
 # 扩展的构建与测试产物：vsix、界面预览页、无头浏览器临时配置
-packages/vscode-extension/build/
+packages/vscode-extension/build*/
 
 # 界面截图（tools/shots.js 生成，改界面前后对比用）。不放 build/ 里：
 # build-vsix 会把整个 build/ 清掉，图会跟着没。
