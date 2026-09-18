@@ -138,6 +138,21 @@ agent "…" has no provider/model: set AgentOptions.provider and AgentOptions.mo
 会检查这两项，缺了就在内核日志里吵一次，不等用户发了消息才发现。
 （`test/presets.js` 也盯着 `cordis.patch.yml` 里必须有这两项。）
 
+## 版本变更
+
+| 版本 | 改了什么 |
+| --- | --- |
+| 0.0.9 | **修两个 bug**：① 建会话**失败**时的预设点名会留在队列里，被**下一次**建会话领走（用户没点名却挂上了别的模式）—— 出错的回复原来根本没被处理（预筛要求那行含 `"result"`）；② 入站闸等预设挂载**没有超时**，内核某个服务返回永不落定的 promise 时，`session/prompt` 会被永久按住 —— 症状是"发了消息毫无反应、也没有任何报错"。现在入站与出站同一个上限（`MOUNT_WAIT_MS`，经 `waitForMount()`），到点放行。<br>回归测试：`test/frames.js` 第 8 节第 (6) 段、第 9 节。 |
+| 0.0.8 | 新增 `dsh-door/sessions/list` 与 `dsh-door/sessions/get` 两个旁路方法（门只读解析 `$DSH_HOME/sessions`，多帧 zstd）。给「内核没有 `session/load`、面板又想看历史」用。另修出站中继必须返回 `WritableStream`（写成 `TransformStream` 没人消费 readable 时，门的回复永远出不去，客户端看到的是"接了线但不应答"）。 |
+| 0.0.7 | 模式（agent preset）切换；修「断线接回之后会话没有工具」（撞预设锁就改用工厂期的 `mount()` 补挂）。 |
+| 0.0.5 | 第一版能用的门。 |
+
+**注意**：门装进 `desktop` 档之后**不一定升得上去** —— 桌面端跑着的时候
+`dsh plugin --profile desktop …` 会被拒（`profile "desktop" is managed exclusively
+by the Electron application`），得等它没跑的时候。所以**面板不依赖门的版本**：
+连的是本机时它自己读 `$DSH_HOME/sessions`（`packages/vscode-extension/src/dsh/sessions.js`，
+与 `lib/sessions.js` 有一致性测试拴着）。
+
 ## 怎么装
 
 在目标 profile 里装这个包，两种来源都行，但要知道它们的区别：

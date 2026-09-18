@@ -19,6 +19,7 @@ import {
   parseLine,
   readPresetMeta,
   requestedPreset,
+  waitForMount,
   withPresetMeta,
 } from '../lib/frames.js';
 
@@ -259,6 +260,62 @@ async function relayTests() {
   writer2.releaseLock();
   await relay2.close();
 
+  // (6) 建会话**失败**时，点名必须从队列里摘掉 —— 否则下一次建会话会领到它。
+  //     这是一个真实存在过的 bug：预筛里有 `line.includes('"result"')`，
+  //     于是"只有 error、没有 result"的回复根本没被看，队列永远不清理。
+  const state3 = makeState();
+  state3.queue = [];
+  state3.resumes = new Map();
+  const sink3Chunks = [];
+  const relay3 = createOutboundRelay(
+    new WritableStream({ write(c) { sink3Chunks.push(c); } }),
+    state3,
+    () => {},
+  );
+  const writer3 = relay3.getWriter();
+
+  // 用户点名 ptc 建会话 → 失败。
+  const failedAsk = { request: 21, preset: 'ptc' };
+  state3.queue.push(failedAsk);
+  state3.replies.set(21, failedAsk);
+  await writer3.write(encoder.encode('{"jsonrpc":"2.0","id":21,"error":{"code":-32000,"message":"建会话失败"}}\n'));
+  await flushRelay();
+  equal('出错的回复原样出站（不硬塞 _meta）',
+    text(sink3Chunks),
+    '{"jsonrpc":"2.0","id":21,"error":{"code":-32000,"message":"建会话失败"}}\n');
+  equal('失败的点名已从队列里摘掉', state3.queue.length, 0);
+  equal('失败请求也从"等回复"里摘掉了', state3.replies.size, 0);
+
+  // 下一次建会话（这次没点名）：必须拿不到上一次那个 ptc。
+  const nextAsk = { request: 22, preset: undefined };
+  state3.queue.push(nextAsk);
+  state3.replies.set(22, nextAsk);
+  await writer3.write(encoder.encode('{"jsonrpc":"2.0","id":22,"result":{"sessionId":"s2"}}\n'));
+  await flushRelay();
+  const lastLine = parseLine(text(sink3Chunks).split('\n').filter(Boolean).pop());
+  equal('下一次建会话没有被上一次失败的点名污染',
+    readPresetMeta(lastLine).requested, undefined);
+  check('队里剩下的是它自己那一条（不是上一次失败的那条）',
+    state3.queue.length === 1 && state3.queue[0] === nextAsk,
+    `队列 ${state3.queue.map((item) => `${item.request}:${item.preset ?? '-'}`).join(',') || '(空)'}`);
+
+  // session/resume 失败同理：resumes 里那条也要摘掉。
+  const resumeAsk = { request: 23, preset: 'minimal', sessionId: 's9' };
+  state3.resumes.set('s9', resumeAsk);
+  state3.replies.set(23, resumeAsk);
+  await writer3.write(encoder.encode('{"jsonrpc":"2.0","id":23,"error":{"code":-32000,"message":"恢复失败"}}\n'));
+  await flushRelay();
+  check('恢复失败时 resumes 里那条也摘掉了', !state3.resumes.has('s9'));
+
+  // 没跟踪过的 id 出错：不碰任何状态，也不多说话。
+  state3.replies.clear();
+  const before = JSON.stringify([...state3.resumes.keys()]);
+  await writer3.write(encoder.encode('{"jsonrpc":"2.0","id":404,"error":{"code":-32601,"message":"不认识的方法"}}\n'));
+  await flushRelay();
+  equal('没跟踪过的出错回复不碰状态', JSON.stringify([...state3.resumes.keys()]), before);
+  writer3.releaseLock();
+  await relay3.close();
+
   function text(list) {
     return Buffer.concat(list.map((item) => Buffer.from(item))).toString('utf8');
   }
@@ -272,6 +329,43 @@ try {
   await relayTests();
 } catch (error) {
   failures.push(`出站中继测试自己抛错了：${error && error.message ? error.message : error}`);
+  console.error(error);
+}
+
+// ─────────────────────────────────────────────────────────────
+// waitForMount：入站/出站两道闸共用的「等，但必须有上限」。
+// 它防的是「内核某个服务永不落定 → 消息被永久按住、静默消失」——
+// 这种故障没有报错、没有日志，只有用户"发了没反应"。
+section('9. waitForMount：等挂载，但绝不无限等');
+
+/** 取一个永远不会自己落定的 promise（外加一个收尾用的 resolve）。 */
+function makeNever() {
+  let release;
+  const promise = new Promise((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
+
+try {
+  const never = makeNever();
+  const t0 = Date.now();
+  const timedOut = await waitForMount(never.promise, 40);
+  const waited = Date.now() - t0;
+  check('永不落定的挂载：到点放行（返回 false）', timedOut === false, `返回 ${timedOut}`);
+  check('确实等满了上限才放行', waited >= 35 && waited < 2000, `等了 ${waited}ms`);
+  never.release('late'); // 收尾，别把定时器悬在那里
+
+  equal('正常落定：返回 true', await waitForMount(Promise.resolve('ok'), 1000), true);
+  equal(
+    '挂载失败也算落定（返回 true，不因为它无限等）',
+    await waitForMount(Promise.reject(new Error('挂载挂了')), 1000),
+    true,
+  );
+  equal('没有 pending（undefined）：直接放行', await waitForMount(undefined, 1000), true);
+  equal('给的不是 promise：也直接放行', await waitForMount({}, 1000), true);
+} catch (error) {
+  failures.push(`waitForMount 测试自己抛错了：${error && error.message ? error.message : error}`);
   console.error(error);
 }
 

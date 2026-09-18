@@ -30,6 +30,7 @@ import { ndJsonStream } from '@agentclientprotocol/sdk';
 import * as acp from '@deepseek-ai/dsh-acp';
 import {
   FALLBACK_PRESETS,
+  MOUNT_WAIT_MS,
   createOutboundRelay,
   doorSessionsError,
   doorSessionsMethod,
@@ -41,6 +42,7 @@ import {
   normalizePresets,
   parseLine,
   requestedPreset,
+  waitForMount,
 } from './frames.js';
 import { DEFAULT_LIST_LIMIT, getSession, listSessions, resolveSessionsRoot } from './sessions.js';
 
@@ -374,7 +376,17 @@ async function handleDoorSessions(line, state, diag) {
   return true;
 }
 
-/** 若这一行是尚未挂完预设的会话的 `session/prompt`，等它挂完再放行。 */
+/**
+ * 若这一行是尚未挂完预设的会话的 `session/prompt`，等它挂完再放行。
+ *
+ * **等，但必须有上限**（MOUNT_WAIT_MS，跟出站方向用同一个值）。为什么：
+ * 挂载那条链内部全都 catch 过了，唯一漏网的情形是内核某个服务返回一个
+ * **永不落定**的 promise —— 那时 `state.pending` 里那条永远不会清掉，
+ * 这一句就被永久按住：用户的消息发不出去，界面上也没有任何东西可看
+ * （不是报错，是静默消失，最难查）。
+ * 到点就放行：最坏的结果退化成「这个会话手里没工具」（跟挂载失败同一个后果，
+ * 看得见、能重试），而不是「消息根本不发出去」。
+ */
 async function holdUntilMounted(line, state, diag) {
   if (state.pending.size === 0) return;
   if (!line.includes('session/prompt')) return;
@@ -385,10 +397,14 @@ async function holdUntilMounted(line, state, diag) {
   if (!waiting) return;
   const startedAt = Date.now();
   diag(`入站闸：压住会话 ${sessionId} 的 session/prompt`);
-  // 挂载本身内部全都 catch 过了；这里再兜一层，是为了「闸门自己绝不把
-  // 出站/入站的管道弄崩」——崩了客户端会以为门死了。
-  await waiting.catch(() => {});
-  diag(`入站闸：放行（等了 ${Date.now() - startedAt}ms）`);
+  // 等它挂完，但到点就放行（见 waitForMount 的说明）—— 挂载内部全都 catch 过，
+  // 这里唯一要防的是「内核某个服务永不落定」把这句话永久按住。
+  const settled = await waitForMount(waiting, MOUNT_WAIT_MS);
+  if (settled) {
+    diag(`入站闸：放行（等了 ${Date.now() - startedAt}ms）`);
+  } else {
+    diag(`入站闸：等挂载超过 ${MOUNT_WAIT_MS}ms，先放行（再等下去消息就永远发不出去了）`);
+  }
 }
 /** 判定内核「已经开过的会话不许换预设」的拒绝。 */
 function isPresetLocked(error) {

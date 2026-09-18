@@ -183,7 +183,41 @@ export async function withTimeout(promise, ms) {
 }
 
 /**
+ * 等一个会话的预设挂完；**到点就放行**。
+ *
+ * 入站方向（`session/prompt`）和出站方向（`session/new` 的回复）都要用它，
+ * 两边用的是同一个上限 —— 它们等的是同一件事，没道理一个等 15 秒、另一个
+ * 无限等。挂载内部全都 catch 过了，所以「等不到」只可能是内核某个服务
+ * 返回了一个**永不落定**的 promise；那时候无限等下去的后果不是报错，
+ * 而是**消息静默消失**（入站被永久按住，界面上什么都看不出来），
+ * 属于最难查的一类故障。宁可退化成「这个会话手里没工具」这种看得见的后果。
+ *
+ * @param {Promise<unknown>|undefined} pending 挂载 promise。
+ * @param {number} [ms] 最多等多久。
+ * @returns {Promise<boolean>} true = 它落定了（成功或失败都算）；false = 等超时了。
+ */
+export async function waitForMount(pending, ms = MOUNT_WAIT_MS) {
+  if (!pending || typeof pending.then !== 'function') return true;
+  const settled = await withTimeout(
+    pending.then(() => true, () => true),
+    ms,
+  );
+  return settled === true;
+}
+
+/**
  * 若这一行是某个建会话/恢复会话请求的回复，就补上预设清单后返回；否则原样返回。
+ *
+ * 两种回复都要处理，**出错的回复也要**：
+ *   - 成功：补 `_meta` 清单，让客户端知道有哪些预设、当前是哪个；
+ *   - 失败：把这次的点名从 `state.queue` / `state.resumes` 里**摘掉**。
+ *
+ * 为什么失败那条非有不可（实测踩过的坑）：`agent/created` 只在会话真的建出来时
+ * 才触发，而它在队列里是按「发出顺序」领点名的（session/new 时 sessionId 还
+ * 不知道，只能排队）。请求失败时不会有 `agent/created` 来领走这一条 ——
+ * 如果不摘掉，它会**一直留在队首**，等下一次 session/new 建会话时被领走：
+ * 用户明明没点名（或点了另一个），却莫名其妙挂上了上一次那个预设。
+ * 而且这个错误只在「一次失败的建会话」之后才出现，最难查的那种。
  *
  * @param {string} line 原始 NDJSON 行（带尾随换行）。
  * @param {object} state 本连接共享状态。
@@ -191,13 +225,27 @@ export async function withTimeout(promise, ms) {
  * @returns {Promise<string>} 要写进 socket 的行。
  */
 export async function decorateLine(line, state, diag) {
-  // 便宜的预筛：没有跟踪中的请求、或这行没有 result，就不是我们要看的回复。
-  if (state.replies.size === 0 || !line.includes('"result"')) return line;
+  // 便宜的预筛：没有跟踪中的请求就完全不用看这行。
+  if (state.replies.size === 0) return line;
   const frame = parseLine(line);
   // 这里把 state.replies（Map）当 id 集合用：Map 也有 has()。
   if (!isResponseTo(frame, state.replies)) return line;
   const asked = state.replies.get(frame.id);
   state.replies.delete(frame.id);
+
+  // 出错的回复：没有 result 可补，但要把这次的点名摘干净（见上面的说明）。
+  if (!frame.result || typeof frame.result !== 'object') {
+    if (asked) {
+      const at = state.queue.indexOf(asked);
+      if (at >= 0) state.queue.splice(at, 1);
+      if (typeof asked.sessionId === 'string' && asked.sessionId) state.resumes.delete(asked.sessionId);
+      diag(
+        `请求 ${frame.id} 失败了：把它的点名从队列里摘掉` +
+          `（${asked.preset ?? '(没点名)'}），免得下一次建会话领到它`,
+      );
+    }
+    return line;
+  }
 
   const sessionId = frame.result?.sessionId ?? asked?.sessionId;
   const mounting = typeof sessionId === 'string' ? state.pending.get(sessionId) : undefined;
