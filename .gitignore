@@ -16,6 +16,12 @@ spike/scratch/
 # 扩展的构建与测试产物：vsix、界面预览页、无头浏览器临时配置
 packages/vscode-extension/build*/
 
+# 随手用的构建/诊断临时目录：临时脚本、跑测试的日志、调查记录。
+# 注意 `packages/vscode-extension/build*` 那条只管得住扩展自己那个目录，
+# 仓库根目录的 build/ 原来**不在**忽略范围里 —— 2026-09-19 发现，
+# 一次 git add -A 就会把一堆临时物收进去。这里一并忽略。
+build/
+
 # 界面截图（tools/shots.js 生成，改界面前后对比用）。不放 build/ 里：
 # build-vsix 会把整个 build/ 清掉，图会跟着没。
 packages/vscode-extension/shots/
