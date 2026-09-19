@@ -178,6 +178,182 @@ body {
   transition: background var(--dsh-dur) ease;
 }
 
+/*
+ * ── 权限选择器 ──────────────────────────────────────────
+ *
+ * 顶栏里那个按钮长得像 .select，但它不是原生 <select>：权限每一项都带一行说明，
+ * 而且「完全权限」要过一道确认门 —— 原生 option 两样都做不到。
+ * 点开的小卡片用 position: fixed + JS 算坐标（见 main.js），
+ * 因为顶栏那一行会随「有没有模型/模式可调」时隐时现，靠 CSS 定位对不准。
+ */
+.access-btn {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--vscode-dropdown-foreground);
+  background: var(--vscode-dropdown-background);
+  border: 1px solid var(--vscode-dropdown-border, transparent);
+  border-radius: var(--dsh-radius-s);
+  padding: 2px 4px;
+  font-family: inherit;
+  font-size: var(--dsh-fs-s);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.access-btn:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.access-btn:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.access-btn[aria-expanded='true'] {
+  border-color: var(--vscode-focusBorder);
+}
+
+/* 切不了的时候（旧门 / 内核没装权限预设）：灰掉，但仍然留在那儿说明原因。 */
+.access-btn[disabled] {
+  color: var(--vscode-disabledForeground, var(--vscode-descriptionForeground));
+  cursor: default;
+}
+
+.access-pop {
+  position: fixed;
+  z-index: 30;
+  min-width: 220px;
+  max-width: min(320px, calc(100vw - 16px));
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
+  color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
+  border-radius: var(--dsh-radius);
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow);
+  animation: fade-in var(--dsh-dur) ease;
+}
+
+.access-pop-head {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 4px 8px;
+}
+
+.access-pop-title {
+  font-size: var(--dsh-fs-xs);
+  color: var(--vscode-descriptionForeground);
+}
+
+.access-pop-note {
+  font-size: var(--dsh-fs-xs);
+  color: var(--vscode-descriptionForeground);
+}
+
+.access-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.access-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 4px 8px;
+  color: inherit;
+  background: transparent;
+  border: none;
+  border-radius: var(--dsh-radius-s);
+  font-family: inherit;
+  font-size: var(--dsh-fs-s);
+  cursor: pointer;
+}
+
+.access-item:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.access-item:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.access-item-name {
+  display: block;
+  font-weight: 600;
+}
+
+/* 当前这一项：勾 + 主题的强调色，不用自定义颜色。 */
+.access-item.active .access-item-name {
+  color: var(--vscode-textLink-foreground);
+}
+
+.access-item.active .access-item-name::before {
+  content: '✓ ';
+}
+
+.access-item-desc {
+  display: block;
+  margin-top: 2px;
+  color: var(--vscode-descriptionForeground);
+  font-size: var(--dsh-fs-xs);
+  line-height: 1.45;
+}
+
+/* 确认门：跟列表互斥地占同一块地方（不叠着弹两个框）。 */
+.access-confirm {
+  padding: 4px 8px 8px;
+}
+
+.access-confirm-title {
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+
+.access-confirm-body {
+  margin: 0 0 8px;
+  color: var(--vscode-descriptionForeground);
+  font-size: var(--dsh-fs-s);
+  line-height: 1.45;
+}
+
+.access-confirm-actions {
+  display: flex;
+  gap: var(--dsh-gap);
+}
+
+.access-confirm-actions button {
+  padding: 2px 8px;
+  font-family: inherit;
+  font-size: var(--dsh-fs-s);
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  background: var(--vscode-button-secondaryBackground, transparent);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: var(--dsh-radius-s);
+  cursor: pointer;
+}
+
+.access-confirm-actions button:hover {
+  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground));
+}
+
+/* 「启用完全权限」是危险动作：用主题按钮色，别让它长得跟「算了」一样。 */
+.access-confirm-accept {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  border-color: var(--vscode-button-background);
+}
+
+.access-confirm-accept:hover {
+  background: var(--vscode-button-hoverBackground, var(--vscode-button-background));
+}
+
 .icon-btn:hover {
   background: var(--vscode-toolbar-hoverBackground);
 }

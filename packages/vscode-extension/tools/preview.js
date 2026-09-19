@@ -22,6 +22,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { renderHtml, makeNonce } = require('../src/panel/html');
 const { describeError } = require('../src/dsh/errors');
+// 权限那条链路的界面文案（中文标签、确认门）用**生产代码**生成，
+// 预览与界面测试就不会跟 src/dsh/permission.js 脱节。
+const { decorateOptions } = require('../src/dsh/permission');
 
 const ROOT = path.resolve(__dirname, '..');
 const OUT = path.join(ROOT, 'build', 'preview');
@@ -168,6 +171,34 @@ const presetsMessage = {
   ],
 };
 
+/**
+ * 权限选择器那一份状态（界面上顶栏那个「权限」按钮 + 点开的小卡片）。
+ *
+ * 选项是**用生产的翻译函数**生成的（`decorateOptions`），所以中文标签、
+ * 说明、以及「完全权限要确认」这件事，预览与界面测试看到的都跟真面板一致；
+ * 清单本身照这台机器上内核给的四档抄（含 Auto Approval 插件加的那一档）。
+ */
+const permissionStateMessage = {
+  type: 'permissionState',
+  currentValue: 'workspace-write',
+  label: '工作区内修改',
+  defaultPreset: 'auto-approval',
+  options: decorateOptions(
+    [
+      { value: 'read-only', name: 'read-only' },
+      { value: 'workspace-write', name: 'workspace-write' },
+      {
+        value: 'auto-approval',
+        name: 'Auto Approval',
+        description:
+          'Workspace writes, plus automatic approval of harmless commands and operations targeting configured trusted areas (outside the workspace too); everything else asks.',
+      },
+      { value: 'danger-full-access', name: 'danger-full-access' },
+    ],
+    'workspace-write',
+  ),
+};
+
 const longAnswer = [
   '我看了一下你的 `packages/dsh-door/lib/index.js`，问题出在**服务依赖没有声明**。\n',
   '\n',
@@ -220,6 +251,24 @@ const SCENARIOS = {
         { message: { type: 'status', state: 'ready', detail: '就绪' } },
         { message: configMessage },
         { message: presetsMessage },
+      ],
+    };
+  },
+
+  /**
+   * 权限选择器：顶栏那个按钮 + 点开的小卡片。
+   *
+   * 单独一个场景，因为它是**唯一**一处「清单由内核给、界面只负责画」的控件：
+   * 卡片里每一档都带说明、当前那档打勾、最宽的那档还要过一道确认门。
+   * 这些在无头 Chrome 里点得动（见 tools/uitest.js 的 access 断言）。
+   */
+  access() {
+    return {
+      steps: [
+        { message: { type: 'status', state: 'ready', detail: '就绪' } },
+        { message: configMessage },
+        { message: presetsMessage },
+        { message: permissionStateMessage },
       ],
     };
   },

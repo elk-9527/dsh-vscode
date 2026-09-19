@@ -507,6 +507,118 @@ function typesOf(items) {
     check('命令填成空的时候立刻报错（不拖到进程起来之后）', /dshCommand/.test(thrown), thrown);
   }
 
+  section('8.85 权限预设（dsh-door/permission 旁路方法，需要门 0.0.12+）');
+  {
+    /*
+     * 这个套件默认连 47821 —— 桌面端开着的时候那就是**桌面端的内核**，
+     * 而桌面档里的门是 0.0.7（桌面端独占那个档，命令行改不动它）。
+     * 所以这一段会分两条路走，两条都是真断言：
+     *
+     *   - 门是新的时候（本档自己起的 vscode-panel / dshdoor）→ 验完整链路；
+     *   - 门是旧的时候（连着桌面端）→ 验**降级**：一句人话说明为什么切不了，
+     *     面板其它功能一个不少。这条同样重要：它是本机最常见的配置。
+     *
+     * 「切一次真能切过去」那条路在 test/permission-live.js 里用**自己起的
+     * 内核**（门跟源码同步过）验，不依赖 47821 上是谁。
+     */
+    const beforePermission = view.messages.length;
+    await panel.onWebviewMessage({ type: 'refreshPermission' });
+    await waitFor(() =>
+      view.messages.slice(beforePermission).some((item) => item.message.type === 'permissionState'),
+    );
+    const permissionState = view.messages
+      .slice(beforePermission)
+      .map((item) => item.message)
+      .find((item) => item.type === 'permissionState');
+
+    check('界面上收到 permissionState', Boolean(permissionState),
+      JSON.stringify(view.messages.slice(beforePermission).map((i) => i.message.type)));
+
+    if (permissionState && permissionState.unavailable) {
+      const info = permissionState.unavailable;
+      check('门太旧 / 内核没装时，界面拿到的是一句人话（不是英文异常）',
+        typeof info.text === 'string' && info.text.length > 0 && !/Error|undefined/.test(info.text),
+        JSON.stringify(info));
+      check('说清了是哪一种情况（要能给出下一步）',
+        ['old-door', 'no-service'].includes(info.state), info.state);
+      check('「旧门」那条会告诉用户门要什么版本（0.0.12）',
+        info.state !== 'old-door' || /0\.0\.12/.test(info.detail || ''), info.detail);
+      const noticesOf = () =>
+        view.messages
+          .map((item) => item.message)
+          .filter(
+            (item) =>
+              item.type === 'notice' && /切不了权限|没有权限预设/.test(String(item.text || '')),
+          );
+      const notices = noticesOf();
+      check('对话流里把原因说清楚了（顶栏那行放不下长文）', notices.length >= 1,
+        JSON.stringify(view.messages.map((i) => i.message.type).slice(-12)));
+      check('那句话说人话（不是英文异常）',
+        notices.length > 0 && !/Error|undefined|Method not found/.test(notices[0].text),
+        notices.length > 0 ? notices[0].text.split('\n')[0] : '');
+      // 权限是每次建会话都会读一遍的：同一种原因重复播就成了噪音。
+      const countBefore = notices.length;
+      const beforeAgain = view.messages.length;
+      await panel.onWebviewMessage({ type: 'refreshPermission' });
+      await waitFor(() =>
+        view.messages.slice(beforeAgain).some((item) => item.message.type === 'permissionState'),
+      );
+      check('再读一次不会再刷一遍同样的话（同一种原因只说一次）',
+        noticesOf().length === countBefore,
+        `第一次 ${countBefore} 条，再来一次变成 ${noticesOf().length} 条`);
+      check('切不了的时候面板其它功能照常（还连着）',
+        Boolean(panel.client && panel.client.isConnected));
+      console.log(`     这一轮连的内核里门不支持权限方法（${info.state}），走的是降级那条路`);
+    } else if (permissionState) {
+      const options = Array.isArray(permissionState.options) ? permissionState.options : [];
+      const ids = options.map((item) => item.value);
+      check('清单来自内核（不写死：内核配了几档就是几档）', ids.length > 0, ids.join(','));
+      check('当前值在清单里', ids.includes(permissionState.currentValue), permissionState.currentValue);
+      check('内置那几档翻成了中文标签（跟桌面端逐字一致）',
+        options.filter((item) => ['仅可查看', '工作区内修改', '完全权限'].includes(item.label)).length >= 1,
+        options.map((item) => `${item.value}=${item.label}`).join(' '));
+      check('当前那一项被标成 active',
+        options.filter((item) => item.active).length === 1,
+        options.map((item) => `${item.value}:${item.active}`).join(' '));
+      const danger = options.find((item) => item.value === 'danger-full-access');
+      if (danger) {
+        check('「完全权限」带确认文案（确认门不能少）',
+          danger.needsConfirm === true && Boolean(danger.confirm && danger.confirm.title),
+          JSON.stringify(danger));
+      }
+
+      // 真切一次：切到 read-only，再切回来。
+      const original = permissionState.currentValue;
+      const beforeSwitch = view.messages.length;
+      await panel.onWebviewMessage({ type: 'setPermission', value: 'read-only' });
+      await waitFor(() =>
+        view.messages.slice(beforeSwitch).some(
+          (item) =>
+            (item.message.type === 'permissionState' && item.message.currentValue === 'read-only') ||
+            item.message.type === 'error',
+        ),
+      );
+      const afterSwitch = view.messages.slice(beforeSwitch).map((item) => item.message);
+      check('切到 read-only 之后内核回读就是 read-only',
+        afterSwitch.some((item) => item.type === 'permissionState' && item.currentValue === 'read-only'),
+        JSON.stringify(afterSwitch.map((item) => item.type)));
+      check('对话流里说了切换结果（不是只有顶栏变个字）',
+        afterSwitch.some((item) => item.type === 'notice' && /权限已切到/.test(item.text)),
+        JSON.stringify(afterSwitch.filter((item) => item.type === 'notice').map((item) => item.text)));
+
+      if (original && original !== 'read-only') {
+        await panel.onWebviewMessage({ type: 'setPermission', value: original });
+        await waitFor(() =>
+          view.messages
+            .slice(beforeSwitch)
+            .map((item) => item.message)
+            .some((item) => item.type === 'permissionState' && item.currentValue === original),
+        );
+        check('能切回原来的档（别把内核留在测试值上）', true);
+      }
+    }
+  }
+
   section('8.9 历史会话（dsh-door/sessions 旁路方法，需要门 0.0.8+）');
   {
     const beforeHistory = view.messages.length;

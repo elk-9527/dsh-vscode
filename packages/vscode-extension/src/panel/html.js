@@ -65,6 +65,10 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
         <span class="field-label">模式</span>
         <select id="preset-select" class="select" title="agent preset：只能在新建对话时生效（内核不允许一段对话中途换）"></select>
       </label>
+      <div class="field" id="access-field" hidden>
+        <span class="field-label">权限</span>
+        <button id="access-btn" class="access-btn" type="button" aria-haspopup="dialog" aria-expanded="false"></button>
+      </div>
       <div class="meter" id="meter" hidden title="上下文用量">
         <div class="meter-track"><div class="meter-fill" id="meter-fill"></div></div>
         <span class="meter-text" id="meter-text"></span>
@@ -111,6 +115,25 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
       <span id="usage-inline" class="hint mono"></span>
     </div>
   </footer>
+
+  <!-- 权限选择器：点顶栏那个「权限」按钮弹出的小卡片。
+       清单与当前值都由内核给（门 0.0.12 的 dsh-door/permission/*），
+       这个壳子里只放容器 —— 选项、说明、确认门全由 main.js 渲染。 -->
+  <div id="access-pop" class="access-pop" role="dialog" aria-label="选择权限" hidden>
+    <div class="access-pop-head">
+      <span class="access-pop-title">权限</span>
+      <span id="access-pop-note" class="access-pop-note"></span>
+    </div>
+    <div id="access-list" class="access-list" role="listbox" aria-label="可选的权限"></div>
+    <div id="access-confirm" class="access-confirm" hidden>
+      <p id="access-confirm-title" class="access-confirm-title"></p>
+      <p id="access-confirm-body" class="access-confirm-body"></p>
+      <div class="access-confirm-actions">
+        <button id="access-confirm-accept" class="access-confirm-accept" type="button"></button>
+        <button id="access-confirm-cancel" class="access-confirm-cancel" type="button">算了</button>
+      </div>
+    </div>
+  </div>
 
   <div id="permission" class="permission" hidden>
     <div class="permission-title" id="permission-title">DSH 需要你的许可</div>

@@ -247,6 +247,74 @@ check(
   'view.js 的 resume 调用没带 preset',
 );
 
+// ── 权限预设这条链路：方法名跨两个包、标签跟桌面端对齐、清单不许写死 ──────
+// 方法名漂移的表现是「顶栏那个权限按钮永远显示『切不了』」，不报任何错；
+// 清单写死的表现是「用户装了插件，桌面端四档、面板只有三档」——
+// 两种都很难从界面上看出根因，所以在这里钉死。
+
+const doorPermission = read('../dsh-door/lib/permission.js');
+const panelPermission = read('src/dsh/permission.js');
+const doorGet = /PERMISSION_GET_METHOD\s*=\s*'([^']+)'/.exec(doorPermission)?.[1];
+const doorSet = /PERMISSION_SET_METHOD\s*=\s*'([^']+)'/.exec(doorPermission)?.[1];
+
+check(
+  '门定义了权限的两个方法名',
+  doorGet === 'dsh-door/permission/get' && doorSet === 'dsh-door/permission/set',
+  `门=${doorGet} / ${doorSet}`,
+);
+check(
+  '扩展调的就是门那两个方法名（写错一个字符就静默失效）',
+  clientSource.includes(`'${doorGet}'`) && clientSource.includes(`'${doorSet}'`),
+  'client.js 里的方法名和门对不上',
+);
+check(
+  '权限方法挂在门的旁路前缀下（不会和内核/ACP 的方法名撞车）',
+  /DOOR_PERMISSION_PREFIX\s*=\s*'dsh-door\/permission\/'/.test(doorPermission),
+);
+check(
+  '门那边读的是客户端的会话 id（ACP 的 sessionId 就是内核的会话 id）',
+  /params\.id/.test(doorPermission) || /raw\.id/.test(doorPermission),
+);
+
+// 内置三项的中文标签**跟桌面端逐字一致**（桌面端 i18n：
+// access.preset.readOnly / workspaceWrite / fullAccess）。
+// 这三行是「对着桌面端抄的」，抄错了就是同一个内核两种叫法，用户在两边会看懵。
+check(
+  '内置三项的中文标签跟桌面端一致',
+  panelPermission.includes("'仅可查看'") &&
+    panelPermission.includes("'工作区内修改'") &&
+    panelPermission.includes("'完全权限'"),
+  'src/dsh/permission.js 里的标签和桌面端的 access.preset.* 对不上',
+);
+check(
+  '内置预设的 id 是内核那三个（kebab-case，别改成驼峰）',
+  ['read-only', 'workspace-write', 'danger-full-access'].every((id) =>
+    panelPermission.includes(`'${id}'`),
+  ),
+  '内置 id 少了或者写错了',
+);
+check(
+  '完全权限必须带确认门（这一档点了就不再逐条问用户）',
+  /NEEDS_CONFIRM\s*=\s*new Set\(\['danger-full-access'\]\)/.test(panelPermission),
+  'danger-full-access 没有进 NEEDS_CONFIRM',
+);
+check(
+  '面板**没有**把权限清单写死（插件加的 auto-approval 之类必须跟着内核出现）',
+  // 允许出现在注释里（说明它从哪来），但不许出现在 BUILTIN 那张表里。
+  !/'auto-approval'\s*:/.test(panelPermission),
+  'src/dsh/permission.js 里出现了 auto-approval 的写死条目',
+);
+check(
+  '面板问门要权限、而不是自己造一份（走 DoorClient 的两个方法）',
+  /permissionGet\(sessionId\)/.test(clientSource) && /permissionSet\(sessionId,\s*value\)/.test(clientSource),
+  'client.js 里没有 permissionGet/permissionSet，或没带会话 id',
+);
+check(
+  '会话一定下来就去读一次权限（换内核/换会话都可能不一样）',
+  /session\.on\('session'[\s\S]{0,220}refreshPermission\(\)/.test(viewSource),
+  'view.js 的 wire() 里没有在 session 事件上刷新权限',
+);
+
 // ── 编辑器上下文这条链路：命令 → 面板 → 界面 → 协议 ─────────────
 // 任何一环换了名字都是"按了没反应"，所以逐环钉住。
 

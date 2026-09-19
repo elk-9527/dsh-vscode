@@ -143,6 +143,31 @@ error: profile "desktop" is managed exclusively by the Electron application
 工具调用要不要问你，取决于你那个 profile 的权限策略（桌面端装了 `auto-approval`，
 默认不打断你）。面板能在内核真的来问的时候弹出选项，也会把代码改动渲染成 diff。
 
+**顶栏还有一个「权限」按钮**（跟桌面端同一个东西）：点开就是内核里那份权限预设
+清单 —— 桌面端有什么档，这里就有什么档：
+
+| 档 | 意思 | 来源 |
+| --- | --- | --- |
+| 仅可查看 | 能读任何位置，但不改任何东西 | 内核自带 |
+| 工作区内修改 | 工作区/临时目录里能写，越界先问你 | 内核自带 |
+| Auto Approval | 工作区里能写，外加自动批准那些无害的命令 | `dsh-auto-approval-plugin`（你装了才有） |
+| 完全权限 | 不问你了，什么都能做 | 内核自带 |
+
+几个刻意的设计：
+
+- **清单不写死在面板里**，是每次建会话时从内核读回来的（`dsh-door/permission/get`）。
+  所以你（或者某个插件）往内核里加了档，面板上立刻就有，中文名乱码、少一项这种
+  错位不会发生。清单里认不出来的档（比如插件加的）原样显示内核给的名字与说明。
+- 内置那三档的说明文字是**翻译过的中文**（桌面端显示的是内核里的英文原文）——
+  这是唯一一处刻意跟桌面端不一样的地方，为的是少让人读英文。
+- **「完全权限」点了会先问一句**（跟桌面端一样）：它意味着不再逐条确认，
+  点错的代价太大，所以确认门放在**客户端**而不是内核里。
+- 切权限是**随时可切、当前这段就生效**的（跟「模式」不一样，模式换不了当前这段）。
+  切完以**内核回读的**为准，失败会明说并回到真实状态。
+- 连着的门太旧（0.0.12 以下，比如**桌面端那个档里的门**）时，按钮会变成
+  「切不了（门太旧）」，悬浮提示 + 对话流里说清为什么、怎么升。
+  这个时候你仍然可以在**桌面端自己的界面**上切 —— 那边不走门这条路。
+
 ## 设置
 
 | 设置项 | 默认值 | 说明 |
@@ -167,7 +192,12 @@ error: profile "desktop" is managed exclusively by the Electron application
 - 面板里的**预设（preset）**跟随门的配置，不能在会话中间切换 ——
   内核的 `agentPresets` 在首个回合之后会锁住（`agent-preset/locked`），
   而且 ACP 没把预设暴露成可选配置项。
-- **权限模式**同理，ACP 没暴露；桌面端的默认策略仍然生效。
+- **权限模式**：ACP 同样没暴露（它只认模型/推理强度两个 config option），
+  所以这一项是门插件替内核接出来的旁路方法，**要门 0.0.12 以上**。
+  门太旧的时候按钮会说「切不了（门太旧）」并告诉你去升哪个档里的门；
+  内核没挂 `@deepseek-ai/dsh-permission-presets` 时也会照实说明。
+  「新会话默认用哪一档」仍然是内核设置（`$DSH_HOME/settings.yaml` 里的
+  `permission.defaultPreset`，桌面端「通用设置」改的就是它），面板只读不改。
 - **历史会话列表**能列出本机 `$DSH_HOME/sessions` 里的会话（标题、时间、回合数、
   工作目录），点一条就能接回上下文 —— 连的是本机时面板自己读盘，不用门支持什么
   新方法。连**别的机器**上的门时，只能靠门提供 `dsh-door/sessions/*`（0.0.8+），
@@ -203,7 +233,7 @@ error: profile "desktop" is managed exclusively by the Electron application
 ```powershell
 node test/run-all.js        # 快速套件：静态契约 + 拼块单测 + Markdown 单测 + 面板层，约 15s
 node test/run-all.js --ui   # 再加上真浏览器里的界面断言（需要 Chrome）
-node test/run-all.js --all  # 再加上真进程的自启内核、断线接回、模式、端到端，约 3 分钟
+node test/run-all.js --all  # 再加上真进程的自启内核、断线接回、模式、权限预设、端到端，约 4 分钟
 
 # 真 VS Code 隔离窗口里的端到端自检（不碰你自己那个窗口）。**发版前请带上 --linger**：
 $env:DSH_PANEL_CHECK_PORT = '47830'
@@ -241,10 +271,15 @@ node test/fallback.js    # 自启内核：端口空着时能否从零拉起来�
                          #   $env:DSH_PANEL_TEST_PORT = '47830'; node test/fallback.js
 node test/resume.js      # 断线后 session/resume 到底能不能把上下文接回来（带对照组）
 node test/presets.js     # 模式（agent preset）：新会话挂上、恢复会话补挂、工具没丢
+node test/permission-live.js  # 权限预设（门 0.0.12+）：自己起内核，四档全切一遍，
+                         #   两段会话互不影响、错名字/错会话都要明确报错
 node test/smoke.js       # 端到端：协议、真回合、工具调用、中断、切模型、多轮、
                          #   以及编辑器上下文（选中代码里的暗号 + 带进来的文件里的暗号）
-node tools/uitest.js     # 无头 Chrome 里对界面做 387 项断言（9 个场景，含通用视觉体检：
+node tools/uitest.js     # 无头 Chrome 里对界面做 400+ 项断言（10 个场景，含通用视觉体检：
                          # 文字截断 / 按钮太小 / 浮层跑出面板 / 消息间距不一致）
+                         #   其中 access 场景真的点开权限选择器：四档都在、当前那档打勾、
+                         #   完全权限要先过确认门、Esc/点外面能关、切不了时按钮灰掉
+node tools/uitest.js access  # 只跑「权限选择器」那个场景
 node tools/uitest.js context  # 只跑「带编辑器上下文」那个场景
 node tools/shots.js      # 把每个场景 × 深/浅主题拍成图（shots/*.png），
                          # 用于"用眼睛看"和改动前后对比。加场景名可只拍一个。
@@ -265,8 +300,9 @@ node tools/check-eol.cjs           # 有没有文件混着 CRLF 和 LF（逐字�
 
 node tools/vscode-check.js  # **真 VS Code 窗口里**的自检：开一个隔离窗口（自己的 user-data-dir 和
                             # extensions-dir，不碰你正开着的窗口），用 DSH_PANEL_AUTOFOCUS=1 让它
-                            # 自动展开面板，断言 11 条：窗口起来 / 扩展激活 / 六个命令注册 /
+                            # 自动展开面板，断言 15 条：窗口起来 / 扩展激活 / 六个命令注册 /
                             # 视图进活动栏 / 面板展开 / ACP 握手 / 建出会话 /
+                            # 权限那一路有结果（读到清单，或者明确说清为什么切不了）/
                             # 内核这件事（端口上有门就是「接入模式：不许另起内核」，
                             # 没门就是「自启模式：必须自己拉起来」）/ 收摊干净 /
                             # 不留孤儿内核 / 你自己的窗口没被动。约 30 秒，跑完自动收摊。

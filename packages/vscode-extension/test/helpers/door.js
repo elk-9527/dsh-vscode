@@ -199,6 +199,11 @@ async function ensureDoor({ host = HOST, port = PORT, profile = PROFILE, log = (
     profile,
     log,
     extraArgs,
+    // 把要用的端口一起给它：门**优先读环境变量**（DSH_ACP_DOOR_PORT），
+    // 所以「我说钉在哪个端口」就真的在哪个端口，不用再去糊一份 --patch。
+    // 不给的话门就按档里配的来（默认 47821）—— 那正是 47821 这个默认值能用、
+    // 而随便挑个空闲端口就等不到门的原因（踩过：等了 120 秒才发现是这）。
+    port,
   });
   const ok = await waitForPort(host, port, { totalMs: 120000 });
   if (!ok) {

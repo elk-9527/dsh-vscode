@@ -142,6 +142,7 @@ agent "…" has no provider/model: set AgentOptions.provider and AgentOptions.mo
 
 | 版本 | 改了什么 |
 | --- | --- |
+| 0.0.12 | 新增 `dsh-door/permission/get` 与 `dsh-door/permission/set` 两个旁路方法：把内核 `@deepseek-ai/dsh-permission-presets` 的权限预设**清单与切换**透给客户端（ACP 只暴露模型/推理强度两个 config option，权限选择器属于它「刻意不提供」的 DSH 专用 UI 那类）。清单**不写死** —— 内核配了什么就回什么（`read-only`/`workspace-write`/`danger-full-access` 来自 `dsh-base`，`auto-approval` 由 `dsh-auto-approval-plugin` 加，用户还能自己加），所以客户端那份跟桌面端永远同一个真源。`permissionPresets` 是**可选**依赖（`ctx.inject`），档里没挂这个服务时门照常工作、只回一句「这个内核没有权限预设」。回归测试：`test/permission.js`（纯函数 29 项）+ 扩展那边的 `test/permission-live.js`（真内核，四档全切一遍 24 项）。 |
 | 0.0.9 | **修两个 bug**：① 建会话**失败**时的预设点名会留在队列里，被**下一次**建会话领走（用户没点名却挂上了别的模式）—— 出错的回复原来根本没被处理（预筛要求那行含 `"result"`）；② 入站闸等预设挂载**没有超时**，内核某个服务返回永不落定的 promise 时，`session/prompt` 会被永久按住 —— 症状是"发了消息毫无反应、也没有任何报错"。现在入站与出站同一个上限（`MOUNT_WAIT_MS`，经 `waitForMount()`），到点放行。<br>回归测试：`test/frames.js` 第 8 节第 (6) 段、第 9 节。 |
 | 0.0.8 | 新增 `dsh-door/sessions/list` 与 `dsh-door/sessions/get` 两个旁路方法（门只读解析 `$DSH_HOME/sessions`，多帧 zstd）。给「内核没有 `session/load`、面板又想看历史」用。另修出站中继必须返回 `WritableStream`（写成 `TransformStream` 没人消费 readable 时，门的回复永远出不去，客户端看到的是"接了线但不应答"）。 |
 | 0.0.7 | 模式（agent preset）切换；修「断线接回之后会话没有工具」（撞预设锁就改用工厂期的 `mount()` 补挂）。 |
@@ -152,6 +153,30 @@ agent "…" has no provider/model: set AgentOptions.provider and AgentOptions.mo
 by the Electron application`），得等它没跑的时候。所以**面板不依赖门的版本**：
 连的是本机时它自己读 `$DSH_HOME/sessions`（`packages/vscode-extension/src/dsh/sessions.js`，
 与 `lib/sessions.js` 有一致性测试拴着）。
+
+## 旁路方法：ACP 装不下的东西从这里过
+
+门除了转发 ACP，还自己应答一小撮 `dsh-door/…` 前缀的请求帧（**不转发给内核**，
+就地回），因为 ACP 协议里没有对应的抽屉：
+
+| 方法 | 门要的 params | 门的回复 | 从哪版起 |
+| --- | --- | --- | --- |
+| `dsh-door/sessions/list` | `{}`（可选 `cwd`） | `{ skipped, sessions: [...] }` | 0.0.8 |
+| `dsh-door/sessions/get` | `{ id, limit? }` | `{ card, entries, truncated }` | 0.0.8 |
+| `dsh-door/permission/get` | `{ id }` | `{ currentValue, options: [{value, name?, description?}], defaultPreset? }` | 0.0.12 |
+| `dsh-door/permission/set` | `{ id, value }` | 同 `permission/get`（**改完之后回读**的真实状态） | 0.0.12 |
+
+权限那两个为什么不能走 ACP：`@deepseek-ai/dsh-acp` 只把**模型**与**推理强度**
+暴露成 `session/set_config_option`，README 里写明它「刻意不提供 DSH 专用呈现数据
+与交互式 UI 功能」。而权限选择器正好是这一类。
+
+实现上注意两点：
+
+1. `permissionPresets` 是**可选**依赖 —— 用 `ctx.inject(['permissionPresets'], …)`
+   而不是写进 `export const inject`。写死的话，没挂这个服务的档（比如极简的自建档）
+   会**整扇门都加载不了**，而不是只有权限这一项不可用。
+2. 切完**回读**再回复（`settledPermission`），不做乐观更新：万一某个旋钮被别的
+   机制按住，客户端显示的是真实状态。
 
 ## 怎么装
 

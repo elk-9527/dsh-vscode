@@ -19,6 +19,8 @@ const os = require('node:os');
 const { DoorClient } = require('../door/client');
 const { DshSession } = require('../dsh/session');
 const { describeError } = require('../dsh/errors');
+// 权限预设：中文标签与失败说明（纯函数，见那个文件开头为什么清单不写死）。
+const { decorateOptions, currentLabel, explainPermissionFailure } = require('../dsh/permission');
 const {
   probePort,
   dshCommandCandidates,
@@ -118,6 +120,31 @@ class DshPanelView {
     /** 门最近一次报的预设清单，界面重新加载时补发用。 */
     this.lastPresets = undefined;
     /**
+     * 最近一次读到的权限预设（门给的原始载荷：`{currentValue, options}`）。
+     *
+     * 为什么面板只缓存、不当真源：权限是**内核**的状态，面板是它的一个视图。
+     * 缓存只为两件事：界面重新加载时先把上一次的补上（不闪空白），
+     * 以及查中文标签。真值每次会话定下来都重新读一遍。
+     * @type {{currentValue: string, options: Array<object>}|undefined}
+     */
+    this.permission = undefined;
+    /**
+     * 权限读不到时的说明（门太旧 / 档里没挂权限服务 / 其它错误）。
+     *
+     * 这三种都**不是面板坏了**，所以不进对话流当报错，而是让选择器变成
+     * 一句解释 —— 用户看到的是「这里为什么切不了」，不是一屏红字。
+     * @type {{state: string, text: string, detail?: string}|undefined}
+     */
+    this.permissionUnavailable = undefined;
+    /**
+     * 已经在对话流里说过一次的那种「读不到」原因（'old-door' / 'no-service' / …）。
+     *
+     * 只说一次：接桌面端那个内核（门 0.0.7）时每次建会话都会读失败，
+     * 每次都播一遍就成了噪音。断开重连时清掉（用户可能刚好升了门）。
+     * @type {string|undefined}
+     */
+    this.permissionNotice = undefined;
+    /**
      * 历史会话这一轮连接是从哪儿读的：'door' | 'local' | undefined（还没定）。
      *
      * 缓存它是为了别每次点历史都多打一次注定失败的往返：门太旧是**常态**
@@ -207,6 +234,12 @@ class DshPanelView {
           break;
         case 'setPreset':
           await this.setPreset(message.value);
+          break;
+        case 'setPermission':
+          await this.setPermission(message.value);
+          break;
+        case 'refreshPermission':
+          await this.refreshPermission();
           break;
         case 'permission':
           if (this.session) this.session.answerPermission(message.requestId, message.optionId);
@@ -666,7 +699,12 @@ class DshPanelView {
       });
     });
     session.on('error', (payload) => this.postError(payload.message));
-    session.on('session', (payload) => this.log('info', `当前会话 ${payload.sessionId}`));
+    session.on('session', (payload) => {
+      this.log('info', `当前会话 ${payload.sessionId}`);
+      // 会话一定下来（新建/恢复/换内核）就读一次权限：权限是内核的状态，
+      // 换一个内核或换一段会话都可能不一样，不能拿上一次的接着显示。
+      void this.refreshPermission();
+    });
 
     client.on('permission', (requestId, params) =>
       this.post({ type: 'permission', requestId, params }),
@@ -731,6 +769,10 @@ class DshPanelView {
     this.post({ type: 'status', state: session.busy ? 'busy' : 'ready', detail: session.busy ? '工作中…' : '就绪' });
     this.post({ type: 'config', configOptions: session.configOptions });
     if (this.lastPresets) this.post({ type: 'presets', ...this.lastPresets });
+    // 权限：上一次读到的先补上（不闪空白）；从没读到过就问一次。
+    if (this.permission) this.postPermissionState(this.permission);
+    else if (this.permissionUnavailable) this.post({ type: 'permissionState', unavailable: this.permissionUnavailable });
+    else void this.refreshPermission();
     if (session.usage) this.post({ type: 'usage', used: session.usage.used, size: session.usage.size });
   }
 
@@ -1039,6 +1081,96 @@ class DshPanelView {
     });
   }
 
+  /**
+   * 读一次当前会话的权限预设（门 ≥0.0.12 的 `dsh-door/permission/get`）。
+   *
+   * 为什么每次都问内核、而不是面板自己记着：权限是**内核**的状态
+   * （会话的 `permissions` 投影）。桌面端切了、用户改了档里的默认值、
+   * 某个插件（比如 Auto Approval）动了旋钮，面板都该照实显示 ——
+   * 这也就是「跟桌面端同步」的落实方式：同一份清单、同一个真源。
+   *
+   * 读不到**不算错误**：门太旧（0.0.11 及以下）或这个档没挂权限服务都是常态。
+   * 这时选择器变成一句解释（见 dsh/permission.js），别的功能一点不受影响。
+   */
+  async refreshPermission() {
+    const client = this.client;
+    const sessionId = this.session && this.session.sessionId;
+    if (!client || !sessionId || typeof client.permissionGet !== 'function') return;
+    try {
+      const payload = await client.permissionGet(sessionId);
+      this.permission = payload;
+      this.permissionUnavailable = undefined;
+      this.postPermissionState(payload);
+      // 记一行日志：真窗口自检（tools/vscode-check.js）就是靠它证明
+      // 「面板真的从内核读到了权限清单」，而不是靠界面看起来像。
+      this.log('info', `当前权限：${currentLabel(payload.currentValue, payload.options)}（${payload.currentValue}）`);
+    } catch (error) {
+      const shaped = explainPermissionFailure({ code: error && error.code, message: this.errText(error) });
+      this.permission = undefined;
+      this.permissionUnavailable = shaped;
+      this.post({ type: 'permissionState', unavailable: shaped });
+      this.log('info', `权限预设读不到（${shaped.state}）：${this.errText(error)}`);
+      // 顶栏那个按钮只有几个字（「切不了（门太旧）」），说清楚为什么得靠这里。
+      // 每种原因只说一次：接的是桌面端那个内核时，每次建会话都会走到这儿。
+      if (this.permissionNotice !== shaped.state) {
+        this.permissionNotice = shaped.state;
+        this.post({
+          type: 'notice',
+          text: `${shaped.text}${shaped.detail ? `\n${shaped.detail}` : ''}`,
+        });
+      }
+    }
+  }
+
+  /** 把一份权限载荷发给界面（统一在这儿加中文标签）。 */
+  postPermissionState(payload) {
+    const options = decorateOptions(payload.options, payload.currentValue);
+    this.post({
+      type: 'permissionState',
+      currentValue: payload.currentValue,
+      options,
+      label: currentLabel(payload.currentValue, payload.options),
+      defaultPreset: payload.defaultPreset,
+    });
+  }
+
+  /**
+   * 用户在面板里换了权限预设。
+   *
+   * 跟 agent preset（`setPreset`）**不是一回事**：那个换不了当前这段（内核
+   * 报 `agent-preset/locked`），而权限是**随时可换**的 —— 内核就是为此设计的
+   * （`/permission`、桌面端那个选择器都是中途可点）。所以这里直接切，
+   * 不重开会话，也不编「下一段生效」那种话。
+   *
+   * 切完以**内核回读的**为准（不乐观更新）：万一某个旋钮被别的机制按住，
+   * 界面显示的仍然是真实状态，而不是用户以为的那一个。
+   */
+  async setPermission(value) {
+    const client = this.client;
+    const sessionId = this.session && this.session.sessionId;
+    const wanted = typeof value === 'string' ? value.trim() : '';
+    if (!client || !sessionId || !wanted) return;
+    if (typeof client.permissionSet !== 'function') return;
+    const label = currentLabel(wanted, this.permission && this.permission.options);
+    try {
+      const payload = await client.permissionSet(sessionId, wanted);
+      this.permission = payload;
+      this.permissionUnavailable = undefined;
+      this.postPermissionState(payload);
+      this.post({ type: 'notice', text: `权限已切到「${label}」。` });
+      this.log('info', `权限切到 ${wanted}（内核回读 ${payload.currentValue}）`);
+    } catch (error) {
+      // 失败要说清楚是什么失败（旧门 / 名字不对 / 会话没了），并且把界面
+      // 拉回真实状态 —— 否则用户会以为自己已经切过去了。
+      const shaped = explainPermissionFailure({ code: error && error.code, message: this.errText(error) });
+      this.postError(`${shaped.text}${shaped.detail ? `\n${shaped.detail}` : ''}`);
+      // 这一次是用户自己点的，说一遍就够：把去重标记先记上，
+      // 免得下面那次重读又把同一句话当「notice」再播一遍。
+      this.permissionNotice = shaped.state;
+      await this.refreshPermission();
+    }
+  }
+
   async reconnect() {
     this.log('info', '用户要求重新连接');
     this.teardown();
@@ -1061,6 +1193,9 @@ class DshPanelView {
     }
     // 下一轮连接重新判断历史会话从哪儿读（用户可能刚好升级了门）。
     this.historyVia = undefined;
+    // 权限那条说明也重新说一遍（可能刚升完门）。
+    this.permissionNotice = undefined;
+    this.permissionUnavailable = undefined;
   }
 
   dispose() {

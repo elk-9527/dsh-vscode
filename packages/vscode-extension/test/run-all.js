@@ -28,6 +28,10 @@ const suites = [
   { name: '门的看帧判断（纯函数）', file: '../dsh-door/test/frames.js', always: true },
   { name: '门的会话读取（纯函数）', file: '../dsh-door/test/sessions.js', always: true },
   { name: '门的端口判定（纯函数）', file: '../dsh-door/test/port.js', always: true },
+  // 权限预设那条旁路方法（门 0.0.12）：清单来自用户可配的档，形状不能假设。
+  { name: '门的权限预设方法（纯函数）', file: '../dsh-door/test/permission.js', always: true },
+  // 面板侧把内核的清单翻成中文界面（标签跟桌面端逐字一致）。
+  { name: '权限预设的界面翻译（纯函数）', file: 'test/permission.js', always: true },
   // 两份「历史会话读取」实现（门的 ESM + 面板的 CJS）必须逐项一致 ——
   // 见 test/sessions-parity.js 的说明：改了一边忘另一边，这条先炸。
   { name: '两份会话读取实现是否一致', file: 'test/sessions-parity.js', always: true },
@@ -51,6 +55,14 @@ const suites = [
   },
   { name: '断线接回（真 DSH）', file: 'test/resume.js', always: false, needs: withDsh, hint: '加 --all 才跑' },
   { name: '预设/模式（真 DSH）', file: 'test/presets.js', always: false, needs: withDsh, hint: '加 --all 才跑（自己挑端口，不抢 47821）' },
+  {
+    name: '权限预设（真 DSH）',
+    file: 'test/permission-live.js',
+    always: false,
+    needs: withDsh,
+    env: { DSH_PANEL_TEST_PORT: '47832' },
+    hint: '加 --all 才跑（自己挑端口，不抢 47821）',
+  },
   { name: '面板层（假 vscode + 真门）', file: 'test/panel.js', always: true },
   { name: '端到端（真 DSH）', file: 'test/smoke.js', always: false, needs: withDsh, hint: '加 --all 才跑' },
 ];

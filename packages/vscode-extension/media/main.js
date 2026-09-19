@@ -25,6 +25,16 @@
     modelSelect: document.getElementById('model-select'),
     presetField: document.getElementById('preset-field'),
     presetSelect: document.getElementById('preset-select'),
+    accessField: document.getElementById('access-field'),
+    accessBtn: document.getElementById('access-btn'),
+    accessPop: document.getElementById('access-pop'),
+    accessPopNote: document.getElementById('access-pop-note'),
+    accessList: document.getElementById('access-list'),
+    accessConfirm: document.getElementById('access-confirm'),
+    accessConfirmTitle: document.getElementById('access-confirm-title'),
+    accessConfirmBody: document.getElementById('access-confirm-body'),
+    accessConfirmAccept: document.getElementById('access-confirm-accept'),
+    accessConfirmCancel: document.getElementById('access-confirm-cancel'),
     messages: document.getElementById('messages'),
     empty: document.getElementById('empty'),
     input: document.getElementById('input'),
@@ -51,6 +61,23 @@
     configOptions: [],
     /** 门报过来的预设清单有没有内容（决定配置行要不要露出来）。 */
     hasPresets: false,
+    /**
+     * 权限那一路有没有东西可显示（清单，或者一句「为什么切不了」）。
+     *
+     * 跟 hasPresets 一样只用来决定配置行露不露 —— 没权限信息时别在顶栏
+     * 挂一个空的「权限」按钮。
+     */
+    hasPermission: false,
+    /**
+     * 当前权限与可选项（扩展那边已经翻好中文标签，见 src/dsh/permission.js）。
+     * @type {{currentValue: string, options: Array<object>}|undefined}
+     */
+    permission: undefined,
+    /**
+     * 正在等用户确认的那一项（「完全权限」要先过一道确认门）。
+     * @type {object|undefined}
+     */
+    pendingAccess: undefined,
     /**
      * 挂着的编辑器上下文（当前文件 / 选中的代码），随下一条消息一起发出去。
      *
@@ -126,6 +153,9 @@
       case 'presets':
         setPresets(message);
         break;
+      case 'permissionState':
+        setPermissionState(message);
+        break;
       case 'permission':
         showPermission(message);
         break;
@@ -183,9 +213,10 @@
     if (kind === 'ready' || kind === 'busy') syncConfigRow();
   }
 
-  /** 配置行只在真有东西可调时才露出来（有模型下拉，或有模式下拉）。 */
+  /** 配置行只在真有东西可调时才露出来（有模型下拉，或有模式/权限）。 */
   function syncConfigRow() {
-    el.configRow.hidden = state.configOptions.length === 0 && !state.hasPresets;
+    el.configRow.hidden =
+      state.configOptions.length === 0 && !state.hasPresets && !state.hasPermission;
   }
 
   function showHint(text, isError) {
@@ -1040,6 +1071,208 @@
     }
     return opt;
   }
+
+  // ── 权限选择器 ──────────────────────────────────────
+
+  /**
+   * 权限那一路的新状态（清单 + 当前值，或一句「为什么切不了」）。
+   *
+   * 关键的一条：**清单不是我写死的**，是内核给的（门 0.0.12 转出来）。
+   * 所以用户装了 Auto Approval 那种插件、或者自己在档里加了预设，
+   * 这里会跟着多出来 —— 跟桌面端那份是同一个真源。
+   */
+  function setPermissionState(message) {
+    if (message.unavailable) {
+      state.permission = undefined;
+      state.permissionUnavailable = message.unavailable;
+      state.hasPermission = true;
+      closeAccessPop();
+      const why = shortAccessReason(message.unavailable.state);
+      el.accessBtn.textContent = `切不了（${why}）`;
+      el.accessBtn.title = accessTitle(message.unavailable);
+      el.accessBtn.disabled = true;
+      el.accessField.hidden = false;
+      syncConfigRow();
+      return;
+    }
+    const options = Array.isArray(message.options) ? message.options : [];
+    if (!message.currentValue && options.length === 0) {
+      // 内核没给任何权限信息（比如门干脆没这个服务）：别挂一个空按钮。
+      state.permission = undefined;
+      state.permissionUnavailable = undefined;
+      state.hasPermission = false;
+      closeAccessPop();
+      el.accessField.hidden = true;
+      syncConfigRow();
+      return;
+    }
+    state.permission = {
+      currentValue: message.currentValue,
+      options,
+      defaultPreset: message.defaultPreset,
+    };
+    state.permissionUnavailable = undefined;
+    state.hasPermission = true;
+    el.accessField.hidden = false;
+    el.accessBtn.disabled = false;
+    el.accessBtn.textContent = message.label || message.currentValue || '权限';
+    el.accessBtn.title = `当前权限：${message.label || message.currentValue}`;
+    if (!el.accessPop.hidden) renderAccessList();
+    syncConfigRow();
+  }
+
+  /** 切不了的原因，压缩成几个字（完整说明在悬浮提示与对话流里）。 */
+  function shortAccessReason(kind) {
+    if (kind === 'old-door') return '门太旧';
+    if (kind === 'no-service') return '内核没装';
+    return '读不到';
+  }
+
+  function accessTitle(info) {
+    return info && info.detail ? `${info.text}\n${info.detail}` : (info && info.text) || '';
+  }
+
+  /** 渲染可选项（每项：名字 + 一行说明，当前那项打勾）。 */
+  function renderAccessList() {
+    const permission = state.permission;
+    el.accessList.textContent = '';
+    el.accessConfirm.hidden = true;
+    state.pendingAccess = undefined;
+    if (!permission) return;
+    const options = permission.options;
+    el.accessPopNote.textContent = options.length > 1 ? `${options.length} 档` : '';
+    let active = undefined;
+    for (const option of options) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = option.active ? 'access-item active' : 'access-item';
+      button.setAttribute('role', 'option');
+      button.setAttribute('aria-selected', option.active ? 'true' : 'false');
+      button.dataset.value = option.value;
+      const name = document.createElement('span');
+      name.className = 'access-item-name';
+      name.textContent = option.label;
+      button.appendChild(name);
+      if (option.description) {
+        const desc = document.createElement('span');
+        desc.className = 'access-item-desc';
+        desc.textContent = option.description;
+        button.appendChild(desc);
+      }
+      button.addEventListener('click', () => chooseAccess(option));
+      el.accessList.appendChild(button);
+      if (option.active) active = button;
+    }
+    // 选不中的当前值（清单被改过之类）也要显示出来，不能让用户以为没选。
+    if (!active && permission.currentValue) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'access-item active';
+      button.setAttribute('role', 'option');
+      button.setAttribute('aria-selected', 'true');
+      const name = document.createElement('span');
+      name.className = 'access-item-name';
+      name.textContent = permission.currentValue;
+      button.appendChild(name);
+      button.disabled = true;
+      el.accessList.appendChild(button);
+    }
+  }
+
+  /**
+   * 选中一项。
+   *
+   * 「完全权限」要过确认门（文案是扩展给的，见 src/dsh/permission.js 的 CONFIRM）：
+   * 那一档会让智能体不再逐条问你，点错的代价太大，所以多一步。
+   */
+  function chooseAccess(option) {
+    if (option.needsConfirm && option.confirm) {
+      state.pendingAccess = option;
+      el.accessList.hidden = true;
+      el.accessConfirm.hidden = false;
+      el.accessConfirmTitle.textContent = option.confirm.title;
+      el.accessConfirmBody.textContent = option.confirm.body;
+      el.accessConfirmAccept.textContent = option.confirm.accept;
+      el.accessConfirmCancel.textContent = option.confirm.cancel || '算了';
+      el.accessConfirmAccept.focus();
+      positionAccessPop();
+      return;
+    }
+    post({ type: 'setPermission', value: option.value });
+    closeAccessPop();
+  }
+
+  function openAccessPop() {
+    if (el.accessBtn.disabled) return;
+    renderAccessList();
+    el.accessList.hidden = false;
+    el.accessPop.hidden = false;
+    el.accessBtn.setAttribute('aria-expanded', 'true');
+    positionAccessPop();
+    const first = el.accessList.querySelector('button');
+    if (first) first.focus();
+  }
+
+  function closeAccessPop() {
+    if (el.accessPop.hidden) return;
+    el.accessPop.hidden = true;
+    el.accessList.hidden = false;
+    el.accessConfirm.hidden = true;
+    state.pendingAccess = undefined;
+    el.accessBtn.setAttribute('aria-expanded', 'false');
+  }
+
+  /** 小卡片贴着那个按钮放；下面放不下就翻到上面（侧边栏里高度很紧）。 */
+  function positionAccessPop() {
+    const rect = el.accessBtn.getBoundingClientRect();
+    const width = el.accessPop.offsetWidth;
+    const gap = 4;
+    const left = Math.max(gap, Math.min(rect.left, window.innerWidth - width - gap));
+    el.accessPop.style.left = `${left}px`;
+    const height = el.accessPop.offsetHeight;
+    const below = rect.bottom + gap;
+    if (below + height > window.innerHeight - gap && rect.top - gap - height > gap) {
+      el.accessPop.style.top = `${rect.top - gap - height}px`;
+    } else {
+      el.accessPop.style.top = `${below}px`;
+    }
+  }
+
+  el.accessBtn.addEventListener('click', () => {
+    if (el.accessPop.hidden) openAccessPop();
+    else closeAccessPop();
+  });
+
+  el.accessConfirmAccept.addEventListener('click', () => {
+    const option = state.pendingAccess;
+    if (!option) return;
+    post({ type: 'setPermission', value: option.value });
+    closeAccessPop();
+  });
+
+  el.accessConfirmCancel.addEventListener('click', () => {
+    el.accessConfirm.hidden = true;
+    el.accessList.hidden = false;
+    state.pendingAccess = undefined;
+    positionAccessPop();
+    const first = el.accessList.querySelector('button');
+    if (first) first.focus();
+  });
+
+  // 点别处 / Esc 关掉：这两种是所有人的肌肉记忆，不能只有点按钮才关得上。
+  document.addEventListener('mousedown', (event) => {
+    if (el.accessPop.hidden) return;
+    if (el.accessPop.contains(event.target) || el.accessBtn.contains(event.target)) return;
+    closeAccessPop();
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !el.accessPop.hidden) closeAccessPop();
+  });
+
+  window.addEventListener('resize', () => {
+    if (!el.accessPop.hidden) positionAccessPop();
+  });
 
   el.modelSelect.addEventListener('change', () => {
     post({ type: 'setModel', value: el.modelSelect.value });

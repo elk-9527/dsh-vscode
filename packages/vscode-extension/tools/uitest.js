@@ -42,6 +42,8 @@ const EXPECTATIONS = {
   error: { needsUser: true, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0, errorShape: true },
   // 历史会话：浮层、清单、回放、接回 —— 全在断言脚本里现场注入（见那个场景的说明）。
   history: { needsUser: false, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0, historyScene: true },
+  // 权限选择器：清单由扩展（内核）给，界面只负责画与点 —— 全在断言脚本里点。
+  access: { needsUser: false, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0, accessScene: true },
 };
 
 /**
@@ -653,6 +655,120 @@ function assertionsScript(scene) {
         errStyle ? (errStyle.color + ' vs ' + (emptyColor || '（空状态的颜色没取到）')) : '取不到');
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       assert('出过错之后 Esc 照样能关', !visible(overlay));
+    }
+
+    // ── 7.8 权限选择器：清单由扩展（内核）给，界面只画与点 ──────────
+    // 这一段里的清单来自 tools/preview.js 的 access 场景，而那份载荷是用
+    // **生产的翻译函数**（src/dsh/permission.js）生成的 —— 所以这里验到的
+    // 标签、说明、确认门，跟真面板上看到的是同一套。
+    if (EXPECT.accessScene) {
+      var accessField = document.getElementById('access-field');
+      var accessBtn = document.getElementById('access-btn');
+      var accessPop = document.getElementById('access-pop');
+      var accessList = document.getElementById('access-list');
+      var accessConfirm = document.getElementById('access-confirm');
+
+      assert('权限那一栏露出来了', visible(accessField));
+      assert('按钮上写的是当前档（中文）', (accessBtn.textContent || '').indexOf('工作区内修改') >= 0,
+        accessBtn.textContent);
+      assert('按钮带悬浮提示', (accessBtn.title || '').length > 0, accessBtn.title);
+      assert('小卡片默认藏着', !visible(accessPop));
+      assert('按钮说自己是弹窗触发器', accessBtn.getAttribute('aria-haspopup') === 'dialog');
+
+      accessBtn.click();
+      assert('点一下弹出清单', visible(accessPop));
+      assert('弹出时 aria-expanded 跟着变', accessBtn.getAttribute('aria-expanded') === 'true');
+      var accessItems = accessPop.querySelectorAll('.access-item');
+      assert('四档都在（含插件加的 Auto Approval）', accessItems.length === 4,
+        accessItems.length + ' 项：' + [].map.call(accessItems, function (n) {
+          return n.querySelector('.access-item-name').textContent;
+        }).join(' / '));
+      var accessNames = [].map.call(accessItems, function (n) {
+        return (n.querySelector('.access-item-name') || {}).textContent || '';
+      });
+      assert('标签跟桌面端一致（仅可查看 / 工作区内修改 / Auto Approval / 完全权限）',
+        accessNames.join('|') === '仅可查看|工作区内修改|Auto Approval|完全权限',
+        accessNames.join('|'));
+      assert('每一档都带一行说明',
+        [].every.call(accessItems, function (n) {
+          var d = n.querySelector('.access-item-desc');
+          return !!d && d.textContent.trim().length > 0;
+        }),
+        [].map.call(accessItems, function (n) {
+          var d = n.querySelector('.access-item-desc');
+          return d ? d.textContent.length : 0;
+        }).join(','));
+      assert('当前那一档打了勾（只有一项 active）',
+        accessPop.querySelectorAll('.access-item.active').length === 1,
+        accessPop.querySelectorAll('.access-item.active').length + ' 项');
+      assert('选项对读屏是 listbox 里的 option',
+        accessItems[0].getAttribute('role') === 'option'
+          && accessItems[0].getAttribute('aria-selected') === 'false'
+          && accessPop.querySelector('.access-item.active').getAttribute('aria-selected') === 'true');
+      var popRect = accessPop.getBoundingClientRect();
+      assert('小卡片没有跑出窗口',
+        popRect.left >= 0 && popRect.right <= window.innerWidth + 1 && popRect.bottom <= window.innerHeight + 1,
+        Math.round(popRect.left) + ',' + Math.round(popRect.top) + ' → ' + Math.round(popRect.right) + ',' + Math.round(popRect.bottom)
+          + ' (窗口 ' + window.innerWidth + 'x' + window.innerHeight + ')');
+
+      // 普通档：点一下就切，不需要确认。
+      window.__received.length = 0;
+      accessItems[0].click();
+      assert('点普通档直接发 setPermission',
+        window.__received.some(function (m) { return m.type === 'setPermission' && m.value === 'read-only'; }),
+        JSON.stringify(window.__received));
+      assert('发完就收起来了', !visible(accessPop));
+
+      // 完全权限：必须先过确认门 —— 这一档点了就不再逐条问用户，点错的代价太大。
+      window.__received.length = 0;
+      accessBtn.click();
+      var dangerItem = null;
+      for (var ai = 0; ai < accessItems.length; ai += 1) {
+        if (accessItems[ai].dataset.value === 'danger-full-access') dangerItem = accessItems[ai];
+      }
+      assert('找得到「完全权限」那一项', !!dangerItem);
+      dangerItem.click();
+      assert('完全权限不会直接切（一条消息都没发）', window.__received.length === 0,
+        JSON.stringify(window.__received));
+      assert('确认框顶掉了清单', visible(accessConfirm) && !visible(accessList));
+      assert('确认框说清了后果（不再逐条问你）',
+        (document.getElementById('access-confirm-body').textContent || '').indexOf('不再逐条') >= 0,
+        document.getElementById('access-confirm-body').textContent);
+      assert('确认按钮写的是「启用完全权限」',
+        document.getElementById('access-confirm-accept').textContent.indexOf('启用完全权限') >= 0,
+        document.getElementById('access-confirm-accept').textContent);
+      document.getElementById('access-confirm-cancel').click();
+      assert('点「算了」回到清单，仍然没发消息',
+        window.__received.length === 0 && visible(accessList) && !visible(accessConfirm));
+      dangerItem.click();
+      document.getElementById('access-confirm-accept').click();
+      assert('确认之后才真的发 setPermission',
+        window.__received.some(function (m) { return m.type === 'setPermission' && m.value === 'danger-full-access'; }),
+        JSON.stringify(window.__received));
+      assert('确认后小卡片收起', !visible(accessPop));
+
+      // Esc 与点外面：这两种肌肉记忆都得管用。
+      accessBtn.click();
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      assert('Esc 能关掉小卡片', !visible(accessPop));
+      accessBtn.click();
+      document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      assert('点别处也能关掉', !visible(accessPop));
+
+      // 切不了的时候（旧门 / 内核没装权限预设）：按钮灰掉 + 说人话，
+      // 而且那句话挂在悬浮提示上（顶栏那行放不下长文，完整原因走对话流）。
+      window.postMessage({ type: 'permissionState', unavailable: {
+        state: 'old-door',
+        text: '这里切不了权限（内核里的门太旧）',
+        detail: '权限选择需要门插件 dsh-acp-door 0.0.12 以上；把内核那个档里的门升级一下。',
+      } }, '*');
+      await new Promise(function (resolve) { setTimeout(resolve, 200); });
+      assert('切不了时按钮灰掉', accessBtn.disabled === true);
+      assert('按钮上写了原因（几个字）', /门太旧/.test(accessBtn.textContent || ''), accessBtn.textContent);
+      assert('完整原因挂在悬浮提示里', /0\.0\.12/.test(accessBtn.title || ''), accessBtn.title);
+      window.__received.length = 0;
+      accessBtn.click();
+      assert('灰掉之后点它也不弹清单', !visible(accessPop));
     }
 
     // ── 8. 交互：发送 / 换行 / 空输入 / 忙碌时不许发 ──

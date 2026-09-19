@@ -377,6 +377,19 @@ settings['dshPanel.selfStartPort'] = PORT;
   }
   const waited = ((Date.now() - started) / 1000).toFixed(0);
 
+  // 权限那一路是**会话建好之后紧接着**读的（同一毫秒级），而上面那个循环是
+  // 一看到「已建会话」就跳出、当场把日志读成了字符串 —— 差几毫秒就会读到
+  // 「还没有那一行」的旧快照，于是断言误报（真踩过：13 项里红这一项，
+  // 而日志文件里其实有那行）。所以这里再等一小会儿，专门等它出现；
+  // 两样都没有才是真的没结果（那正是要报出来的情况）。
+  const accessStart = Date.now();
+  while (Date.now() - accessStart < 10000) {
+    if (/当前权限：|权限预设读不到（/.test(panelText)) break;
+    sleep(500);
+    const file = findPanelLog(userData);
+    if (file) panelText = fs.readFileSync(file, 'utf8');
+  }
+
   console.log('');
   check('隔离窗口真的起来了（出现新的 VS Code 进程）', newPids.length > 0, `新 PID ${newPids.join(', ') || '无'}`);
 
@@ -403,6 +416,21 @@ settings['dshPanel.selfStartPort'] = PORT;
   check('真的连上了 DSH（ACP 握手完成）', /握手完成/.test(panelText), '');
   check('真的建出了会话（端到端成功）', /已建会话/.test(panelText),
     panelText ? `等了 ${waited} 秒` : `等了 ${waited} 秒还没读到扩展日志`);
+
+  // 权限选择器：界面那一半在 tools/uitest.js 里用真浏览器点过了，这里要证明
+  // **真窗口里那份清单也是从内核读回来的**（门 → 内核 permissionPresets → 面板）。
+  // 连的是旧门（桌面端那个档里的门还没升到 0.0.12）时，这条路本来就该走
+  // 「切不了」那句解释 —— 两种结果都算过，但不许两样都没有。
+  const accessRead = /当前权限：/.test(panelText);
+  const accessUnavailable = /权限预设读不到（/.test(panelText);
+  check('权限那一路有结果（读到清单，或者明确说清为什么切不了）',
+    accessRead || accessUnavailable,
+    accessRead ? '读到了清单' : accessUnavailable ? '走了「切不了」那条解释' : '两样都没有');
+  if (accessRead) {
+    const line = panelText.split('\n').filter((item) => item.includes('当前权限：')).pop() || '';
+    check('读到的那一档是个认识的名字（不是 undefined / 空白）',
+      /当前权限：.+（[\w-]+）/.test(line), line.trim().slice(0, 90));
+  }
 
   // 拉起内核这件事：接入模式下必须**没有**新内核，自启模式下必须有。
   const kernel = ourKernels(beforePids)[0];

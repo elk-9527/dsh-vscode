@@ -47,6 +47,17 @@ import {
 import { DEFAULT_LIST_LIMIT, getSession, listSessions, resolveSessionsRoot } from './sessions.js';
 // 端口判定单独一个纯模块：不这样就得把整个门（要 import 内核）拉起来才能测它。
 import { resolveDoorPort } from './port.js';
+// 权限预设的旁路方法（纯帧工具 + 载荷规整），理由见那个文件开头。
+import {
+  DOOR_PERMISSION_PREFIX,
+  doorPermissionError,
+  doorPermissionMethod,
+  doorPermissionResult,
+  isDoorPermissionRequest,
+  permissionPayload,
+  permissionTarget,
+  settledPermission,
+} from './permission.js';
 
 export const name = 'acp-door';
 
@@ -294,10 +305,14 @@ function gatePrompts(source, state, diag) {
         while ((index = buffer.indexOf('\n')) >= 0) {
           const line = buffer.slice(0, index + 1);
           buffer = buffer.slice(index + 1);
-          // 门自己的方法（历史会话）在这里就地应答、不转发内核；
+          // 门自己的方法（历史会话 / 权限预设）在这里就地应答、不转发内核；
           // 其余帧照旧走闸。
           if (line.includes(DOOR_SESSIONS_PREFIX)) {
             const handled = await handleDoorSessions(line, state, diag);
+            if (handled) continue;
+          }
+          if (line.includes(DOOR_PERMISSION_PREFIX)) {
+            const handled = await handleDoorPermission(line, state, diag);
             if (handled) continue;
           }
           rememberSessionRequest(line, state, diag);
@@ -376,6 +391,125 @@ async function handleDoorSessions(line, state, diag) {
     diag(`旁路应答 ${frame.method}（请求 ${frame.id}）失败：${message}`);
   }
   return true;
+}
+
+/**
+ * 就地应答门自己的权限预设请求（`dsh-door/permission/get|set`）。
+ *
+ * 清单与切换都来自内核的 `@deepseek-ai/dsh-permission-presets` 服务
+ * （桌面端那个「权限」选择器用的同一份），门只是搬一下：
+ *
+ *   - `get` → 读会话的 `permissions` 投影（`selectFor(permissionState(session))`），
+ *     返回 `{currentValue, options, defaultPreset}`；
+ *   - `set` → 先 `resolve()` 校验（不认识的预设名会抛，原话转给客户端），
+ *     再 `set(session, value)`，然后**重新读一次**给客户端。
+ *
+ * 三种失败都要说清楚（客户端照着提示走，而不是看一句英文异常）：
+ *   - 这个档没装权限预设服务 → -32601「这个内核没有权限预设」；
+ *   - 会话 id 不存在（比如客户端记的是别的内核的会话）→ -32000；
+ *   - 会话的投影还没注册（服务在、但投影没挂）→ 原样转内核的话。
+ *
+ * @param {string} line 原始 NDJSON 行。
+ * @param {object} state 本连接共享状态（要 state.respond / state.permissionHandler）。
+ * @param {(message: string) => void} diag
+ * @returns {Promise<boolean>} true = 这帧是门的方法、已应答，调用方不要再转发。
+ */
+async function handleDoorPermission(line, state, diag) {
+  const frame = parseLine(line);
+  if (!isDoorPermissionRequest(frame)) return false;
+  const method = doorPermissionMethod(frame);
+  if (method !== 'get' && method !== 'set') {
+    state.respond(doorPermissionError(frame.id, -32601, `门不认识权限方法 ${frame.method}`));
+    return true;
+  }
+  const handler = state.permissionHandler;
+  if (!handler) {
+    state.respond(
+      doorPermissionError(
+        frame.id,
+        -32601,
+        '这个内核里没有权限预设服务（@deepseek-ai/dsh-permission-presets 没挂），' +
+          '所以这里切不了权限 —— 桌面端那个选择器在同样的内核里也不会有。',
+      ),
+    );
+    return true;
+  }
+  const { sessionId, value } = permissionTarget(method, frame.params);
+  if (!sessionId) {
+    state.respond(doorPermissionError(frame.id, -32602, '权限方法要带会话 id（params.id）'));
+    return true;
+  }
+  if (method === 'set' && !value) {
+    state.respond(
+      doorPermissionError(frame.id, -32602, '切权限要带目标预设名（params.value）'),
+    );
+    return true;
+  }
+  try {
+    const result =
+      method === 'get' ? await handler.get(sessionId) : await handler.set(sessionId, value);
+    state.respond(doorPermissionResult(frame.id, result));
+    diag(
+      method === 'get'
+        ? `旁路应答权限查询（会话 ${sessionId}）：${result.currentValue}`
+        : `旁路应答权限切换（会话 ${sessionId} → ${value}）：现在=${result.currentValue}`,
+    );
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    state.respond(doorPermissionError(frame.id, -32000, message));
+    diag(`旁路应答权限 ${method}（会话 ${sessionId}）失败：${message}`);
+  }
+  return true;
+}
+
+/**
+ * 把内核的权限预设服务包装成门要的两个动作。
+ *
+ * `service` 拿不到（那个档没挂权限预设）时返回 undefined —— 门照常工作，
+ * 只是客户端会收到「这个内核没有权限预设」的明确答复，而不是整扇门不可用。
+ *
+ * @param {object} ctx 内核上下文（要 `sessions` 与 `permissionPresets`）。
+ * @param {(message: string) => void} diag
+ * @returns {{get: (id: string) => Promise<object>, set: (id: string, value: string) => Promise<object>}|undefined}
+ */
+function makePermissionHandler(ctx, diag) {
+  const service = ctx.permissionPresets;
+  if (!service || typeof service.selectFor !== 'function' || typeof service.set !== 'function') {
+    diag('这个内核没有 permissionPresets 服务，权限方法将明确报「不支持」');
+    return undefined;
+  }
+  /** 读一次：会话的权限投影 → 客户端要的载荷。 */
+  const read = (session) =>
+    permissionPayload({
+      currentValue: service.current(session),
+      options: service.selectFor(service.permissionState(session)).options,
+      defaultPreset: service.defaultPreset,
+    });
+  /** 按 id 找活着的会话；找不到就说清楚是什么情况。 */
+  const sessionOf = (id) => {
+    const session = ctx.sessions?.get?.(id);
+    if (!session) {
+      throw new Error(
+        `这个内核里没有会话 ${id}（可能它是别的内核建的，或者已经被关掉了）`,
+      );
+    }
+    return session;
+  };
+  return {
+    async get(id) {
+      return read(sessionOf(id));
+    },
+    async set(id, value) {
+      const session = sessionOf(id);
+      // resolve 先校验：名字不对时内核的原话最准（会列出所有可用预设名）。
+      service.resolve(value);
+      service.set(session, value);
+      const payload = read(session);
+      // 投影折完之前读到的可能还是旧值 —— 以刚切的那个为准（见 settledPermission）。
+      payload.currentValue = settledPermission(payload.currentValue, value);
+      return payload;
+    },
+  };
 }
 
 /**
@@ -470,6 +604,24 @@ export function apply(ctx, config = {}) {
     },
   };
 
+  /**
+   * 权限预设（`dsh-door/permission/get|set`）。
+   *
+   * **刻意不是硬依赖**（没写进模块顶部的 inject）：`permissionPresets` 是
+   * `@deepseek-ai/dsh-base` 那一层挂的，而门要能装进任何 profile ——
+   * 写成硬依赖的话，缺这个服务的档**整扇门都不会起来**（面板连内核都接不上，
+   * 只为了少一个下拉框）。所以用 `ctx.inject([...], cb)` 这种可选的挂法：
+   * 服务在就接上，不在就明确回答「这个内核没有权限预设」。
+   */
+  let permissionHandler;
+  ctx.inject(['permissionPresets'], (pctx) => {
+    permissionHandler = makePermissionHandler(pctx, diag);
+    diag('已接上内核的权限预设服务');
+    return () => {
+      permissionHandler = undefined;
+    };
+  });
+
   // 配置里没点名模型时，内核就不知道该找谁说话：会话照样建得起来，
   // 但**第一个回合直接失败**（实测原文：`agent "…" has no provider/model`）。
   // 这个坑很隐蔽（建会话是成功的、门也开得好好的），而且很容易踩 ——
@@ -531,6 +683,10 @@ export function apply(ctx, config = {}) {
       listPromise: undefined,
       /** 门自己的历史会话方法（见 handleDoorSessions）。 */
       sessionsHandler,
+      /** 门自己的权限预设方法（见 handleDoorPermission）；服务缺席时为 undefined。 */
+      get permissionHandler() {
+        return permissionHandler;
+      },
     };
 
     // 出站方向加一道「补预设清单」的闸，入站方向加一道「压 prompt」的闸。

@@ -301,6 +301,34 @@ class DoorClient extends EventEmitter {
     return this.request('dsh-door/sessions/get', { id });
   }
 
+  /**
+   * 读当前会话的权限预设（**门的旁路方法**，需要门 0.0.12+）。
+   *
+   * 为什么走门而不是 ACP：ACP 只暴露「模型」「推理强度」两个 config option
+   * （`session/set_config_option`），官方说明里写明它「刻意不提供 DSH 专用呈现
+   * 数据与交互式 UI 功能」—— 权限预设选择器正好属于那一类。所以门把内核
+   * `@deepseek-ai/dsh-permission-presets` 的清单与切换原样透出来。
+   * 旧门（0.0.11 及以下）会回 -32601，上层按「门太旧」翻译给用户看。
+   *
+   * @param {string} sessionId
+   * @returns {Promise<{currentValue: string, options: Array<{value: string, name: string, description?: string}>, defaultPreset?: string}>}
+   */
+  permissionGet(sessionId) {
+    return this.request('dsh-door/permission/get', { id: sessionId });
+  }
+
+  /**
+   * 切换当前会话的权限预设（门的旁路方法）。
+   *
+   * @param {string} sessionId
+   * @param {string} value 预设名（`read-only` / `workspace-write` / `auto-approval` /
+   *   `danger-full-access` / …，清单以内核给的为准）。
+   * @returns {Promise<{currentValue: string, options: Array<object>}>} 切完之后的真实状态。
+   */
+  permissionSet(sessionId, value) {
+    return this.request('dsh-door/permission/set', { id: sessionId, value });
+  }
+
   /** 关闭会话。 */
   closeSession(sessionId) {
     return this.request('session/close', { sessionId });
