@@ -1092,7 +1092,8 @@ class DshPanelView {
       this.permissionUnavailable = shaped;
       this.post({ type: 'permissionState', unavailable: shaped });
       this.log('info', `权限预设读不到（${shaped.state}）：${this.errText(error)}`);
-      // 顶栏那个按钮只有几个字（「切不了（门太旧）」），说清楚为什么得靠这里。
+      // 顶栏那个按钮只写「切不了」三个字（那一格很窄，写全就被切一半），
+      // 说清楚为什么得靠这里。
       // 每种原因只说一次：接的是桌面端那个内核时，每次建会话都会走到这儿。
       if (this.permissionNotice !== shaped.state) {
         this.permissionNotice = shaped.state;

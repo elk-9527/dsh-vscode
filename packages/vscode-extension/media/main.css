@@ -139,6 +139,86 @@ body {
   flex: 1 1 auto;
 }
 
+/*
+ * ── 顶栏配置行怎么分宽度（2026-09-19 按用户反馈定的）─────────────
+ *
+ * 用户报的问题：「文字被挤在一起了，模型的占地有点大，其他两点有点小」。
+ * 量出来的原因：三个字段都是 `flex: 1 1 auto`，而**基准宽度取的是内容宽度** ——
+ * 模型那个 <select> 的基准是它最长的选项（`DeepSeek-V4-Flash-Vision-Exp` 那种
+ * 名字），于是它一个人把行吃满，模式和权限被压到 40~60px，"工作区内修改"直接
+ * 被切掉（实测 320px 时权限按钮只有 53px）。
+ *
+ * 现在按「够用就好」分：`flex-basis: 0` + 比例 4:3:3（模型是大头但不独占），
+ * 每个再给一个**下限**（放得下两个汉字 + 标签）。下限之和（96+88+108=292）
+ * 在 320px 宽的面板里放得下，连标签和间隔一起也还有余量。
+ *
+ * 再窄（<320px）就 `flex-wrap` 换行 —— 宁可多一行，也不把字挤没：
+ * 用量条（`.meter`）排在最后，最窄的时候它自己掉到第二行，正合适。
+ */
+#config-row {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+/*
+ * ⚠️ 下面这几条必须写成 `#config-row > #xxx-field`（两个 id）：只写 `#xxx-field`
+ * 的话会被上面那条 `.field`/`#config-row > .field` 的简写盖掉（实测踩过：
+ * 量出来宽度跟面板宽度完全无关，三个字段各按内容宽度硬挤，窄的时候直接溢出）。
+ */
+#config-row > .field {
+  min-width: 0;
+}
+
+/*
+ * 下限是「**看着不挤**」的宽度，不是「勉强放得下」的宽度：
+ * 96/88/108 那种刚好塞进 320px 的下限，在用量条也在的时候（四个挤一行）
+ * 会把权限按钮压到 73px —— 字被截了，用户报的就是这个（实测）。
+ * 所以下限给足（116+96+108=320），**装不下就让用量条自己换行**：
+ * 宁可顶栏多一行 12px 的小条，也不把字挤掉。
+ */
+#config-row > #model-field {
+  flex: 7 1 0;
+  min-width: 116px;
+}
+
+#config-row > #preset-field {
+  flex: 6 1 0;
+  min-width: 96px;
+}
+
+#config-row > #access-field {
+  flex: 6 1 0;
+  min-width: 108px;
+}
+
+/*
+ * 三个控件本身都要**能被压窄**：<select> 和 <button> 的固有宽度是"最长那条
+ * 文字"，不给 `width: 0` 的话，就算外面写了 min-width 也压不下去 —— 换行判断
+ * 会按那个固有宽度算，于是 320px 的面板里「权限」被单独挤到第二行（实测）。
+ * 给 0 + `flex: 1 1 auto`（见 .select/.access-btn）之后，宽度完全由格子的宽度决定，
+ * 太长的模型名就用省略号收尾。
+ */
+#config-row > .field > .select,
+#config-row > #access-field > .access-btn {
+  width: 0;
+}
+
+#config-row > .meter {
+  flex: 0 1 auto;
+  min-width: 64px;
+}
+
+/*
+ * 特别窄（<360px，侧边栏拖到很小时）：把「模型 / 模式 / 权限」这三个标签收起来，
+ * 省下的 ~80px 全给控件 —— 控件里的值本身就说明了自己是什么
+ * （"标准模式"/"工作区内修改"/模型名），比三个字被挤成省略号好读。
+ */
+@media (max-width: 360px) {
+  #config-row .field-label {
+    display: none;
+  }
+}
+
 .field-label {
   color: var(--vscode-descriptionForeground);
   font-size: var(--dsh-fs-s);
@@ -155,6 +235,8 @@ body {
   padding: 2px 4px;
   font-family: inherit;
   font-size: var(--dsh-fs-s);
+  /* 模型 id 经常比这一格长：宁可省略号，也别把字切一半还看不出来。 */
+  text-overflow: ellipsis;
 }
 
 .select:focus {

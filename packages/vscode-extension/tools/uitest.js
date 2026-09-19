@@ -146,6 +146,50 @@ function assertionsScript(scene) {
         presetSelect.scrollWidth + '>' + presetSelect.clientWidth);
     }
 
+    // ── 1.6 顶栏配置行的宽度怎么分 ─────────────────────
+    // 用户报过：「文字被挤在一起了，模型的占地有点大，其他两点有点小」。
+    // 起因是三个格子都用「flex: 1 1 auto」（基准取内容宽度），模型那个 <select>
+    // 的基准是它最长的选项，于是它把整行吃满、另两个被压到 40~60px 并截字。
+    // 现在按 7:6:6 分并各自有下限 —— 这几条断言就是钉住这件事。
+    // 只在三个控件都在的场景（access）里量，别的场景凑不齐。
+    if (EXPECT.accessScene) {
+      var modelField = document.getElementById('model-field');
+      var presetFieldEl = document.getElementById('preset-field');
+      var accessFieldEl = document.getElementById('access-field');
+      var accessBtn = document.getElementById('access-btn');
+      var widths = {
+        model: Math.round(modelField.getBoundingClientRect().width),
+        preset: Math.round(presetFieldEl.getBoundingClientRect().width),
+        access: Math.round(accessFieldEl.getBoundingClientRect().width),
+      };
+      var detail = '模型 ' + widths.model + ' / 模式 ' + widths.preset + ' / 权限 ' + widths.access;
+      assert('三个控件都分到了足够的宽度（各 ≥100px）',
+        widths.model >= 100 && widths.preset >= 100 && widths.access >= 100, detail);
+      // 「模型的占地有点大」的反面：它是最宽的一个，但**不能**宽出一大截。
+      assert('模型那一格没有把整行吃满（不超过模式那格的 1.4 倍）',
+        widths.model <= widths.preset * 1.4, detail);
+      assert('模式下拉里的字没被切掉',
+        presetSelect.scrollWidth <= presetSelect.clientWidth + 2,
+        presetSelect.scrollWidth + '>' + presetSelect.clientWidth);
+      assert('权限按钮里的字没被切掉（"工作区内修改"要能整个显示）',
+        accessBtn.scrollWidth <= accessBtn.clientWidth + 2,
+        accessBtn.scrollWidth + '>' + accessBtn.clientWidth + ' 宽 ' + widths.access);
+      assert('权限那一格的宽度够放标签 + 值', widths.access >= 108, widths.access);
+      // 用量条是第四个东西：装不下时它应该**换行**，而不是把前面三个挤扁。
+      var usageVisible = meterText.length > 0;
+      assert('配置行没有横向溢出（挤不下就换行，不许撑破面板）',
+        configRow.scrollWidth <= configRow.clientWidth + 2,
+        configRow.scrollWidth + '>' + configRow.clientWidth);
+      if (usageVisible) {
+        var meterTop = Math.round(meter.getBoundingClientRect().top);
+        var accessTop = Math.round(accessFieldEl.getBoundingClientRect().top);
+        // 两种都算合格：它自己换到第二行，或者跟控件同一行但控件依然够宽。
+        assert('用量条没把三个控件挤扁（要么换行，要么控件还是宽的）',
+          meterTop > accessTop || widths.access >= 116,
+          'meter.top=' + meterTop + ' access.top=' + accessTop + ' access 宽 ' + widths.access);
+      }
+    }
+
     // ── 2. 消息 ──────────────────────────────────────
     var users = document.querySelectorAll('.msg-user .bubble');
     var assistants = document.querySelectorAll('.msg-assistant .body');
@@ -764,7 +808,14 @@ function assertionsScript(scene) {
       } }, '*');
       await new Promise(function (resolve) { setTimeout(resolve, 200); });
       assert('切不了时按钮灰掉', accessBtn.disabled === true);
-      assert('按钮上写了原因（几个字）', /门太旧/.test(accessBtn.textContent || ''), accessBtn.textContent);
+      // 按钮上只写结论（「切不了」）—— 顶栏那一格很窄，写全就被切一半；
+      // 理由挂 data-why + 悬浮提示，完整说法在对话流里。
+      assert('按钮上只写结论「切不了」（不塞长句子）',
+        (accessBtn.textContent || '').trim() === '切不了', accessBtn.textContent);
+      assert('按钮记着是哪一种切不了', accessBtn.dataset.why === '门太旧', accessBtn.dataset.why);
+      assert('切不了时按钮没有被切字',
+        accessBtn.scrollWidth <= accessBtn.clientWidth + 2,
+        accessBtn.scrollWidth + '>' + accessBtn.clientWidth);
       assert('完整原因挂在悬浮提示里', /0\.0\.12/.test(accessBtn.title || ''), accessBtn.title);
       window.__received.length = 0;
       accessBtn.click();

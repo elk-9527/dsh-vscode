@@ -304,6 +304,9 @@ const SCENARIOS = {
         { message: configMessage },
         { message: presetsMessage },
         { message: permissionStateMessage },
+        // 顺便把用量条也点上：这是配置行**最挤**的一种组合（模型 + 模式 + 权限 + 用量
+        // 四个都在），宽度怎么分就看它了（见 media/main.css 里 #config-row 那段）。
+        { message: { type: 'usage', used: 12480, size: 262144 } },
       ],
     };
   },

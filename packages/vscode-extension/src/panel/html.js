@@ -57,7 +57,7 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
       </button>
     </div>
     <div class="bar-row" id="config-row" hidden>
-      <label class="field">
+      <label class="field" id="model-field">
         <span class="field-label">模型</span>
         <select id="model-select" class="select"></select>
       </label>

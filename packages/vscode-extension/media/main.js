@@ -1088,7 +1088,10 @@
       state.hasPermission = true;
       closeAccessPop();
       const why = shortAccessReason(message.unavailable.state);
-      el.accessBtn.textContent = `切不了（${why}）`;
+      // 顶栏这一格很窄（旁边还有模型、模式、用量），写「切不了（门太旧）」会被
+      // 切掉一半 —— 理由放在悬浮提示和对话流里（那里一个字不少），这里只留结论。
+      el.accessBtn.textContent = '切不了';
+      el.accessBtn.dataset.why = why;
       el.accessBtn.title = accessTitle(message.unavailable);
       el.accessBtn.disabled = true;
       el.accessField.hidden = false;
@@ -1121,7 +1124,12 @@
     syncConfigRow();
   }
 
-  /** 切不了的原因，压缩成几个字（完整说明在悬浮提示与对话流里）。 */
+  /**
+   * 切不了的原因，压缩成几个字。
+   *
+   * 注意：**不再写在按钮上**（那一格只有 4 个字的地方，写了就被切一半），
+   * 而是挂在 `data-why` 上给测试看，人看悬浮提示与对话流里的完整说法。
+   */
   function shortAccessReason(kind) {
     if (kind === 'old-door') return '门太旧';
     if (kind === 'no-service') return '内核没装';
