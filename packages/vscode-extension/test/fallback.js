@@ -229,7 +229,37 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
   check('回合正常结束', after.some((item) => item.type === 'done'));
   check('没有错误', !after.some((item) => item.type === 'error'), JSON.stringify(after.filter((i) => i.type === 'error')));
 
-  section('3. 收摊必须杀干净（Windows 上最容易漏）');
+  section('3. 自己拉起来的那个内核要能复用，不能每连一次就多起一个');
+  {
+    // 目标里写的是"内核由插件自己按需拉起**并可复用**"。复用有两种：
+    //   ① 桌面端已经开着 → 直接接它的（vscode-check 的接入模式那 11 项验的就是这条）；
+    //   ② 自己拉起来的那个还在跑 → 断线重连时**接着用它**，别再拉一个。
+    // ② 以前没有测试盯着，而它最容易坏的地方是「重连时又 spawn 一个」——
+    // 那种 bug 在界面上看不出来（照样能用），只会在进程列表里越堆越多。
+    const pidBefore = panel.background && panel.background.child && panel.background.child.pid;
+    const backgroundBefore = panel.background;
+
+    // 掐断客户端连接，等价于内核那边网络抖了一下 / DSH 重启了。
+    panel.client.close();
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    check('断线后会话被放掉了（下次发送会重连）', !panel.session, String(panel.session));
+    check('断线不会把自启的那个内核收掉（留着复用）', Boolean(panel.background), 'background 没了');
+
+    const resumeIndex = view.messages.length;
+    await panel.onWebviewMessage({ type: 'send', text: '断线重连之后，回一句话确认你还活着。' });
+    const resumeMessages = view.messages.slice(resumeIndex).map((item) => item.message);
+
+    const pidAfter = panel.background && panel.background.child && panel.background.child.pid;
+    check('重连时复用了同一个内核（没有另起一个）',
+      pidBefore === pidAfter && panel.background === backgroundBefore,
+      `pid ${pidBefore} → ${pidAfter}`);
+    check('重连后照样能干活', resumeMessages.some((item) => item.type === 'done'),
+      JSON.stringify(resumeMessages.map((i) => i.type)));
+    check('重连过程没有报错', !resumeMessages.some((item) => item.type === 'error'),
+      JSON.stringify(resumeMessages.filter((i) => i.type === 'error').map((i) => i.message)));
+  }
+
+  section('4. 收摊必须杀干净（Windows 上最容易漏）');
   const childPid = panel.background && panel.background.child && panel.background.child.pid;
   console.log(`     后台 DSH 的 pid：${childPid}`);
   panel.dispose();
