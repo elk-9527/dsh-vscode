@@ -24,6 +24,7 @@ const EXTS = new Set(['.js', '.mjs', '.cjs', '.css', '.json', '.md', '.yml', '.y
 const mixed = [];
 const crlfOnly = [];
 const lfOnly = [];
+const bom = [];
 let total = 0;
 
 function walk(dir) {
@@ -37,6 +38,18 @@ function walk(dir) {
     if (!EXTS.has(path.extname(entry.name))) continue;
     const buf = fs.readFileSync(p);
     if (buf.includes(0)) continue;
+    /*
+     * BOM 也在这里查（2026-09-19 踩到的真事故）：
+     * 用 PowerShell 的 `Set-Content -Encoding UTF8` 改过的 JSON 会**带上 UTF-8 BOM**
+     * （EF BB BF），而 `JSON.parse` 不认它 → 内核加载插件时直接
+     * `SyntaxError: Unexpected token '﻿'`，整个 profile 的插件状态都崩。
+     * 当时就是这么把门的新版本装进用户档的：包里的 package.json 带 BOM，
+     * 一装上去 `dsh plugin` 就报错。所以这个工具顺手把它焊住 ——
+     * 改文件请用编辑工具，别用 PowerShell 写。
+     */
+    if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) {
+      bom.push(path.relative(REPO, p));
+    }
     const text = buf.toString('utf8');
     const crlf = (text.match(/\r\n/g) || []).length;
     const lf = (text.match(/(?<!\r)\n/g) || []).length;
@@ -52,12 +65,17 @@ for (const r of roots) if (fs.existsSync(r)) walk(r);
 
 console.log(`看了 ${total} 个文本文件（仓库根：${REPO}）`);
 console.log(`  LF：${lfOnly.length}   CRLF：${crlfOnly.length}   **混着两种：${mixed.length}**`);
+console.log(`  **带 UTF-8 BOM：${bom.length}**（BOM 会让 JSON.parse 直接崩，装机时会炸掉整个档）`);
 if (mixed.length) {
   console.log('\n混着两种换行的文件（这几个要修）：');
   for (const m of mixed) console.log('  ' + m);
+}
+if (bom.length) {
+  console.log('\n带 BOM 的文件（这几个要修：用编辑工具重写，别用 PowerShell 的 Set-Content）：');
+  for (const b of bom) console.log('  ' + b);
 }
 if (crlfOnly.length && crlfOnly.length <= 12) {
   console.log('\n纯 CRLF 的文件：');
   for (const c of crlfOnly) console.log('  ' + c);
 }
-process.exit(mixed.length ? 1 : 0);
+process.exit(mixed.length || bom.length ? 1 : 0);

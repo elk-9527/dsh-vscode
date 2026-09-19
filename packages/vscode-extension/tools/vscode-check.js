@@ -52,9 +52,13 @@ const ROOT = path.resolve(__dirname, '..');
  *
  *   这几个环境变量会被写成**隔离窗口自己的 settings.json**（隔离的 user-data-dir
  *   里的那一份），所以只影响这次自检，碰不到你的设置。
- *   为什么需要 `--patch`：内核启动时门监听哪个端口，是**档里**配的；
- *   面板探测的是 `dshPanel.port`。两者不一致时面板会等不到门（这正是
- *   "改了端口却忘了改门插件"那个坑），所以自检要自己把两边对齐。
+ *
+ *   端口怎么对齐（2026-09-19 变了，以前必须靠 `--patch`）：
+ *   现在面板启动内核时会把它要连的端口写进环境变量 `DSH_ACP_DOOR_PORT`，
+ *   门优先读它（见 dsh-door/lib/port.js），所以**自检不用再自己糊 patch**：
+ *   设了 DSH_PANEL_CHECK_PORT，面板和门就都在那个端口上。
+ *   档里的门如果是旧版（不认这个变量），面板会两个端口都盯，照样能接上 ——
+ *   那条兼容路也在这里被真实走了一遍。
  */
 const PORT = Number(process.env.DSH_PANEL_CHECK_PORT || 47821);
 const CHECK_PROFILE = process.env.DSH_PANEL_CHECK_PROFILE || '';
@@ -326,6 +330,9 @@ async function main() {
   // 你的设置一个字都不会动。
   if (CHECK_PROFILE || CHECK_DSH || PORT !== 47821) {
     const settings = { 'dshPanel.port': PORT };
+// 自启的内核把门钉在"面板自己的端口"上；自检里让它和 PORT 一致，
+// 于是"接入"和"自启"两条路都落在同一个端口上，端口空着就走自启。
+settings['dshPanel.selfStartPort'] = PORT;
     if (CHECK_PROFILE) settings['dshPanel.fallbackProfile'] = CHECK_PROFILE;
     if (CHECK_DSH) settings['dshPanel.dshCommand'] = CHECK_DSH;
     const settingsDir = path.join(userData, 'User');
@@ -381,7 +388,7 @@ async function main() {
   // 命令清单从清单文件里读，别在这里再抄一份 —— 抄一份就会漏掉后加的
   // （「打开面板」就是这么被漏掉的：这正是早上"找不到入口"的那个坑）。
   const declaredCommands = require('../package.json').contributes.commands.map((item) => item.command);
-  check(`六个命令都注册上了（${declaredCommands.length} 个）`,
+  check(`清单里的命令都注册上了（${declaredCommands.length} 个）`,
     declaredCommands.every((name) => exthostText.includes(name)),
     declaredCommands.filter((name) => !exthostText.includes(name)).join(', '));
 

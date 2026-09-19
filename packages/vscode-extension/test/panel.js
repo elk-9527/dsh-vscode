@@ -27,6 +27,10 @@ const configValues = {
   dshCommand: 'dsh',
   provider: '',
   model: '',
+  // 这个套件里一律"面板一关就收内核"（老行为），好让收摊类断言简单直接。
+  // 宽限期那条路（视图销毁不杀内核、重开面板继续用）在 test/fallback.js §6
+  // 用真进程验。
+  kernelIdleMinutes: 0,
   cwd: path.resolve(__dirname, '..', '..', '..', 'spike', 'scratch'),
 };
 

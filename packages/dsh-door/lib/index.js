@@ -45,6 +45,8 @@ import {
   waitForMount,
 } from './frames.js';
 import { DEFAULT_LIST_LIMIT, getSession, listSessions, resolveSessionsRoot } from './sessions.js';
+// 端口判定单独一个纯模块：不这样就得把整个门（要 import 内核）拉起来才能测它。
+import { resolveDoorPort } from './port.js';
 
 export const name = 'acp-door';
 
@@ -61,7 +63,7 @@ export const name = 'acp-door';
 export const inject = ['agents', 'llm', 'sessionPersistence', 'sessions', 'agentPresets'];
 
 const DEFAULT_HOST = '127.0.0.1';
-const DEFAULT_PORT = 47821;
+
 
 /** 新会话默认挂载的 agent preset（客户端没点名时用它）。 */
 const DEFAULT_PRESET = 'standard';
@@ -421,6 +423,11 @@ function isPresetLocked(error) {
  * @param config - 见 cordis.patch.yml。
  * @param config.host - 监听地址，默认 127.0.0.1（不要改成 0.0.0.0）。
  * @param config.port - 监听端口，默认 47821；传 0 由系统挑一个空闲端口。
+ *   优先级：环境变量 `DSH_ACP_DOOR_PORT` > 这里的配置 > 默认值。
+ *   为什么要环境变量这一层（2026-09-19）：端口原来只写在档的配置里，
+ *   面板只能"希望"它跟设置里那个数一致 —— 不一致就是"内核起来了但门没开在
+ *   我等的地方"，用户对着「正在启动…」干等两分钟。现在拉内核的那一方
+ *   （VS Code 面板）可以在启动时把它钉死，端口从此归**用它的人**说了算。
  * @param config.provider - 新会话初始模型的服务商。
  * @param config.model - 新会话初始模型名。
  * @param config.preset - 新会话挂载的 agent preset，默认 standard。见
@@ -435,7 +442,7 @@ function isPresetLocked(error) {
  */
 export function apply(ctx, config = {}) {
   const host = config.host ?? DEFAULT_HOST;
-  const port = config.port ?? DEFAULT_PORT;
+  const port = resolveDoorPort(config, process.env);
   const { provider, model } = config;
   const preset =
     typeof config.preset === 'string' && config.preset ? config.preset : DEFAULT_PRESET;

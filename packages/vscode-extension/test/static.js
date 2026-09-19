@@ -518,6 +518,92 @@ check(
     fs.existsSync(logTool) && /DSH Panel\.log/.test(fs.readFileSync(logTool, 'utf8')));
 }
 
+{
+  /*
+   * 内核归谁、端口归谁（2026-09-19 的结构性修复，见 kernel-manager.js 开头）。
+   *
+   * 两条规矩，一条都不能回退：
+   * ① **视图销毁 ≠ 内核死亡**：视图只是使用者，销毁只释放引用；只有宽限到期、
+   *    窗口关闭、用户显式停 才真收。旧代码在 dispose 里 killTree，于是折叠侧边栏、
+   *    拖面板、Reload Window 都变成一次"杀内核 + 重连"。
+   * ② **端口归起内核的人定**：面板把 selfStartPort 写进环境变量
+   *    DSH_ACP_DOOR_PORT，门优先读它；面板自启的内核不再去抢桌面端那个 47821。
+   *    这个变量名在扩展和门两边各写了一次，必须逐字一致 —— 就是这条断言焊的。
+   */
+  const manager = read('src/panel/kernel-manager.js');
+  const viewSource = read('src/panel/view.js');
+  const extensionFile = read('src/extension.js');
+  const doorPort = read('../dsh-door/lib/port.js');
+  const doorIndex = read('../dsh-door/lib/index.js');
+
+  check('内核归属：有一个专门管"谁在用、什么时候收"的模块',
+    /class KernelManager/.test(manager) && /DEFAULT_IDLE_MS/.test(manager));
+  check('内核归属：视图销毁只释放引用，不杀进程',
+    /this\.kernels\.release\(this\)/.test(viewSource) &&
+      !/this\.background\.dispose\(\)[\s\S]{0,80}\n  \}/.test(viewSource.slice(viewSource.indexOf('  dispose() {'))),
+    'dispose() 里还看得见 background.dispose()');
+  check('内核归属：宽限期来自设置（没设也有默认）',
+    /kernelIdleMinutes/.test(viewSource) && /setIdleMs\(/.test(manager));
+  check('内核归属：窗口关闭时收干净（deactivate）',
+    /function deactivate\(\)[\s\S]{0,400}disposeAll\(/.test(extensionFile));
+  check('内核归属：有"停掉后台内核"这条命令（用户能手动确认没留下进程）',
+    /dshPanel\.stopKernel/.test(extensionFile) && /dshPanel\.stopKernel/.test(read('package.json')));
+
+  const manifestPorts = JSON.parse(read('package.json')).contributes.configuration.properties;
+  check('端口归谁：新增 dshPanel.selfStartPort，默认不是桌面端那个 47821',
+    Number(manifestPorts['dshPanel.selfStartPort'].default) === 47831,
+    String(manifestPorts['dshPanel.selfStartPort'] && manifestPorts['dshPanel.selfStartPort'].default));
+  check('端口归谁：面板起内核时把端口钉进环境变量',
+    /DSH_ACP_DOOR_PORT/.test(read('src/door/locate.js')) && /port: cfg\.selfStartPort/.test(viewSource));
+  check('端口归谁：门也认这个环境变量（两边名字逐字一致）',
+    /DSH_ACP_DOOR_PORT/.test(doorPort) && /resolveDoorPort/.test(doorIndex));
+  check('端口归谁：门里的判定顺序是 环境变量 > 档配置 > 默认',
+    /env\.DSH_ACP_DOOR_PORT[\s\S]{0,200}config\.port[\s\S]{0,120}DEFAULT_PORT/.test(doorPort));
+  check('端口归谁：旧版门（不认环境变量）时也接得上 —— 两个端口都盯',
+    /waitForFallbackDoor\([\s\S]{0,200}\[cfg\.selfStartPort, cfg\.port\]/.test(viewSource));
+
+  const soak = path.join(ROOT, 'tools', 'soak.cjs');
+  check('有个"连着干活十几分钟"的耐力测试（起得来但活不长这类毛病就靠它）',
+    fs.existsSync(soak) && /turn-every/.test(fs.readFileSync(soak, 'utf8')));
+  check('真窗口自检能多盯一段时间（DSH_PANEL_CHECK_LINGER）',
+    /DSH_PANEL_CHECK_LINGER/.test(read('tools/vscode-check.js')));
+}
+
+{
+  /*
+   * 装机文件里不许有 UTF-8 BOM（2026-09-19 的事故，真炸过）。
+   *
+   * 我用 PowerShell 的 `Set-Content -Encoding UTF8` 改了门包的 package.json，
+   * 它悄悄在前面加了 EF BB BF。`npm pack` 把这个 BOM 打进 tgz，装进用户档之后
+   * 内核加载插件时 `JSON.parse` 直接抛 `SyntaxError: Unexpected token '﻿'` ——
+   * `dsh plugin` 从此每次都崩，等于**我把用户那个档搞坏了**。
+   * 这类事故必须有一条断言拦着：扩展自己的包、门包的 package.json 和 lib/ 全查。
+   */
+  const shippedFiles = [];
+  const collect = (dir, relative) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === 'node_modules' || entry.name === 'build' || entry.name === '.git') continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) collect(full, path.join(relative, entry.name));
+      else if (/\.(js|cjs|mjs|json|css|html|yml|md)$/.test(entry.name)) {
+        shippedFiles.push({ full, relative: path.join(relative, entry.name) });
+      }
+    }
+  };
+  collect(path.join(ROOT, 'src'), 'src');
+  collect(path.join(ROOT, 'media'), 'media');
+  shippedFiles.push({ full: path.join(ROOT, 'package.json'), relative: 'package.json' });
+  shippedFiles.push({ full: path.join(ROOT, 'README.md'), relative: 'README.md' });
+  shippedFiles.push({ full: path.join(ROOT, '..', 'dsh-door', 'package.json'), relative: 'dsh-door/package.json' });
+  collect(path.join(ROOT, '..', 'dsh-door', 'lib'), 'dsh-door/lib');
+  const bommed = shippedFiles.filter((item) => {
+    const buf = fs.readFileSync(item.full);
+    return buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf;
+  });
+  check(`装机文件里没有 UTF-8 BOM（查了 ${shippedFiles.length} 个；BOM 会让 JSON.parse 崩掉整个档）`,
+    bommed.length === 0, bommed.map((item) => item.relative).join(', '));
+}
+
 console.log(`\n${'═'.repeat(56)}`);
 if (failed === 0) console.log(`✅ 全部通过：${passed} 项检查`);
 else {

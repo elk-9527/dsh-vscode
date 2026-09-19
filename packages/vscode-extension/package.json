@@ -64,6 +64,10 @@
         "title": "DSH：查看日志"
       },
       {
+        "command": "dshPanel.stopKernel",
+        "title": "DSH：停掉后台内核"
+      },
+      {
         "command": "dshPanel.attachFile",
         "title": "DSH：把当前文件带进对话",
         "icon": "$(file-add)"
@@ -103,6 +107,9 @@
           "command": "dshPanel.open"
         },
         {
+          "command": "dshPanel.stopKernel"
+        },
+        {
           "command": "dshPanel.attachSelection",
           "when": "editorHasSelection"
         }
@@ -119,7 +126,17 @@
         "dshPanel.port": {
           "type": "number",
           "default": 47821,
-          "description": "DSH「门」的端口。面板先看这个端口上有没有现成的门（比如桌面端开着的那个）；没有就按下面的设置自己启动一个。要和门插件 cordis.patch.yml 里的 port 一致。"
+          "description": "面板去连哪个端口的门。默认 47821：桌面端开着的时候那上面就有门，面板会直接接上去（共用同一个内核），不自启。"
+        },
+        "dshPanel.selfStartPort": {
+          "type": "number",
+          "default": 47831,
+          "description": "面板**自己**启动内核时，门开在哪个端口。默认 47831，特意和桌面端的 47821 分开：两个内核抢同一个端口时，抢输的那个门根本不开，你只会看到「正在启动…」一直转。"
+        },
+        "dshPanel.kernelIdleMinutes": {
+          "type": "number",
+          "default": 10,
+          "description": "面板自己启动的内核，在最后一个面板关掉之后还留多久（分钟）。这期间重新打开面板会**继续用同一个内核**，不用重启、不用重连。窗口关闭时无条件收掉。设 0 = 面板一关就收（旧行为）。"
         },
         "dshPanel.autoStart": {
           "type": "boolean",

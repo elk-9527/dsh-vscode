@@ -10,6 +10,7 @@
 
 const vscode = require('vscode');
 const { DshPanelView, VIEW_ID } = require('./panel/view');
+const { kernelManager } = require('./panel/kernel-manager');
 /**
  * 建一个带时间戳的输出通道。
  *
@@ -79,6 +80,18 @@ function activate(context) {
       channel.show(true);
     }),
     /**
+     * 「DSH：停掉后台内核」—— 面板自己拉起来的那个内核是常驻的
+     * （视图关掉后还会留 10 分钟，好让面板重开时接着用）。想立刻收掉、
+     * 或者想确认"到底还有没有我起的进程"，用这条命令。
+     * 它只收**本扩展自己拉起来的**，绝不碰桌面端那个。
+     */
+    vscode.commands.registerCommand('dshPanel.stopKernel', () => {
+      const stopped = kernelManager(log).disposeAll('用户手动停掉');
+      const text = stopped > 0 ? `已停掉 ${stopped} 个后台 DSH 内核。` : '没有本扩展拉起的后台内核。';
+      log('info', text);
+      vscode.window.showInformationMessage(text);
+    }),
+    /**
      * 「DSH：打开面板」—— 把侧边栏面板展开并聚焦。
      *
      * 为什么必须有这个命令：面板挂在活动栏里，得先发现那个图标才能点开。
@@ -145,7 +158,18 @@ function activate(context) {
 }
 
 function deactivate() {
-  // 资源都在 subscriptions 里，VS Code 会替我们调 dispose。
+  /*
+   * 窗口关了：把本扩展拉起来的后台内核全收掉，一个孤儿都不留。
+   *
+   * 注意区别：**视图销毁不收**（那只是释放引用，10 分钟宽限内重开面板还能
+   * 接着用同一个内核），**窗口关闭才收**。见 src/panel/kernel-manager.js。
+   */
+  try {
+    const count = kernelManager().disposeAll('VS Code 窗口关闭');
+    if (count > 0) console.log(`[dsh-panel] 窗口关闭，收掉 ${count} 个后台 DSH 内核`);
+  } catch (error) {
+    console.error(`[dsh-panel] 收后台内核出错：${error && error.message ? error.message : error}`);
+  }
 }
 
 module.exports = { activate, deactivate };

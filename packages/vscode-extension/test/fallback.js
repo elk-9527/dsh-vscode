@@ -57,6 +57,9 @@ const PATCH = writeDoorPortPatch();
 const configValues = {
   host: '127.0.0.1',
   port: PORT,
+  // 面板自启的内核把门钉在这个端口上（环境变量 DSH_ACP_DOOR_PORT）。
+  // 这里让它和 PORT 一致：前面的 --patch 也钉同一个端口，两条路不打架。
+  selfStartPort: PORT,
   autoStart: true, // ← 本次测试的主角
   // 生产默认是 desktop（用户自己那一档）。测试里刻意用 dshdoor：
   // 让测试去拉起用户的真实配置，会往他的档和记忆里写东西 —— 测试不该有这个权力。
@@ -64,6 +67,9 @@ const configValues = {
   dshCommand: 'dsh',
   provider: '',
   model: '',
+  // 前几节测的是"收摊要收干净"，所以这里一律"面板一关就收"（老行为）。
+  // 宽限期那条路（销毁不杀、重开继续用）在 §6 单独把它调大再验。
+  kernelIdleMinutes: 0,
   cwd: SCRATCH,
 };
 
@@ -401,6 +407,97 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
       configValues.fallbackProfile = savedProfile;
       configValues.dshCommand = savedCommand;
     }
+  }
+
+  /*
+   * §6 视图销毁 ≠ 内核死亡（2026-09-19 那次"聊两句就断"的结构性修复）。
+   *
+   * 用真进程验：起一个内核 → **销毁面板视图** → 断言内核还活着
+   * （旧代码这里就是 killTree，用户看到的就是"断线"）→ 再建一个面板 →
+   * 断言它**复用同一个 pid**、没有再拉一个进程，而且会话直接就绪。
+   */
+  if (!alreadyUp) {
+    section('6. 视图销毁不等于内核死亡（重开面板继续用同一个内核）');
+    const saved = {
+      port: configValues.port,
+      selfStartPort: configValues.selfStartPort,
+      kernelIdleMinutes: configValues.kernelIdleMinutes,
+      autoStart: configValues.autoStart,
+      fallbackProfile: configValues.fallbackProfile,
+      dshCommand: configValues.dshCommand,
+    };
+    // 自启的内核开在 PORT（§5 末尾刚腾空），attach 目标指到一个空端口上，
+    // 逼它走"自己拉起"这条路。
+    configValues.autoStart = true;
+    configValues.port = PORT + 1;
+    configValues.selfStartPort = PORT;
+    configValues.kernelIdleMinutes = 5; // 宽限 5 分钟：销毁之后内核必须还活着
+    configValues.fallbackProfile = 'dshdoor';
+    if (!configValues.dshCommand || configValues.dshCommand === 'dsh') {
+      const realBin = path.join(
+        os.homedir(), '.dsh', 'profiles', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js',
+      );
+      if (fs.existsSync(realBin)) configValues.dshCommand = `node ${realBin}`;
+    }
+
+    const panelA = new DshPanelView({
+      extensionUri: { fsPath: path.resolve(__dirname, '..') },
+      log,
+      spawnArgs: PATCH ? ['--patch', PATCH] : [],
+    });
+    panelA.resolveWebviewView(makeFakeView());
+    await panelA.onWebviewMessage({ type: 'ready' });
+    const childA = panelA.background && panelA.background.child;
+    const pidA = childA && childA.pid;
+    check('A：面板自己把内核拉起来了', Boolean(pidA), String(pidA));
+    check('A：门开在"面板自己的端口"上（不是桌面端那个 47821）',
+      panelA.targetPort === PORT, `targetPort=${panelA.targetPort}，期望 ${PORT}`);
+    check('A：拿到会话了', Boolean(panelA.session && panelA.session.sessionId));
+
+    panelA.dispose(); // ← 就是这一步：以前这里会把内核杀掉
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    const alive = childA && childA.exitCode === null && childA.signalCode === null;
+    check('销毁面板之后，内核**还活着**（旧代码这里就断了）', Boolean(alive),
+      `pid ${pidA} exitCode=${childA && childA.exitCode}`);
+    check('端口还开着', await probePort('127.0.0.1', PORT, 800));
+    check('它还在 manager 的表里（等着被复用）', panelA.kernels.size() === 1, String(panelA.kernels.size()));
+
+    // 用户又把面板打开了 —— 应该接着用同一个内核，而不是再拉一个。
+    const logFromB = logLines.length;
+    const panelB = new DshPanelView({
+      extensionUri: { fsPath: path.resolve(__dirname, '..') },
+      log,
+      spawnArgs: PATCH ? ['--patch', PATCH] : [],
+    });
+    panelB.resolveWebviewView(makeFakeView());
+    await panelB.onWebviewMessage({ type: 'ready' });
+    const childB = panelB.background && panelB.background.child;
+    /*
+     * B 走的是"接上去"而不是"重新起"：它先探测 selfStartPort，门还开着就直接接。
+     * 这时 panelB.background 指向的仍然是**A 那个内核**的句柄（拿来报错/诊断用），
+     * 并没有新进程 —— 所以判据是 pid 和表里的那个一模一样。
+     */
+    const pidB = childB ? childB.pid : panelB.kernels.pidOf(configValues.host, PORT);
+    check('B：复用了同一个内核（pid 一样，没有第二个进程）', pidB === pidA, `A=${pidA} B=${pidB}`);
+    check('B：manager 里还是只有一个', panelB.kernels.size() === 1, String(panelB.kernels.size()));
+    check('B：直接就能用（有会话，不需要等重启）', Boolean(panelB.session && panelB.session.sessionId));
+    const linesB = logLines.slice(logFromB);
+    check('B：日志说清了"接着用"，没有重新启动内核',
+      linesB.some((line) => /接上去|接着用/.test(line)) && !linesB.some((line) => /试着启动/.test(line)),
+      JSON.stringify(linesB));
+    check('B：原先那个"5 分钟后收掉"的计时被取消了（日志里有原话）',
+      linesB.some((line) => /计时取消|又用上/.test(line)), JSON.stringify(linesB));
+
+    panelB.dispose();
+    check('用户显式收摊 → 真收掉（不留孤儿）', panelB.kernels.disposeAll('测试收尾') === 1);
+    let freed = false;
+    try {
+      await waitFor(async () => !(await probePort('127.0.0.1', PORT, 400)), { totalMs: 30000, intervalMs: 600 });
+      freed = true;
+    } catch { freed = false; }
+    check('收摊后端口释放了', freed);
+
+    Object.assign(configValues, saved);
   }
 
   console.log(`\n${'═'.repeat(56)}`);

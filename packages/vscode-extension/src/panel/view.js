@@ -21,13 +21,13 @@ const { DshSession } = require('../dsh/session');
 const { describeError } = require('../dsh/errors');
 const {
   probePort,
-  spawnBackgroundDsh,
   dshCommandCandidates,
   explainKernelFailure,
   panelProfileCandidates,
 } = require('../door/locate');
 const { renderHtml, makeNonce } = require('../panel/html');
 const localSessions = require('../dsh/sessions');
+const { kernelManager } = require('../panel/kernel-manager');
 
 const VIEW_ID = 'dshPanel.chat';
 
@@ -66,10 +66,19 @@ class DshPanelView {
    *   `--patch`，把门指到别的端口上，这样测「从零拉起」时不必去抢 47821
    *   （桌面端开着的时候那上面已经有门了，否则这个测试只能跳过）。
    */
-  constructor({ extensionUri, log, spawnArgs = [] }) {
+  constructor({ extensionUri, log, spawnArgs = [], kernels }) {
     this.extensionUri = extensionUri;
     this.log = log;
     this.spawnArgs = spawnArgs;
+    /**
+     * 后台内核归谁管 —— 归**扩展**，不归这个视图（见 kernel-manager.js 开头）。
+     *
+     * 这一条是 2026-09-19 那次"聊两句就断"的结构性修复：原来视图一销毁
+     * 就把内核杀掉，而视图太容易没了（折叠侧边栏、拖动面板、重载窗口）。
+     * 现在视图只是内核的一个"使用者"：销毁 = 释放引用，归零后还有宽限，
+     * 这期间重新打开面板会继续用同一个内核。
+     */
+    this.kernels = kernels || kernelManager(log);
     /** @type {vscode.WebviewView|undefined} */
     this.view = undefined;
     /** @type {DoorClient|undefined} */
@@ -238,9 +247,24 @@ class DshPanelView {
 
   config() {
     const cfg = vscode.workspace.getConfiguration('dshPanel');
+    const minutes = Number(cfg.get('kernelIdleMinutes'));
+    // 面板自己拉起的那个内核，在"没有面板用它"之后还能活多久（默认 10 分钟）。
+    // 设成 0 = 面板一关就收（老行为）。视图只是个使用者，内核归扩展管 ——
+    // 见 src/panel/kernel-manager.js。
+    this.kernels.setIdleMs(
+      Number.isFinite(minutes) && minutes >= 0 ? minutes * 60000 : 10 * 60000,
+    );
     return {
       host: cfg.get('host') || '127.0.0.1',
       port: cfg.get('port') || 47821,
+      /**
+       * 面板**自己**起的那个内核，门开在哪个端口。
+       *
+       * 为什么和 port 分开：`port` 是"我去连谁"（默认 47821，桌面端那个门也在
+       * 那儿，有门就接）。而面板自启的内核一律用自己的端口 —— 以前它也去抢
+       * 47821，两个内核抢一个口，抢输的门干脆不开，用户对着"正在启动…"干等。
+       */
+      selfStartPort: cfg.get('selfStartPort') || 47831,
       autoStart: cfg.get('autoStart') !== false,
       fallbackProfile: cfg.get('fallbackProfile') || 'vscode-panel',
       dshCommand: cfg.get('dshCommand') || 'dsh',
@@ -311,13 +335,45 @@ class DshPanelView {
   async spawnFallback(cfg) {
     // 顶栏只留短状态；"为什么要启动""用哪个档"这类话进对话流。
     this.post({ type: 'status', state: 'connecting', detail: '正在启动…' });
+    /*
+     * 先问一句：本扩展是不是已经在"面板自己的端口"上起过一个还活着的内核？
+     *
+     * 这一段是"视图销毁不等于内核死亡"的落地点：面板关掉又打开、或者
+     * 另一个 VS Code 窗口已经起过一个，都该**接着用**同一个进程，
+     * 而不是又拉起一个（多拉的那一个还会跟这一个抢端口）。
+     *
+     * 注意两点：
+     * ① 查的是 selfStartPort —— 面板起的内核门就钉在那儿（不是 cfg.port，
+     *    那是桌面端那个内核的端口）。
+     * ② 先等门真的开出来再交差：内核活着但门没开（正在启动 / 门起崩了）
+     *    时直接返回"成功"，用户接下来看到的会是莫名其妙的握手失败。
+     *    门要是等不出来，就把它收掉重起一个。
+     */
+    const reusable = this.kernels.live(cfg.host, cfg.selfStartPort);
+    if (reusable) {
+      const door = await this.waitForFallbackDoor(
+        reusable.background && reusable.background.child,
+        cfg.host,
+        [cfg.selfStartPort, cfg.port],
+        15000,
+      );
+      if (door.ok) {
+        this.background = reusable.background;
+        this.kernels.acquire(this, reusable);
+        this.log('info', `面板自己那个内核还在（${cfg.host}:${door.port}），接着用它，不重启`);
+        this.post({ type: 'notice', text: '面板自己那个内核还在，直接接着用。' });
+        return { ok: true, command: reusable.command, profile: reusable.profile, port: door.port };
+      }
+      this.log('warn', '本扩展起的那个内核还活着，但它的门一直没开 —— 收掉它，重起一个');
+      this.kernels.stop(reusable.key, '内核活着但门不开，重起');
+    }
+
     const profiles = this.profilesFor(cfg);
     this.post({
       type: 'notice',
       text: `没有现成的内核，正在启动一个（档：${profiles[0]}）。第一次会慢一点，之后就快了。`,
     });
-    this.log('info', '端口上没有门，按设置自己拉起一个 DSH 内核');
-    if (this.background) this.background.dispose();
+    this.log('info', `端口上没有门，按设置自己拉起一个 DSH 内核（门钉在 ${cfg.host}:${cfg.selfStartPort}）`);
 
     const candidates = this.candidatesFor(cfg);
     if (candidates.length === 0) {
@@ -349,9 +405,14 @@ class DshPanelView {
       const hasMore = i + 1 < plans.length;
       // 候选逐个试是给日志看的，顶栏没必要跟着跳字。
       this.log('info', `试着启动：${command}（档：${profile}）`);
-      let background;
+      let entry;
       try {
-        background = spawnBackgroundDsh({
+        // 交给 manager 起并登记：这样"视图销毁"不会把它带走，另一个窗口也能复用。
+        // 门钉在面板自己的端口上（门那边读 DSH_ACP_DOOR_PORT，见 dsh-door/lib/port.js）。
+        // 档里那个 port 是**默认值**，不是命令；谁起的内核谁定端口。
+        entry = this.kernels.spawn({
+          host: cfg.host,
+          port: cfg.selfStartPort,
           command,
           profile,
           log: this.log,
@@ -361,19 +422,28 @@ class DshPanelView {
         failures.push(`「${command}」起不来：${this.errText(error)}`);
         continue;
       }
+      const background = entry.background;
       this.background = background;
       const outcome = await this.waitForFallbackDoor(
         background.child,
         cfg.host,
-        cfg.port,
+        [cfg.selfStartPort, cfg.port],
         hasMore ? 30000 : 120000,
       );
-      if (outcome.ok) return { ok: true, command, profile };
+      if (outcome.ok) {
+        // 成了：这个内核归本视图用（引用计数 +1）。
+        // 门实际开在哪个口上就接哪个（旧版门只认档里那个端口）。
+        this.kernels.acquire(this, entry);
+        if (outcome.port !== cfg.selfStartPort) {
+          this.log('warn', `这个档里的门没认端口设置，开在了 ${outcome.port}（档里的门插件是旧版？）`);
+        }
+        return { ok: true, command, profile, port: outcome.port };
+      }
       // 没成：收掉这个进程再试下一条（killTree 连子孙一起杀，不留孤儿）。
       // 收之前先把它自己打的最后几句话取出来 —— 原因就在里面。
       const stderr = typeof background.stderrTail === 'function' ? background.stderrTail() : '';
       const explained = explainKernelFailure({ profile, stderr });
-      background.dispose();
+      this.kernels.stop(entry.key, '自启失败，换个档再试');
       this.background = undefined;
       kinds.add(explained.kind);
       if (stderr) this.log('warn', `内核退出原因（${profile}）：${stderr.split('\n')[0]}`);
@@ -412,6 +482,12 @@ class DshPanelView {
    * 干等两分钟，最后只换来一句"没开门"，还得自己猜为什么。
    * 既然进程都已经退出了，就没有必要再等。
    *
+   * `port` 可以是一个端口，也可以是一串：面板把门钉在 `selfStartPort` 上
+   * （环境变量），但**用户档里的门可能还是旧版**（不认那个环境变量），那就
+   * 只会开在档里配的端口上。只看一个端口的话，这种情况会变成"内核明明起来了，
+   * 却等满两分钟说没门"，而门其实开在另一个口上。所以：谁先开就用谁，
+   * 返回值里的 `port` 就是实际接上去的那个。
+   *
    * `timeoutMs` 只是为了让测试能在几秒内跑到"等超时"那条分支 ——
    * 生产路径不传它，就是两分钟。
    */
@@ -421,13 +497,20 @@ class DshPanelView {
       exit = { code, signal };
     };
     if (child && typeof child.once === 'function') child.once('exit', onExit);
+    const ports = Array.isArray(port) ? port : [port];
     try {
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
-        if (await probePort(host, port)) return { ok: true };
+        for (const candidate of ports) {
+          if (candidate && (await probePort(host, candidate))) return { ok: true, port: candidate };
+        }
         if (exit) {
           // 刚退出时端口可能还在收尾，再确认一次才判失败。
-          if (await probePort(host, port)) return { ok: true };
+          for (const candidate of ports) {
+            if (candidate && (await probePort(host, candidate))) {
+              return { ok: true, port: candidate };
+            }
+          }
           this.log('warn', `兜底内核退出了（code=${exit.code} signal=${exit.signal}），不再干等`);
           return { ok: false, exitedEarly: true };
         }
@@ -443,14 +526,51 @@ class DshPanelView {
     const cfg = this.config();
     this.post({ type: 'status', state: 'connecting', detail: '正在连接…' });
 
-    let reachable = await probePort(cfg.host, cfg.port);
-    if (!reachable && cfg.autoStart) {
+    /*
+     * 连哪个端口，按这个顺序定（2026-09-19 改）：
+     *
+     * 1. `dshPanel.port`（默认 47821）上有门 → **接上去**。这是桌面端那个内核，
+     *    也是"一个进程一个大脑"的情形 —— 面板不自起、也不去动它。
+     * 2. `dshPanel.selfStartPort`（默认 47831）上有门 → 接上去，这个门后面的内核
+     *    一般是**另一个 VS Code 窗口**起的，或者本窗口刚才起的那个（面板关掉又
+     *    打开）：复用它，别再拉一个（多拉的那个还会跟它抢端口）。
+     *    **是本扩展起的**才记成"我在用"（关面板时它才会进宽限回收）；
+     *    别人起的什么都不记 —— 绝不收别人的内核。
+     * 3. 都没有 → 自己起一个，**门钉在 selfStartPort 上**（环境变量
+     *    DSH_ACP_DOOR_PORT，见 dsh-door/lib/port.js）。
+     *
+     * 为什么要分两个端口：面板自启的内核以前也用 47821 —— 那正是桌面端那个
+     * 内核的端口。两个内核抢同一个端口没有任何好处，抢输的那个门干脆不开，
+     * 用户对着"正在启动…"干等。现在自启的一律用自己的端口，谁也不碰谁。
+     */
+    let target = cfg.port;
+    let reachable = false;
+    if (await probePort(cfg.host, cfg.port)) {
+      reachable = true;
+      this.log('info', `端口 ${cfg.host}:${cfg.port} 上有现成的门，接上去（不自启内核）`);
+    } else if (await probePort(cfg.host, cfg.selfStartPort)) {
+      target = cfg.selfStartPort;
+      reachable = true;
+      const mine = this.kernels.live(cfg.host, cfg.selfStartPort);
+      if (mine) {
+        // 本扩展起的：记成"我在用"，关面板后它才会进宽限回收（不然会一直留着）。
+        this.kernels.acquire(this, mine);
+        this.background = mine.background;
+      }
+      this.log(
+        'info',
+        `面板自己的端口 ${cfg.host}:${cfg.selfStartPort} 上已经有门了，接上去` +
+          (mine ? '（是本扩展起的那个内核，接着用，不重启）' : '（不是本扩展起的，我不负责收它）'),
+      );
+      this.post({ type: 'notice', text: '面板内核已经在了，直接接上去。' });
+    } else if (cfg.autoStart) {
       const spawned = await this.spawnFallback(cfg);
       if (!spawned.ok) {
         this.postError(spawned.human.raw, spawned.human);
         this.post({ type: 'status', state: 'error', detail: '未连接' });
         return undefined;
       }
+      target = spawned.port || cfg.selfStartPort;
       reachable = true;
     }
 
@@ -462,14 +582,16 @@ class DshPanelView {
       this.post({ type: 'status', state: 'error', detail: '未连接' });
       return undefined;
     }
+    // 后面每一处"连哪儿/说哪儿"都用 target，不要再回头用 cfg.port。
+    this.targetPort = target;
 
-    const client = new DoorClient({ host: cfg.host, port: cfg.port, log: this.log });
+    const client = new DoorClient({ host: cfg.host, port: target, log: this.log });
     try {
       await client.connect();
     } catch (error) {
       client.close();
       const text = error && error.message ? error.message : String(error);
-      this.postError(`连上了 ${cfg.host}:${cfg.port}，但握手失败：${text}`);
+      this.postError(`连上了 ${cfg.host}:${target}，但握手失败：${text}`);
       this.post({ type: 'status', state: 'error', detail: '未连接' });
       return undefined;
     }
@@ -943,11 +1065,16 @@ class DshPanelView {
 
   dispose() {
     this.teardown();
-    // 只停「本扩展自己拉起来的」那个后台 DSH，绝不碰用户桌面端那个。
-    if (this.background) {
-      this.background.dispose();
-      this.background = undefined;
-    }
+    /*
+     * 关键的一行（2026-09-19 改）：**不杀内核，只释放引用**。
+     *
+     * 原来这里是 `this.background.dispose()` —— 视图一销毁就把内核杀掉，
+     * 而视图太容易没了（折叠侧边栏、拖动面板、Reload Window、另一个窗口关掉）。
+     * 现在交给 manager：引用归零后还有宽限（默认 10 分钟），这期间重新打开
+     * 面板会继续用同一个内核 —— 不重启、也不用 resume。
+     */
+    this.kernels.release(this);
+    this.background = undefined;
   }
 }
 

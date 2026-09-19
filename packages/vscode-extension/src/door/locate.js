@@ -270,10 +270,27 @@ function commandLine(command, args = []) {
   return [...parts, ...args].map(quoteArg).join(' ');
 }
 
-function spawnBackgroundDsh({ command, profile, log, extraArgs = [] }) {
+function spawnBackgroundDsh({ command, profile, log, extraArgs = [], port }) {
   if (!SAFE_PROFILE.test(String(profile))) {
     throw new Error(`profile 名不合法：${profile}（只允许字母、数字、点、下划线、连字符）`);
   }
+
+  /*
+   * 门开在哪个端口：**由起它的这一方（面板）说了算**，不靠档里配什么。
+   *
+   * 2026-09-19：端口原来只写在档的配置里，面板只能"希望"它跟设置里一致；
+   * 不一致就是"内核起来了但门没开在我等的地方"，用户对着「正在启动…」
+   * 干等两分钟。而且面板自启的内核会去抢桌面端那个 47821。
+   * 现在把端口钉进环境变量，门那边读它（优先级最高，
+   * 见 packages/dsh-door/lib/port.js 的 resolveDoorPort）。
+   * 档里的门是旧版、不认这个变量时也不会坏：扩展会两个端口都盯着，
+   * 谁开门就用谁（见 view.js 的 waitForFallbackDoor）。
+   */
+  const doorPort = Number(port);
+  const env =
+    Number.isInteger(doorPort) && doorPort >= 0 && doorPort <= 65535
+      ? { ...process.env, DSH_ACP_DOOR_PORT: String(doorPort) }
+      : process.env;
 
   // `--host 127.0.0.1` 是兜底加固：确保它的网页界面也只绑回环地址。
   // `--port 0` 让系统随便挑一个网页端口 —— 我们走的是门，不用那个界面。
@@ -291,7 +308,10 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [] }) {
   ];
   // 先拼命令行：命令写错时在这里就抛，别拖到进程起来之后。
   const line = commandLine(command, args);
-  log('info', `后台拉起 DSH：${line}`);
+  log(
+    'info',
+    `后台拉起 DSH：${line}${env === process.env ? '' : `（门钉在 ${doorPort}，走 DSH_ACP_DOOR_PORT）`}`,
+  );
 
   /*
    * 为什么不直接用 `spawn(command, args, { shell: true })`：
@@ -322,12 +342,14 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [] }) {
           stdio: ['ignore', 'pipe', 'pipe'],
           detached: false,
           windowsVerbatimArguments: true,
+          env,
         })
       : (() => {
           const parts = resolveCommand(command);
           return spawn(parts[0], [...parts.slice(1), ...args], {
             stdio: ['ignore', 'pipe', 'pipe'],
             detached: false,
+            env,
           });
         })();
 
