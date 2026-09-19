@@ -533,33 +533,29 @@ function explainKernelFailure({ profile, stderr }) {
   if (/managed exclusively by the Electron application/i.test(text)) {
     return {
       kind: 'app-managed-profile',
-      reason: `档「${profile}」只能由 DSH 桌面端启动，命令行起不来`,
-      advice:
-        `把 dshPanel.fallbackProfile 换成面板能自己启动的档（例如 vscode-panel），` +
-        '或者先打开 DSH 桌面端 —— 面板会直接连它，不用自己启动。',
+      reason: `档「${profile}」只能由桌面端启动`,
+      advice: '把 dshPanel.fallbackProfile 换成 vscode-panel，或先打开桌面端。',
     };
   }
   if (/unknown option/i.test(text)) {
     return {
       kind: 'wrong-app-flags',
-      reason: `档「${profile}」不接受面板的启动参数（--no-open/--host/--port）`,
-      advice:
-        '这个档多半是给别的入口用的（比如 ACP 那种走标准输入输出的档）。' +
-        '把 dshPanel.fallbackProfile 换成一个网页档（bundles 里有 @deepseek-ai/dsh-web-app 的）。',
+      reason: `档「${profile}」不接受面板的启动参数`,
+      advice: '换成带 @deepseek-ai/dsh-web-app 的档（它才接受 --no-open/--host/--port）。',
     };
   }
   if (/ENOENT|not recognized|not found|不是内部或外部命令|系统找不到/i.test(text)) {
     return {
       kind: 'missing-command',
       reason: '找不到 dsh 命令',
-      advice: '把 dshPanel.dshCommand 填成完整启动命令，或者确认 dsh 在 PATH 里。',
+      advice: '把 dshPanel.dshCommand 填成完整路径，或确认 dsh 在 PATH 里。',
     };
   }
   if (/EADDRINUSE|address already in use|address in use/i.test(text)) {
     return {
       kind: 'port-in-use',
-      reason: '门要用的端口被别的进程占着',
-      advice: '把占用那个端口的进程关掉再重连；或者改 dshPanel.port 和门插件里的 port。',
+      reason: '门要用的端口被占着',
+      advice: '关掉占用它的进程，或改 dshPanel.port（门插件里也要改）。',
     };
   }
   return { kind: 'unknown', reason: '', advice: '' };

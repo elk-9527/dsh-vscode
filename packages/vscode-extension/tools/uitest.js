@@ -759,8 +759,8 @@ function assertionsScript(scene) {
       // 而且那句话挂在悬浮提示上（顶栏那行放不下长文，完整原因走对话流）。
       window.postMessage({ type: 'permissionState', unavailable: {
         state: 'old-door',
-        text: '这里切不了权限（内核里的门太旧）',
-        detail: '权限选择需要门插件 dsh-acp-door 0.0.12 以上；把内核那个档里的门升级一下。',
+        text: '切不了权限（内核里的门太旧）',
+        detail: '要门插件 dsh-acp-door 0.0.12+；升级那个档里的门。',
       } }, '*');
       await new Promise(function (resolve) { setTimeout(resolve, 200); });
       assert('切不了时按钮灰掉', accessBtn.disabled === true);

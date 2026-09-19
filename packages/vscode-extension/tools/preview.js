@@ -256,6 +256,41 @@ const SCENARIOS = {
   },
 
   /**
+   * 短文案：把"提示能有多短"摆出来给人看（2026-09-19 用户第二次提意见之后）。
+   *
+   * 为什么值得单独一个场景：文案是**看不见的规格** —— 只写在文档里就会慢慢长回去。
+   * 这里把自启、复用、重开这三种最常见的提示连同一张报错卡片摆在一起，
+   * 既能截图给人看，也给「每行 ≤32 字」那条测试留一个可对照的样子。
+   *
+   * 报错卡片走的是**生产代码** `describeError`（原文折在「原始报错（点开）」里）。
+   */
+  concise() {
+    return {
+      steps: [
+        { message: { type: 'status', state: 'connecting', detail: '正在启动…' } },
+        { message: { type: 'notice', text: '正在启动内核…' } },
+        { message: { type: 'status', state: 'ready', detail: '就绪' } },
+        { message: configMessage },
+        { message: presetsMessage },
+        { message: { type: 'notice', text: '沿用已启动的内核。' } },
+        { message: { type: 'notice', text: '已按「标准模式」重开。' } },
+        {
+          message: {
+            type: 'error',
+            message:
+              '回合失败：Internal error: turn failed: 429: {"type":"GoUsageLimitError",' +
+              '"message":"5-hour usage limit reached. Resets in 12min"}',
+            human: describeError(
+              '回合失败：Internal error: turn failed: 429: {"type":"GoUsageLimitError",' +
+                '"message":"5-hour usage limit reached. Resets in 12min"}',
+            ),
+          },
+        },
+      ],
+    };
+  },
+
+  /**
    * 权限选择器：顶栏那个按钮 + 点开的小卡片。
    *
    * 单独一个场景，因为它是**唯一**一处「清单由内核给、界面只负责画」的控件：

@@ -39,28 +39,28 @@ const RULES = [
   {
     kind: 'usage-limit',
     test: /GoUsageLimitError|usage limit|rate ?limit|too many requests|\b429\b|quota|insufficient (?:balance|credit|quota)|额度|频率限制|限流|余额不足/i,
-    title: '模型的额度或频率限制触发了，这一回合没跑完。',
+    title: '额度或频率到上限了，这一回合没跑完。',
     advice: (text) => {
       const reset = resetHint(text);
-      const tail = '也可以先换一个模型（顶栏的模型下拉）再发一次。';
-      return reset ? `大约 ${reset}后额度恢复，到点再试；${tail}` : `等一会儿再试；${tail}`;
+      const tail = '也可以先换个模型再发。';
+      return reset ? `约 ${reset}后恢复；${tail}` : `等一会儿再试；${tail}`;
     },
   },
   {
     kind: 'auth',
     test: /\b401\b|\b403\b|unauthorized|forbidden|invalid[ _-]?api[ _-]?key|incorrect api key|authentication|鉴权|未授权/i,
-    title: '服务商拒绝了这次请求：密钥不对，或者这个密钥没有权限。',
+    title: '服务商拒绝了：密钥不对或没有权限。',
     advice: () =>
-      '到 $DSH_HOME/settings.yaml 里看这个服务商用的 apiKeyEnv 指向哪个环境变量，确认那个变量里有值、并且没过期；换过密钥之后要重启 DSH 内核才会生效。',
+      '看内核 settings.yaml 里这个服务商的 apiKeyEnv 指向哪个环境变量，确认它有值；换过密钥要重启内核。',
   },
   {
     kind: 'port',
     test: /EADDRINUSE|address already in use|only one usage of each socket address|端口(?:已)?被占/i,
-    title: '要用的端口已经被别的程序占着了。',
+    title: '要用的端口被别的程序占着了。',
     advice: (text) => {
       const port = String(text).match(/\b(\d{4,5})\b/);
       const which = port ? port[1] : '47821';
-      return `先确认 ${which} 上是谁在监听（PowerShell 里跑 Get-NetTCPConnection -State Listen -LocalPort ${which}）。要换端口的话，设置 dshPanel.port 和门插件里的 port 必须改成同一个值。`;
+      return `先确认 ${which} 上是谁在监听；要换端口，dshPanel.port 和门插件里的 port 得改成同一个。`;
     },
   },
   {
@@ -70,34 +70,32 @@ const RULES = [
     advice: (text) => {
       const name = String(text).match(/(?:ENOENT[^\n]*?['"]([^'"]+)['"])|(?:'([^']+)' is not recognized)/i);
       const which = (name && (name[1] || name[2])) || 'dsh';
-      return `多半是「${which}」不在 PATH 里，或者设置 dshPanel.dshCommand 指错了路径 —— 先在一个终端里跑一次 dsh --version 确认，再把它的完整路径填进设置。`;
+      return `多半是「${which}」不在 PATH，或 dshPanel.dshCommand 指错了。`;
     },
   },
   {
     kind: 'connection',
     test: /ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EPIPE|EHOSTUNREACH|ENETUNREACH|socket hang ?up|fetch failed|other side closed|连接(?:被对方)?关闭|连接断了|connection refused/i,
-    title: '连不上 DSH 内核，或者连接中途断了。',
-    advice: () =>
-      '执行「DSH：重新连接」重试。如果是你把桌面端重启了，直接发消息就行 —— 面板会自己重连，并把上面那段对话的上下文接回来。',
+    title: '连不上内核，或连接中途断了。',
+    advice: () => '直接发消息即可自动重连；不行就执行「DSH：重新连接」。',
   },
   {
     kind: 'preset-locked',
     test: /agent-preset\/locked|预设[^\n]*锁|preset[^\n]*locked/i,
-    title: '这段对话的内核不允许中途换模式。',
-    advice: () => '点顶栏的「新建对话」，新模式会在新对话里生效（这是内核的规矩，不是面板的限制）。',
+    title: '内核不允许中途换模式。',
+    advice: () => '点顶栏「新建对话」，新模式在新对话里生效（内核的规矩）。',
   },
   {
     kind: 'model',
     test: /unknown model|model[^\n]*not (?:found|exist)|no such model|模型不存在/i,
-    title: '这个模型名内核不认识，或者这个服务商下面没有它。',
-    advice: () =>
-      '核对设置 dshPanel.model，以及内核 settings.yaml 里这个服务商下面列了哪些 model id（两边必须一字不差）；拿不准就先把设置留空，让内核自己定。',
+    title: '这个模型名内核不认识。',
+    advice: () => '核对 dshPanel.model 与内核 settings.yaml 里的 model id；拿不准就留空让内核自己定。',
   },
   {
     kind: 'timeout',
     test: /timed? ?out|timeout|超时/i,
     title: '这次请求超时了。',
-    advice: () => '重发一次；如果一直超时，换一个模型，或者把要它读的东西拆小一点（比如只带选中的几行而不是整个文件）。',
+    advice: () => '重发一次；一直超时就换个模型，或少给它读点东西。',
   },
 ];
 
@@ -110,8 +108,8 @@ const RULES = [
  */
 const UNKNOWN = {
   kind: 'unknown',
-  title: 'DSH 内核报了一个错，这一回合没跑完。',
-  advice: () => '下面是内核的原话。看不懂就把这几行发给我；也可以执行「DSH：显示日志」看完整记录。',
+  title: '内核报了一个错，这一回合没跑完。',
+  advice: () => '下面是内核原话。看不懂就把这几行发我；或执行「DSH：显示日志」。',
 };
 
 /**

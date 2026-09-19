@@ -48,16 +48,16 @@ function activate(context) {
   async function attachFromEditor(wanted) {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
-      vscode.window.showInformationMessage('DSH：先打开一个文件，再把内容带进对话。');
+      vscode.window.showInformationMessage('先打开一个文件。');
       return;
     }
     const item = DshPanelView.attachmentFromEditor(editor, view.workdir());
     if (!item) {
-      vscode.window.showInformationMessage('DSH：这个编辑器里拿不到文件路径，带不进去。');
+      vscode.window.showInformationMessage('这个编辑器拿不到文件路径。');
       return;
     }
     if (wanted === 'selection' && item.kind !== 'selection') {
-      vscode.window.showInformationMessage('DSH：先选中一段代码，再执行「把选中的代码带进对话」。');
+      vscode.window.showInformationMessage('先选中一段代码。');
       return;
     }
     log('info', `带进对话：${item.kind} ${item.name}${item.detail ? `（${item.detail}）` : ''}`);
@@ -127,7 +127,7 @@ function activate(context) {
     log('info', '首次启动：提示用户面板在哪里');
     vscode.window
       .showInformationMessage(
-        'DSH 面板已就绪：点左侧活动栏里的对话气泡图标，或按 Ctrl+Shift+P 搜「DSH：打开面板」。',
+        '面板已就绪：点活动栏的对话图标，或搜「DSH：打开面板」。',
         '现在就打开',
       )
       .then((choice) => {

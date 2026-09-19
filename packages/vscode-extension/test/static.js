@@ -577,8 +577,8 @@ check(
   check('内核退出：一个字没说的时候，明说「不是它自己崩的」',
     /一个字都没说就退了/.test(locate));
   check('断线：能分清「自己拉的内核死了」和「连的是别人的内核」',
-    /disconnectText\(/.test(view) && /给你干活的那个内核自己退出了/.test(view) &&
-      /刚才连的是别处正在跑的 DSH/.test(view));
+    /disconnectText\(/.test(view) && /内核自己退出了（code=/.test(view) &&
+      /那是别处的 DSH/.test(view));
   check('断线：告诉用户去哪儿看完整输出', /输出 → DSH Panel/.test(view));
 
   const logTool = path.join(ROOT, 'tools', 'panel-log.cjs');

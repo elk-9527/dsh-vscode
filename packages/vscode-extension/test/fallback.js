@@ -219,7 +219,22 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
   );
   check(
     '「正在启动内核」这件事说在对话流里',
-    notices.some((text) => /正在启动一个/.test(text)),
+    notices.some((text) => /正在启动内核/.test(text)),
+    JSON.stringify(notices),
+  );
+  // 用户对这条路径上的文案专门提过意见（原话是嫌"没有现成的内核，正在启动一个
+  // （档：vscode-panel）。第一次会慢一点…"太长）。自启这条路正是长句最容易
+  // 长出来的地方，所以在这里钉一条：给自己的话短、引用行可以长一点。
+  check(
+    '自启这条路上的提示也都短（第一行 ≤32 字，引用行 ≤80 字，最多三行）',
+    notices.every((text) => {
+      const lines = String(text || '').split('\n');
+      if (lines.length > 3) return false;
+      return lines.every((line, index) => {
+        const quoted = index > 0 && /^(原因|内核原话)：/.test(line);
+        return line.length <= (quoted ? 80 : 32);
+      });
+    }),
     JSON.stringify(notices),
   );
   check('最终连上了', statuses.some((s) => s.state === 'ready'), JSON.stringify(statuses.at(-1)));
@@ -428,8 +443,13 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
     };
     // 自启的内核开在 PORT（§5 末尾刚腾空），attach 目标指到一个空端口上，
     // 逼它走"自己拉起"这条路。
+    //
+    // ⚠️ attach 目标**不能**用 PORT + 1：面板默认的自启端口正好是 47831，
+    // 而用户自己开着 VS Code 面板时那上面就有个真在用的内核 —— 于是这里会
+    // "接上别人的内核"，A/B 两段（销毁不杀内核、重开复用同一个）整段失去意义
+    // （实测踩到）。往远处挑一个没人用的端口。
     configValues.autoStart = true;
-    configValues.port = PORT + 1;
+    configValues.port = PORT + 4;
     configValues.selfStartPort = PORT;
     configValues.kernelIdleMinutes = 5; // 宽限 5 分钟：销毁之后内核必须还活着
     configValues.fallbackProfile = 'dshdoor';

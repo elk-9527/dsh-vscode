@@ -66,9 +66,7 @@ const NEEDS_CONFIRM = new Set(['danger-full-access']);
 /** 确认门上的文案（跟桌面端一个意思）。 */
 const CONFIRM = {
   title: '确认启用完全权限？',
-  body:
-    '启用之后，智能体不再逐条问你：改文件、跑命令、访问工作区外面的东西都会直接做。' +
-    '只建议在你信任当前这件事的时候用。',
+  body: '启用后不再逐条问你：改文件、跑命令、访问工作区外都会直接做。',
   accept: '启用完全权限',
   cancel: '算了',
 };
@@ -155,16 +153,14 @@ function explainPermissionFailure({ code, message } = {}) {
     if (/没有权限预设服务|permission-presets/i.test(raw)) {
       return {
         state: 'no-service',
-        text: '这个内核没装权限预设，切不了权限',
-        detail: '桌面端在同样的内核里也不会有这个选择器。换一个装了 @deepseek-ai/dsh-base 的档即可。',
+        text: '这个内核没装权限预设，切不了',
+        detail: '换一个装了 dsh-base 的档',
       };
     }
     return {
       state: 'old-door',
-      text: '这里切不了权限（内核里的门太旧）',
-      detail:
-        '权限选择需要门插件 dsh-acp-door 0.0.12 以上；把内核那个档里的门升级一下，' +
-        '或者去桌面端切（那边有同一个选择器）。',
+      text: '切不了权限（内核里的门太旧）',
+      detail: '要门 dsh-acp-door 0.0.12+',
     };
   }
   return {

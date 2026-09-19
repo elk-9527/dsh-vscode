@@ -394,7 +394,7 @@ class DshPanelView {
         this.background = reusable.background;
         this.kernels.acquire(this, reusable);
         this.log('info', `面板自己那个内核还在（${cfg.host}:${door.port}），接着用它，不重启`);
-        this.post({ type: 'notice', text: '面板自己那个内核还在，直接接着用。' });
+        this.post({ type: 'notice', text: '沿用已启动的内核。' });
         return { ok: true, command: reusable.command, profile: reusable.profile, port: door.port };
       }
       this.log('warn', '本扩展起的那个内核还活着，但它的门一直没开 —— 收掉它，重起一个');
@@ -402,21 +402,17 @@ class DshPanelView {
     }
 
     const profiles = this.profilesFor(cfg);
-    this.post({
-      type: 'notice',
-      text: `没有现成的内核，正在启动一个（档：${profiles[0]}）。第一次会慢一点，之后就快了。`,
-    });
-    this.log('info', `端口上没有门，按设置自己拉起一个 DSH 内核（门钉在 ${cfg.host}:${cfg.selfStartPort}）`);
+    // 对话流里只留一句最短的；用哪个档、等多久，都在日志里（用户不看那些）。
+    this.post({ type: 'notice', text: '正在启动内核…' });
+    this.log('info', `端口上没有门，按设置自己拉起一个 DSH 内核（档：${profiles[0]}，门钉在 ${cfg.host}:${cfg.selfStartPort}）`);
 
     const candidates = this.candidatesFor(cfg);
     if (candidates.length === 0) {
       return {
         ok: false,
         human: {
-          title: '找不到 dsh 命令，没法自己启动内核',
-          advice:
-            '装好 DSH 后，在设置里把 dshPanel.dshCommand 填成完整启动命令；' +
-            '或者先打开 DSH 桌面端 —— 面板会直接连它，不用自己启动。',
+          title: '找不到 dsh 命令，没法自己启动内核。',
+          advice: '把 dshPanel.dshCommand 填成完整路径，或先打开桌面端让面板连它。',
           raw:
             '不知道怎么启动 DSH：设置 dshPanel.dshCommand 是空的，' +
             '默认安装位置（~/.dsh/profiles/node_modules/@deepseek-ai/dsh/lib/bin.js）也没找到。',
@@ -595,7 +591,7 @@ class DshPanelView {
         `面板自己的端口 ${cfg.host}:${cfg.selfStartPort} 上已经有门了，接上去` +
           (mine ? '（是本扩展起的那个内核，接着用，不重启）' : '（不是本扩展起的，我不负责收它）'),
       );
-      this.post({ type: 'notice', text: '面板内核已经在了，直接接上去。' });
+      this.post({ type: 'notice', text: '沿用已启动的内核。' });
     } else if (cfg.autoStart) {
       const spawned = await this.spawnFallback(cfg);
       if (!spawned.ok) {
@@ -608,10 +604,7 @@ class DshPanelView {
     }
 
     if (!reachable) {
-      this.postError(
-        `连不上 ${cfg.host}:${cfg.port}：端口上什么都没有，而 dshPanel.autoStart 是关着的，` +
-          '所以面板没有自己启动内核。可执行「DSH：重新连接」重试。',
-      );
+      this.postError(`连不上 ${cfg.host}:${cfg.port}（没门，自动启动已关）。`);
       this.post({ type: 'status', state: 'error', detail: '未连接' });
       return undefined;
     }
@@ -624,7 +617,7 @@ class DshPanelView {
     } catch (error) {
       client.close();
       const text = error && error.message ? error.message : String(error);
-      this.postError(`连上了 ${cfg.host}:${target}，但握手失败：${text}`);
+      this.postError(`握手失败：${text}`);
       this.post({ type: 'status', state: 'error', detail: '未连接' });
       return undefined;
     }
@@ -645,16 +638,13 @@ class DshPanelView {
           this.resumeTarget = undefined;
           // 接回来的是「已经说过话的」会话：别让换预设把它悄悄重开掉。
           this.turnSent = true;
-          this.post({ type: 'notice', text: '已重连，上面那段对话的上下文接回来了。' });
+          this.post({ type: 'notice', text: '已重连，上下文接回来了。' });
           this.post({ type: 'status', state: 'ready', detail: '就绪' });
           return session;
         } catch (error) {
           this.log('warn', `接回旧会话失败，改成新会话：${this.errText(error)}`);
           this.resumeTarget = undefined;
-          this.post({
-            type: 'notice',
-            text: '刚才那段对话没能接回来（内核里已经没有了），下面是一段新的对话。',
-          });
+          this.post({ type: 'notice', text: '上面那段没接回来，这是新对话。' });
         }
       }
       this.turnSent = false;
@@ -744,19 +734,16 @@ class DshPanelView {
       const tail =
         typeof background.stderrTail === 'function' ? background.stderrTail() : '';
       const lastLine = tail ? tail.split(/\r?\n/).filter((line) => line.trim()).pop() : '';
-      const why = lastLine
-        ? `它最后说：${lastLine}`
-        : '它一个字都没说就退了 —— 这种情况通常是外面把它杀了，不是它自己崩的';
+      const why = lastLine ? `它最后说：${lastLine}` : '它没说话就退了（多半是被外面杀的）';
       return (
-        `给你干活的那个内核自己退出了（code=${child.exitCode}）。${why}\n` +
-        '完整输出在「输出 → DSH Panel」里。直接发消息就行，我会重新拉起一个并接着上面的对话。'
+        `内核自己退出了（code=${child.exitCode}）。${why}\n` +
+        '直接发消息即可；完整输出见「输出 → DSH Panel」。'
       );
     }
     if (!background) {
       return (
-        `连接断开了：${reason}\n` +
-        '刚才连的是别处正在跑的 DSH（多半是你桌面端那个）—— 它退出或重启了。' +
-        '直接发消息就行，面板会自己拉起一个内核，并把上面那段对话接回来。'
+        `连接断开：${reason}\n` +
+        '那是别处的 DSH（多半是桌面端）退了或重启了。直接发消息即可。'
       );
     }
     return `连接断开：${reason}`;
@@ -791,7 +778,7 @@ class DshPanelView {
     if (payload?.fallback) {
       this.post({
         type: 'notice',
-        text: `门里没有「${payload.requested}」这个预设，这次用的是「${this.labelOf(current)}」。`,
+        text: `没有「${payload.requested}」这个模式，用了「${this.labelOf(current)}」。`,
       });
     }
   }
@@ -859,10 +846,10 @@ class DshPanelView {
     }
 
     if (!localRoot) {
-      throw new Error('面板没有连上 DSH，而设置里的门在别的机器上（dshPanel.host），读不了那台机器的历史会话');
+      throw new Error('门在别的机器上，面板读不了它的历史');
     }
     if (!localSessions.hasZstdSupport()) {
-      throw new Error('本机的 Node 没有 zstd 支持（zlib.zstdDecompressSync），解不了会话文件；或者把门升到 0.0.8+ 由门来解');
+      throw new Error('本机 Node 不支持 zstd，解不了会话文件');
     }
     const result = kind === 'list'
       ? localSessions.listSessions(localRoot)
@@ -908,12 +895,9 @@ class DshPanelView {
   historyErrorText(error) {
     const text = this.errText(error);
     if (isMissingMethod(error, text)) {
-      return (
-        '连着的门插件太旧了（需要 dsh-acp-door 0.0.8 以上），而它装在别的机器上，' +
-        '面板没法替你读那台机器的会话记录。在那台机器上升级门插件后再试。'
-      );
+      return '门太旧（要 dsh-acp-door 0.0.8+），读不了那台机器上的历史。';
     }
-    return `读历史会话失败：${text}`;
+    return `读历史失败：${text}`;
   }
 
   /**
@@ -928,21 +912,22 @@ class DshPanelView {
     if (!session) return;
     await this.sendHistoryReplay(id);
     if (session.busy) {
-      this.post({ type: 'notice', text: '它正在工作，等这回合结束后再接回历史。' });
+      this.post({ type: 'notice', text: '正在工作，结束后再接回。' });
       return;
     }
     try {
       await session.resume(String(id || ''), this.workdir(), { preset: this.wantedPreset() });
       this.turnSent = true;
       this.resumeTarget = undefined;
-      this.post({ type: 'notice', text: '已接回这段历史会话，它记得上面说过的内容。' });
+      this.post({ type: 'notice', text: '已接回这段历史。' });
       this.post({ type: 'status', state: 'ready', detail: '就绪' });
     } catch (error) {
+      // 自己的话放第一行（短），内核的原话另起一行附上（长也没关系 ——
+      // 它是"原始信息"，不是我在跟用户絮叨）。见 §文案要短 那条测试。
+      this.log('warn', `接回历史失败：${this.errText(error)}`);
       this.post({
         type: 'notice',
-        text:
-          `这段历史没能接回上下文（${this.errText(error)}）。` +
-          '上面只是回放；你可以继续在这里发新消息。',
+        text: `没能接回上下文，上面只是回放。\n原因：${clip(this.errText(error), 70)}`,
       });
     }
   }
@@ -1071,14 +1056,11 @@ class DshPanelView {
     if (this.session && !this.turnSent) {
       this.log('info', `预设改成 ${preset}；当前这段还没说过话，直接重开一段`);
       await this.newSession();
-      this.post({ type: 'notice', text: `已按「${this.labelOf(preset)}」重开一段新对话。` });
+      this.post({ type: 'notice', text: `已按「${this.labelOf(preset)}」重开。` });
       return;
     }
     this.log('info', `预设改成 ${preset}（下一段新对话生效）`);
-    this.post({
-      type: 'notice',
-      text: `已选「${this.labelOf(preset)}」：下一段新对话用它（内核不允许一段对话中途换预设）。`,
-    });
+    this.post({ type: 'notice', text: `「${this.labelOf(preset)}」：下一段生效。` });
   }
 
   /**
@@ -1114,6 +1096,8 @@ class DshPanelView {
       // 每种原因只说一次：接的是桌面端那个内核时，每次建会话都会走到这儿。
       if (this.permissionNotice !== shaped.state) {
         this.permissionNotice = shaped.state;
+        // 两行都短：第一行是结论，第二行是"缺什么"。版本号、包全名这些
+        // 细节在悬停提示和日志里（提示里不复述 —— 用户嫌长）。
         this.post({
           type: 'notice',
           text: `${shaped.text}${shaped.detail ? `\n${shaped.detail}` : ''}`,
@@ -1182,6 +1166,17 @@ class DshPanelView {
     return error && error.message ? error.message : String(error);
   }
 
+  /**
+   * 把一段可能很长的原文截短（只用于**附在**自己的话后面的那类引用）。
+   *
+   * 为什么要截：内核报错动辄上百字，直接塞进提示里就成了"长句糊脸"——
+   * 用户提过两次意见。整段原文另有去处（日志、以及错误卡片的折叠区），
+   * 这里只要够看清是哪一类问题。
+   */
+  clip(text, max = 70) {
+    return clip(text, max);
+  }
+
   teardown() {
     if (this.session) {
       this.session.dispose();
@@ -1214,37 +1209,44 @@ class DshPanelView {
 }
 
 /**
+ * 把一段原文截短（超过 `max` 就加省略号）。纯函数，好测。
+ *
+ * 只用在"附在自己那句话后面的引用"上：整段原文永远另有去处（日志、
+ * 错误卡片的折叠区），提示里没必要糊一屏。
+ */
+function clip(text, max = 70) {
+  const value = String(text === undefined || text === null ? '' : text);
+  return value.length > max ? `${value.slice(0, max)}…` : value;
+}
+
+/**
  * 自己启动内核失败时给用户看的那段原文（纯函数，好测）。
  *
  * 两种失败要说成两件不同的事，因为**出路不一样**：
  * - 进程刚启动就退出 → 命令不对（dsh 不在 PATH、dshCommand 指错）；
  * - 进程活着但端口没开 → 这个档里可能没装门插件，或者门被指到了别的端口。
  * 把它们混成一句"没开门"，用户就只能自己猜。
+ *
+ * ⚠️ 这段是**折叠区的原始信息**（`human.raw`），不是对话流里那行提示 ——
+ * 所以它可以带上具体命令、档名、下游怎么办；顶栏和提示那两处才是要短的地方。
  */
 function fallbackFailureText({ command, profile, host, port, exitedEarly, stderr, explained }) {
   // 内核自己说了原因就照实转述 —— 别让面板的猜测盖过它自己的话。
   const said = explained && explained.kind !== 'unknown' ? explained : null;
   const raw = String(stderr || '').trim();
-  const tail = raw ? `\n内核原话：${raw}` : '';
+  // 用哪个命令/哪个档属于排障细节，塞在原文那段里就好，人话那行只说结论。
+  const tail = `\n[${command} · profile=${profile}]${raw ? `\n内核原话：${raw}` : ''}`;
 
   if (exitedEarly) {
     if (said) {
-      return (
-        `用「${command}」启动内核（profile=${profile}）时，它一启动就退出了：` +
-        `${said.reason}。${said.advice}${tail}`
-      );
+      return `内核一启动就退出了：${said.reason}。${said.advice}${tail}`;
     }
-    return (
-      `用「${command}」启动内核（profile=${profile}）时，它一启动就退出了。` +
-      '多半是 dsh 不在 PATH 里，或者 dshPanel.dshCommand 指错了 —— ' +
-      '先开个终端跑一次 dsh --version 确认，再把它的完整路径填进设置。' +
-      tail
-    );
+    return `内核一启动就退出了：多半是 dsh 不在 PATH，或 dshCommand 指错了。${tail}`;
   }
   return (
-    `内核起来了，但 ${host}:${port} 上一直没开门（profile=${profile}）。` +
-    `两种可能：这个档里没装门插件（用 dsh plugin --profile ${profile} list 看一眼，` +
-    '应当有 dsh-acp-door）；或者你改过端口，门插件里的 port 也要跟着改。' +
+    `内核起来了，但 ${host}:${port} 上没开门。两种可能：这个档里没装门插件` +
+    `（dsh plugin --profile ${profile} list 里应当有 dsh-acp-door），` +
+    '或者它里面的 port 要跟着 dshPanel.selfStartPort 改。' +
     tail
   );
 }
@@ -1257,25 +1259,15 @@ function fallbackFailureText({ command, profile, host, port, exitedEarly, stderr
  */
 function fallbackAdvice(kinds) {
   if (kinds.has('app-managed-profile')) {
-    return (
-      '档「desktop」是桌面端独占的，命令行起不来。把 dshPanel.fallbackProfile 换成 ' +
-      'vscode-panel（面板自己的档），或者先打开 DSH 桌面端 —— 面板会直接连它。'
-    );
+    return 'desktop 档只能由桌面端启动，换 fallbackProfile。';
   }
   if (kinds.has('wrong-app-flags')) {
-    return (
-      '这个档不接受面板的启动参数：它多半是给别的入口用的（比如 ACP 那种走标准输入输出的档）。' +
-      '把 dshPanel.fallbackProfile 换成 bundles 里有 @deepseek-ai/dsh-web-app 的档。'
-    );
+    return '这个档不接受启动参数，换一个网页档。';
   }
   if (kinds.has('port-in-use')) {
-    return '门要用的端口被占着：关掉占用它的进程再重连，或者改 dshPanel.port（门插件里的 port 也要跟着改）。';
+    return '端口被占着：关掉占用它的进程，或改 dshPanel.port（门插件里也要改）。';
   }
-  return (
-    '在设置里把 dshPanel.dshCommand 填成能用的完整启动命令（例如 ' +
-    'node C:\\Users\\你\\.dsh\\profiles\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js）；' +
-    '或者先打开 DSH 桌面端 —— 面板会直接连它，不用自己启动。'
-  );
+  return '填好 dshPanel.dshCommand，或先打开桌面端。';
 }
 
 module.exports = {

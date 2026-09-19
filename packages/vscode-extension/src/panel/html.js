@@ -63,7 +63,7 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
       </label>
       <label class="field" id="preset-field" hidden>
         <span class="field-label">模式</span>
-        <select id="preset-select" class="select" title="agent preset：只能在新建对话时生效（内核不允许一段对话中途换）"></select>
+        <select id="preset-select" class="select" title="换模式要在新建对话时（内核不允许中途换）"></select>
       </label>
       <div class="field" id="access-field" hidden>
         <span class="field-label">权限</span>
@@ -79,8 +79,8 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
   <main id="messages" class="messages" tabindex="0" aria-live="polite">
     <div class="empty" id="empty">
       <p class="empty-title">DSH Panel</p>
-      <p class="empty-hint">直接提问即可 —— 内核由插件自己按需启动，不用先去桌面上打开 DSH。</p>
-      <p class="empty-note">记忆、会话记录、插件都来自你的 $DSH_HOME，和桌面端用的是同一份。</p>
+      <p class="empty-hint">直接提问即可 —— 内核按需自启，不用先开桌面端。</p>
+      <p class="empty-note">记忆、会话、插件都来自 $DSH_HOME，和桌面端同一份。</p>
     </div>
   </main>
 

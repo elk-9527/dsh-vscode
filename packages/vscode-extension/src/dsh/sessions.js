@@ -87,7 +87,7 @@ function hasZstdSupport() {
  */
 function decodeSessionFile(file) {
   if (!hasZstdSupport()) {
-    return { events: [], frames: 0, error: '当前 Node 没有 zlib.zstdDecompressSync，解不了会话文件' };
+    return { events: [], frames: 0, error: '本机 Node 不支持 zstd，解不了会话文件' };
   }
   let buf;
   try {

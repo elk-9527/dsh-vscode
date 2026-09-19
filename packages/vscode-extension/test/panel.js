@@ -22,6 +22,11 @@ const openedLinks = [];
 const configValues = {
   host: '127.0.0.1',
   port: 47821,
+  // ⚠️ 自启端口**故意不用默认的 47831**：那一路上"必须没人占着"才是测试的前提，
+  // 而 47831 正是面板自启内核的默认端口 —— 用户自己开着 VS Code 面板时，
+  // 那上面就有一个真在用的内核（实测踩到：§8.5 就地连上了它、于是"命令坏了"
+  // 这条路径根本没被走到，测试红得莫名其妙）。测试不该依赖外面的机器状态。
+  selfStartPort: 47845,
   autoStart: false,
   fallbackProfile: 'dshdoor',
   dshCommand: 'dsh',
@@ -109,6 +114,15 @@ function waitFor(predicate, { totalMs = 30000, intervalMs = 40 } = {}) {
   });
 }
 
+/**
+ * 这一套跑下来，面板发出去过的**所有**消息（每个假视图的都汇到这里）。
+ *
+ * 用处在最后那一节：用户的规矩是「给用户看的提示、报错都要精炼」——
+ * 与其一条条断言，不如把所有真发过的消息扫一遍（这样将来新加的长文案
+ * 一进来就会被抓住，而不是等用户再提一次意见）。
+ */
+const everyMessage = [];
+
 /** 一个记录所有收到的消息的假 webview。 */
 function makeFakeView() {
   const messages = [];
@@ -125,6 +139,7 @@ function makeFakeView() {
       },
       postMessage: async (message) => {
         messages.push({ at: Date.now(), message });
+        everyMessage.push(message);
         return true;
       },
     },
@@ -547,8 +562,7 @@ function typesOf(items) {
         view.messages
           .map((item) => item.message)
           .filter(
-            (item) =>
-              item.type === 'notice' && /切不了权限|没有权限预设/.test(String(item.text || '')),
+            (item) => item.type === 'notice' && /切不了/.test(String(item.text || '')),
           );
       const notices = noticesOf();
       check('对话流里把原因说清楚了（顶栏那行放不下长文）', notices.length >= 1,
@@ -667,6 +681,64 @@ function typesOf(items) {
       .find((item) => item.type === 'notice' || item.type === 'error');
     check('接回不存在的会话会明说（notice 或 error）', Boolean(badOutcome), JSON.stringify(view.messages.slice(beforeBad).map((i) => i.message.type)));
     check('失败后面板还能继续用', Boolean(panel.client && panel.client.isConnected));
+  }
+
+  section('8.9 给用户看的字都要短（用户提过两次意见）');
+  {
+    /*
+     * 用户的规矩（原话大意）：提示和报错都要**精炼**，别在面板里塞一段
+     * "没有现成的内核，正在启动一个（档：vscode-panel）。第一次会慢一点…"
+     * 这种长句。
+     *
+     * 所以这里不针对某一条断言，而是把这一套跑下来**真发出去过的所有消息**
+     * 扫一遍。将来谁加了一句长文案，这里立刻红 —— 不用等用户再提一次。
+     *
+     * 三条线（都不是拍脑袋定的）：
+     *   - 顶栏那行 ≤ 24 字、不许换行（它本来就只放得下几个字）；
+     *   - 对话流提示第一行 ≤ 32 字、最多三行；第一行之后的**引用**行（以
+     *     「原因：」「内核原话：」开头的那种）放宽到 80 字 —— 那是内核的原话，
+     *     不是我在跟用户絮叨，截短了反而查不出问题（但也不能整段糊上来）；
+     *   - 报错的第一句（title）≤ 32 字、怎么办（advice）≤ 48 字
+     *     —— 内核原文不在此列，它照旧一字不删地附在后面。
+     */
+    const statuses = everyMessage.filter((m) => m.type === 'status');
+    const notices = everyMessage.filter((m) => m.type === 'notice');
+    const errors = everyMessage.filter((m) => m.type === 'error');
+
+    const longStatus = statuses.filter((m) => String(m.detail || '').length > 24 || /\n/.test(String(m.detail || '')));
+    check(`顶栏状态都很短（${statuses.length} 条，≤24 字且不换行）`, longStatus.length === 0,
+      JSON.stringify(longStatus.map((m) => m.detail)));
+
+    const noticeLines = (text) => String(text || '').split('\n');
+    const longNotice = notices.filter((m) => {
+      const lines = noticeLines(m.text);
+      if (lines.length > 3) return true;
+      return lines.some((line, index) => {
+        const quoted = index > 0 && /^(原因|内核原话)：/.test(line);
+        return line.length > (quoted ? 80 : 32);
+      });
+    });
+    check(`对话流提示都很短（${notices.length} 条：第一行 ≤32 字，引用行 ≤80 字）`,
+      longNotice.length === 0,
+      JSON.stringify(longNotice.map((m) => m.text)));
+
+    const longError = errors.filter(
+      (m) =>
+        !m.human ||
+        String(m.human.title || '').length > 32 ||
+        String(m.human.advice || '').length > 48,
+    );
+    check(`报错的第一句和第二句都很短（${errors.length} 条）`, longError.length === 0,
+      JSON.stringify(longError.map((m) => (m.human && `${m.human.title} / ${m.human.advice}`) || m.message)));
+
+    // 最长的那几条打出来，方便下次改的时候一眼看到现在的尺度。
+    const longest = (list, pick) =>
+      list
+        .map(pick)
+        .sort((a, b) => String(b).length - String(a).length)[0] || '（无）';
+    console.log(`     最长顶栏：${longest(statuses, (m) => m.detail)}`);
+    console.log(`     最长提示：${longest(notices, (m) => String(m.text).split('\n')[0])}`);
+    console.log(`     最长报错：${longest(errors, (m) => m.human && m.human.title)}`);
   }
 
   section('9. 收摊');
