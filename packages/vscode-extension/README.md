@@ -144,6 +144,18 @@ node tools/shots.js      # 把每个场景 × 深/浅主题拍成图（shots/*.p
 node tools/design-audit.js  # 界面尺度审计：字号/间距/行高/圆角各有几种、有没有硬编码颜色。
                          # 美化那一步用它量"改前改后"；加 --strict 时有硬编码颜色就非 0 退出。
 node tools/build-vsix.js # 打包成 vsix
+
+# 下面四个是「排查用」的，不是测试套件的一部分，也不打进 vsix（只 ship src/media/README/package.json）。
+# 它们跑的是你这台机器的真实环境，所以只适合手动跑：
+node tools/check-installed.cjs     # 装进 VS Code 的那份和仓库源码是否逐字节一致
+                                   # （判断"用户跑的是不是当前源码"—— 出过一次"改了源码但没装"）
+node tools/check-local-history.cjs # 面板"自己读盘"这条路在真机上看到了什么：
+                                   # 磁盘几段、读到几段、有没有解码失败、耗时、列表上限截掉多少
+node tools/who-owns-door.cjs       # 47821 上那个门是谁开的（桌面端自己的内核？测试留下的孤儿？）
+                                   # 门没开时会告诉你面板将走"兜底拉起"
+node tools/check-eol.cjs           # 有没有文件混着 CRLF 和 LF（逐字节比对最怕这个；混了就非 0 退出）
+                                   # 从任何目录跑都一样，不依赖当前工作目录
+
 node tools/vscode-check.js  # **真 VS Code 窗口里**的自检：开一个隔离窗口（自己的 user-data-dir 和
                             # extensions-dir，不碰你正开着的窗口），用 DSH_PANEL_AUTOFOCUS=1 让它
                             # 自动展开面板，断言 11 条：窗口起来 / 扩展激活 / 五个命令注册 /
