@@ -197,14 +197,18 @@ check(
   `门监听在 ${doorHost}`,
 );
 check(
-  '兜底档默认指向用户自己的 desktop 档（记忆/技能才一致）',
-  settings['dshPanel.fallbackProfile'].default === 'desktop',
+  // 2026-09-19 改的：默认档原来是 desktop，而那个档被桌面端独占、命令行起不来
+  // （内核原话：profile "desktop" is managed exclusively by the Electron application）。
+  // 也就是说"桌面端没开"的时候，面板必然起不来 —— 而那正是最需要它自己起来的时候。
+  // 现在的默认值是面板自己的档 vscode-panel（从官方 web 模板建的，装了门）。
+  '兜底档默认不是被桌面端独占的 desktop',
+  settings['dshPanel.fallbackProfile'].default !== 'desktop',
   `实际是 ${settings['dshPanel.fallbackProfile'].default}`,
 );
 check(
   '代码里的兜底档默认值和设置项一致（不能两处各写一个）',
-  /fallbackProfile:\s*cfg\.get\('fallbackProfile'\)\s*\|\|\s*'desktop'/.test(viewSource),
-  'view.js 里的兜底值和 package.json 漂移了',
+  viewSource.includes(`|| '${settings['dshPanel.fallbackProfile'].default}'`),
+  `view.js 里的兜底值和 package.json（${settings['dshPanel.fallbackProfile'].default}）漂移了`,
 );
 
 // ── 预设（模式）这条链路横跨两边，_meta 的键名必须一模一样 ──────────
@@ -415,6 +419,57 @@ check(
 
   const dup = dshCommandCandidates({ dshCommand: `node ${bin}`, homedir: tmp });
   check('候选清单：重复命令去重', dup.length === 1, dup.join(' | '));
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+{
+  // 2026-09-19 那次「面板起不来」的根子：默认档是 desktop，而那个档被桌面端
+  // 独占，命令行根本起不来。这里把两件事焊死：
+  //   ① 能自动找到"装了门 + 网页档"的备选（不再死在写死的档名上）；
+  //   ② 内核自己说了原因时，照实转述，别再用"多半是 PATH 不对"去盖过它。
+  const { panelProfileCandidates, explainKernelFailure } = require(path.join(ROOT, 'src/door/locate.js'));
+  const tmp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'dsh-profiles-'));
+  const profiles = path.join(tmp, '.dsh', 'profiles');
+  const writeProfile = (name, bundles) => {
+    const dir = path.join(profiles, name);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+      name: `dsh-profile-${name}`,
+      dsh: { profile: { bundles } },
+    }));
+  };
+  // 面板自己的档：门 + 网页 + 一堆插件（最能干，应该排前面）
+  writeProfile('vscode-panel', ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-acp-door', 'dsh-context', 'modlens-x']);
+  // 桌面端那个：同样有门和网页，但命令行起不来（我们没法从文件上看出来，只能试）
+  writeProfile('desktop', ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-acp-door']);
+  // 给别的入口用的档：有门，但是 ACP 走标准输入输出那套 —— 不接受 --host/--port
+  writeProfile('vscode', ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-acp-app', 'dsh-acp-door']);
+  // 网页档但没装门 —— 起来了也没门可连
+  writeProfile('web', ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']);
+
+  const scanned = panelProfileCandidates({ configured: 'desktop', homedir: tmp, env: {} });
+  check('候选档：设置里那个永远第一', scanned[0] === 'desktop', scanned.join(' | '));
+  check('候选档：能自动发现装了门的网页档', scanned.includes('vscode-panel'), scanned.join(' | '));
+  check('候选档：把 ACP 那种档排除掉（它不接受 --host/--port）', !scanned.includes('vscode'), scanned.join(' | '));
+  check('候选档：没装门的网页档也排除', !scanned.includes('web'), scanned.join(' | '));
+  check('候选档：有限的（最多三个，别让用户干等）', scanned.length <= 3, scanned.join(' | '));
+
+  const noScan = panelProfileCandidates({ configured: 'vscode-panel', homedir: path.join(tmp, 'empty'), env: {} });
+  check('候选档：没有 profiles 目录时也不崩，只留设置里那个',
+    noScan.length === 1 && noScan[0] === 'vscode-panel', noScan.join(' | '));
+
+  const managed = explainKernelFailure({
+    profile: 'desktop',
+    stderr: 'error: profile "desktop" is managed exclusively by the Electron application',
+  });
+  check('退出原因：认得出「这个档被桌面端独占」', managed.kind === 'app-managed-profile', managed.kind);
+  check('退出原因：说清是哪个档、并指向 fallbackProfile',
+    managed.reason.includes('desktop') && /fallbackProfile/.test(managed.advice), managed.advice);
+  check('退出原因：认得出「不接受面板的启动参数」',
+    explainKernelFailure({ profile: 'vscode', stderr: "error: unknown option '--no-open'" }).kind === 'wrong-app-flags');
+  check('退出原因：认得出「端口被占」',
+    explainKernelFailure({ profile: 'x', stderr: 'Error: listen EADDRINUSE: address already in use 127.0.0.1:47821' }).kind === 'port-in-use');
+  check('退出原因：什么都没说时不硬猜（交给上层兜底）',
+    explainKernelFailure({ profile: 'x', stderr: '' }).kind === 'unknown');
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 {

@@ -128,8 +128,8 @@
         },
         "dshPanel.fallbackProfile": {
           "type": "string",
-          "default": "desktop",
-          "description": "自己启动内核时用哪个 profile。默认 desktop —— 就是你桌面端那一档，只是没有窗口，所以记忆、技能、插件完全一致。这个 profile 里必须装好 dsh-acp-door 门插件。"
+          "default": "vscode-panel",
+          "description": "自己启动内核时用哪个 profile。默认 vscode-panel（面板自己的档，里面装着门插件和你在用的那套插件）。**不要填 desktop**：那个档被桌面端独占，命令行起不来。这个档里必须装好 dsh-acp-door；起不来时面板会自己在 $DSH_HOME/profiles 里另找一个装了门的网页档接着试。"
         },
         "dshPanel.dshCommand": {
           "type": "string",

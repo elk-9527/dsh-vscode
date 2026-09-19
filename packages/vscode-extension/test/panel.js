@@ -356,6 +356,28 @@ function typesOf(items) {
       /dsh-acp-door/.test(noDoor) && /plugin --profile desktop list/.test(noDoor) && /port/.test(noDoor),
       noDoor);
 
+    // (3b) 内核自己说了原因时：照实转述 + 附上原话，**不许**再断言是 PATH 的问题。
+    //      2026-09-19 那次「面板起不来」，内核明明说了
+    //      `profile "desktop" is managed exclusively by the Electron application`，
+    //      面板却猜成"多半是 dsh 不在 PATH 里"，把用户往错的方向带。
+    const { explainKernelFailure } = require('../src/door/locate');
+    const managedStderr = 'error: profile "desktop" is managed exclusively by the Electron application';
+    const managedText = fallbackFailureText({
+      command: 'dsh', profile: 'desktop', host: '127.0.0.1', port: 47821, exitedEarly: true,
+      stderr: managedStderr,
+      explained: explainKernelFailure({ profile: 'desktop', stderr: managedStderr }),
+    });
+    check('失败说明带上了内核的原话', managedText.includes('managed exclusively'), managedText);
+    check('失败说明不再断言是 PATH 的问题（那次就是这么带偏的）', !/PATH/.test(managedText), managedText);
+    check('失败说明指向正确的出路（改 fallbackProfile）', /fallbackProfile/.test(managedText), managedText);
+
+    const unknownText = fallbackFailureText({
+      command: 'dsh', profile: 'x', host: '127.0.0.1', port: 47821, exitedEarly: true,
+      stderr: 'some unexplained kernel complaint',
+    });
+    check('认不出来的原因也照样附原话（不吞掉）',
+      unknownText.includes('some unexplained kernel complaint'), unknownText);
+
     // (4) 设置里填了几个空格，不该被当成路径发给内核
     //     （内核会回 "cwd must be an absolute path: "，然后用户看到的是一句莫名其妙的话）。
     const savedCwd = configValues.cwd;

@@ -160,7 +160,10 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
 }
 
 (async () => {
+  /** 所有日志行（给测试自己看：失败时能看出它到底试了哪几条路）。 */
+  const logLines = [];
   const log = (level, message) => {
+    logLines.push(`[${level}] ${message}`);
     if (level !== 'info') console.log(`     [${level}] ${message}`);
     else if (process.env.DSH_PANEL_TEST_VERBOSE) console.log(`     [info] ${message}`);
   };
@@ -286,6 +289,118 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
       stillThere = false;
     }
     check('进程树上没有残留的 dsh 进程', !stillThere, `pid ${childPid} 还在`);
+  }
+
+  section('5. 设置里那个档起不来时，要自己换一个（2026-09-19 用户就是这么挂的）');
+  {
+    /*
+     * 用户当天的原话：面板报「没能启动 DSH 内核」，档是 desktop。
+     * 真因是内核回了 `profile "desktop" is managed exclusively by the Electron
+     * application` —— **那个档命令行起不来**（桌面端独占），而它恰好是当时的默认值。
+     * 结果就是：桌面端没开的时候面板必然起不来，而面板自己起来恰恰是那时候最需要的。
+     *
+     * 这一节用**真的** desktop 档跑一遍（它秒退、不改任何状态），验证：
+     *   ① 设置里那个档排第一（尊重用户）；
+     *   ② 扫出来的备选里有能用的档；
+     *   ③ 真的换过去、并且连上了、建出了会话；
+     *   ④ 全程没有把错误甩到对话流里（因为最后成功了）。
+     */
+    const { panelProfileCandidates } = require('../src/door/locate');
+    const realProfiles = panelProfileCandidates({ configured: 'desktop', homedir: os.homedir() });
+    console.log(`     这台机器上的候选档：${realProfiles.join(' → ')}`);
+    check('候选档：设置里的 desktop 排第一（用户明确指定了就尊重他）',
+      realProfiles[0] === 'desktop', realProfiles.join(' | '));
+    const spare = realProfiles.filter((name) => name !== 'desktop');
+    check('候选档：扫出了别的能自己启动的档（否则没有退路）',
+      spare.length > 0, realProfiles.join(' | '));
+
+    if (spare.length > 0) {
+      const savedProfile = configValues.fallbackProfile;
+      const savedCommand = configValues.dshCommand;
+      /*
+       * 逼它走「普通命令行」这条路：`dshCommand` 指到 bin.js，不碰 PATH 上那个
+       * `dsh`。为什么必须这样（2026-09-19 查清楚的）：
+       *
+       * PATH 上的 `dsh` 是**桌面端自己的垫片**（DSH Desktop.exe 带
+       * ELECTRON_RUN_AS_NODE 跑 desktop-cli.js），它反而**能**把 desktop 档跑起来。
+       * 但那个垫片住在 `…\host-commands\desktop\generations\<哈希>\bin\` 这种
+       * 一次性的目录里 —— 桌面端每次换代都换路径。所以一个**开得早**的 VS Code
+       * 进程，PATH 里可能还指着已经被删掉的那一代：`dsh` 找不到，而 `node bin.js`
+       * 又会拒绝 desktop 档（"managed exclusively by the Electron application"）。
+       * **两条路一起死**，就是用户当天看到的样子。
+       */
+      const realBin = path.join(
+        os.homedir(), '.dsh', 'profiles', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js',
+      );
+      const haveBin = fs.existsSync(realBin);
+      configValues.fallbackProfile = 'desktop';
+      if (haveBin) configValues.dshCommand = `node ${realBin}`;
+      const panel2 = new DshPanelView({
+        extensionUri: { fsPath: path.resolve(__dirname, '..') },
+        log,
+        spawnArgs: PATCH ? ['--patch', PATCH] : [],
+      });
+      const view2 = makeFakeView();
+      panel2.resolveWebviewView(view2);
+
+      // 记住它到底用了哪个档（spawnFallback 的返回值里带着）。
+      let chosen = null;
+      const realSpawnFallback = panel2.spawnFallback.bind(panel2);
+      panel2.spawnFallback = async (cfg) => {
+        chosen = await realSpawnFallback(cfg);
+        return chosen;
+      };
+
+      const logFrom = logLines.length;
+      const startedAt = Date.now();
+      await panel2.onWebviewMessage({ type: 'ready' });
+      const took = Date.now() - startedAt;
+      console.log(`     从零到可用耗时 ${(took / 1000).toFixed(1)}s（这里含一次注定失败的 desktop 尝试）`);
+      const mine = logLines.slice(logFrom);
+      const attempts = mine.filter((line) => /试着启动/.test(line)).map((line) => line.replace(/^\[info\] /, ''));
+      console.log(`     试过的路：${attempts.join(' ｜ ')}`);
+      const said = mine.filter((line) => /内核退出原因/.test(line)).map((line) => line.replace(/^\[warn\] /, ''));
+      if (said.length) console.log(`     内核自己说的：${said.join(' ｜ ')}`);
+
+      check('换档之后连上了', chosen && chosen.ok === true, JSON.stringify(chosen));
+      check('没有死在 desktop 上（普通命令行起不来那个档）',
+        Boolean(chosen && chosen.profile && chosen.profile !== 'desktop'),
+        `用了 ${chosen && chosen.profile} —— 如果哪天普通命令行也能起 desktop 了，这条断言就该改`);
+      if (haveBin) {
+        check('内核拒绝 desktop 档的原话被读到了（不再靠猜）',
+          said.some((line) => /managed exclusively/i.test(line)) ||
+            attempts.filter((line) => /档：desktop/.test(line)).length === 0,
+          JSON.stringify(said));
+        check('它先试了 desktop，然后才换档',
+          attempts.some((line) => /档：desktop/.test(line)) &&
+            attempts.some((line) => !/档：desktop/.test(line)),
+          attempts.join(' | '));
+      }
+      check('拿到会话了', Boolean(panel2.session && panel2.session.sessionId),
+        String(panel2.session && panel2.session.sessionId));
+
+      const messages2 = view2.messages.map((item) => item.message);
+      check('成功了就不该往对话流里甩错误',
+        !messages2.some((item) => item.type === 'error'),
+        JSON.stringify(messages2.filter((i) => i.type === 'error').map((i) => i.message)));
+      const topDetail = messages2.filter((i) => i.type === 'status').map((i) => String(i.detail || ''));
+      check('顶栏始终是短状态', topDetail.every((text) => text.length <= 24 && !/\n/.test(text)),
+        JSON.stringify(topDetail));
+
+      const child2 = panel2.background && panel2.background.child;
+      const pid2 = child2 && child2.pid;
+      panel2.dispose();
+      let freed2 = false;
+      try {
+        await waitFor(async () => !(await probePort('127.0.0.1', PORT, 400)), { totalMs: 30000, intervalMs: 600 });
+        freed2 = true;
+      } catch {
+        freed2 = false;
+      }
+      check('换档拉起的那个内核也被收干净了', freed2, `pid ${pid2} 的端口 30s 内没释放`);
+      configValues.fallbackProfile = savedProfile;
+      configValues.dshCommand = savedCommand;
+    }
   }
 
   console.log(`\n${'═'.repeat(56)}`);

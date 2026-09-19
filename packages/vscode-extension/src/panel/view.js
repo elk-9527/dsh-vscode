@@ -19,7 +19,13 @@ const os = require('node:os');
 const { DoorClient } = require('../door/client');
 const { DshSession } = require('../dsh/session');
 const { describeError } = require('../dsh/errors');
-const { probePort, spawnBackgroundDsh, dshCommandCandidates } = require('../door/locate');
+const {
+  probePort,
+  spawnBackgroundDsh,
+  dshCommandCandidates,
+  explainKernelFailure,
+  panelProfileCandidates,
+} = require('../door/locate');
 const { renderHtml, makeNonce } = require('../panel/html');
 const localSessions = require('../dsh/sessions');
 
@@ -236,7 +242,7 @@ class DshPanelView {
       host: cfg.get('host') || '127.0.0.1',
       port: cfg.get('port') || 47821,
       autoStart: cfg.get('autoStart') !== false,
-      fallbackProfile: cfg.get('fallbackProfile') || 'desktop',
+      fallbackProfile: cfg.get('fallbackProfile') || 'vscode-panel',
       dshCommand: cfg.get('dshCommand') || 'dsh',
       provider: cfg.get('provider') || '',
       model: cfg.get('model') || '',
@@ -275,6 +281,20 @@ class DshPanelView {
   }
 
   /**
+   * 兜底拉起要试的候选档（同理：测试可以只留设置里那一个）。
+   *
+   * 为什么要试多个档：`desktop` 这个档被桌面端独占，命令行根本起不来
+   * （2026-09-19 实测：`error: profile "desktop" is managed exclusively by the
+   * Electron application`）。用户没改过设置时用的就是这个默认值，于是面板
+   * 在"桌面端没开"时必然起不来 —— 而"桌面端没开"恰恰是最需要它自己起来的
+   * 时候。所以：先按设置试，不行就在 `$DSH_HOME/profiles` 里找一个装了门、
+   * 而且是网页档的接着试。
+   */
+  profilesFor(cfg) {
+    return panelProfileCandidates({ configured: cfg.fallbackProfile, homedir: os.homedir() });
+  }
+
+  /**
    * 后台拉起 DSH：按候选命令逐个试，谁先开出门就用谁。
    *
    * 为什么是「逐个试」而不是只信设置里的那一条：默认值是裸的 `dsh`，
@@ -291,9 +311,10 @@ class DshPanelView {
   async spawnFallback(cfg) {
     // 顶栏只留短状态；"为什么要启动""用哪个档"这类话进对话流。
     this.post({ type: 'status', state: 'connecting', detail: '正在启动…' });
+    const profiles = this.profilesFor(cfg);
     this.post({
       type: 'notice',
-      text: `没有现成的内核，正在启动一个（档：${cfg.fallbackProfile}）。第一次会慢一点，之后就快了。`,
+      text: `没有现成的内核，正在启动一个（档：${profiles[0]}）。第一次会慢一点，之后就快了。`,
     });
     this.log('info', '端口上没有门，按设置自己拉起一个 DSH 内核');
     if (this.background) this.background.dispose();
@@ -314,17 +335,25 @@ class DshPanelView {
       };
     }
 
+    // 先按档、再按命令：同一个档换个命令写法是"最后一招"，而换个档往往
+    // 才是真正的原因（设置里那个档起不来）。
+    const plans = [];
+    for (const profile of profiles) {
+      for (const command of candidates) plans.push({ profile, command });
+    }
+
     const failures = [];
-    for (let i = 0; i < candidates.length; i += 1) {
-      const command = candidates[i];
-      const hasMore = i + 1 < candidates.length;
-      // 候选命令逐个试是给日志看的，顶栏没必要跟着跳字。
-      this.log('info', `试着启动：${command}`);
+    const kinds = new Set();
+    for (let i = 0; i < plans.length; i += 1) {
+      const { profile, command } = plans[i];
+      const hasMore = i + 1 < plans.length;
+      // 候选逐个试是给日志看的，顶栏没必要跟着跳字。
+      this.log('info', `试着启动：${command}（档：${profile}）`);
       let background;
       try {
         background = spawnBackgroundDsh({
           command,
-          profile: cfg.fallbackProfile,
+          profile,
           log: this.log,
           extraArgs: this.spawnArgs,
         });
@@ -339,17 +368,24 @@ class DshPanelView {
         cfg.port,
         hasMore ? 30000 : 120000,
       );
-      if (outcome.ok) return { ok: true, command };
+      if (outcome.ok) return { ok: true, command, profile };
       // 没成：收掉这个进程再试下一条（killTree 连子孙一起杀，不留孤儿）。
+      // 收之前先把它自己打的最后几句话取出来 —— 原因就在里面。
+      const stderr = typeof background.stderrTail === 'function' ? background.stderrTail() : '';
+      const explained = explainKernelFailure({ profile, stderr });
       background.dispose();
       this.background = undefined;
+      kinds.add(explained.kind);
+      if (stderr) this.log('warn', `内核退出原因（${profile}）：${stderr.split('\n')[0]}`);
       failures.push(
         fallbackFailureText({
           command,
-          profile: cfg.fallbackProfile,
+          profile,
           host: cfg.host,
           port: cfg.port,
           exitedEarly: outcome.exitedEarly,
+          stderr,
+          explained,
         }),
       );
       if (!hasMore) break;
@@ -359,12 +395,9 @@ class DshPanelView {
       ok: false,
       human: {
         title: '没能启动 DSH 内核',
-        advice:
-          '在设置里把 dshPanel.dshCommand 填成能用的完整启动命令（例如 ' +
-          'node C:\\Users\\你\\.dsh\\profiles\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js）；' +
-          '或者先打开 DSH 桌面端 —— 面板会直接连它，不用自己启动。',
+        advice: fallbackAdvice(kinds),
         raw:
-          `启动 DSH 内核没成功（试了 ${candidates.length} 条命令）：\n` +
+          `启动 DSH 内核没成功（试了 ${plans.length} 种起法）：\n` +
           failures.join('\n\n'),
       },
     };
@@ -886,18 +919,60 @@ class DshPanelView {
  * - 进程活着但端口没开 → 这个档里可能没装门插件，或者门被指到了别的端口。
  * 把它们混成一句"没开门"，用户就只能自己猜。
  */
-function fallbackFailureText({ command, profile, host, port, exitedEarly }) {
+function fallbackFailureText({ command, profile, host, port, exitedEarly, stderr, explained }) {
+  // 内核自己说了原因就照实转述 —— 别让面板的猜测盖过它自己的话。
+  const said = explained && explained.kind !== 'unknown' ? explained : null;
+  const raw = String(stderr || '').trim();
+  const tail = raw ? `\n内核原话：${raw}` : '';
+
   if (exitedEarly) {
+    if (said) {
+      return (
+        `用「${command}」启动内核（profile=${profile}）时，它一启动就退出了：` +
+        `${said.reason}。${said.advice}${tail}`
+      );
+    }
     return (
       `用「${command}」启动内核（profile=${profile}）时，它一启动就退出了。` +
       '多半是 dsh 不在 PATH 里，或者 dshPanel.dshCommand 指错了 —— ' +
-      '先开个终端跑一次 dsh --version 确认，再把它的完整路径填进设置。'
+      '先开个终端跑一次 dsh --version 确认，再把它的完整路径填进设置。' +
+      tail
     );
   }
   return (
     `内核起来了，但 ${host}:${port} 上一直没开门（profile=${profile}）。` +
     `两种可能：这个档里没装门插件（用 dsh plugin --profile ${profile} list 看一眼，` +
-    '应当有 dsh-acp-door）；或者你改过端口，门插件里的 port 也要跟着改。'
+    '应当有 dsh-acp-door）；或者你改过端口，门插件里的 port 也要跟着改。' +
+    tail
+  );
+}
+
+/**
+ * 所有起法都失败之后，给用户一句**对得上原因**的建议。
+ *
+ * 原来这里是写死的一句"把 dshCommand 填成完整命令" —— 而当失败原因是
+ * "这个档命令行起不来"（2026-09-19 那次）时，那句话把人往错的方向带。
+ */
+function fallbackAdvice(kinds) {
+  if (kinds.has('app-managed-profile')) {
+    return (
+      '档「desktop」是桌面端独占的，命令行起不来。把 dshPanel.fallbackProfile 换成 ' +
+      'vscode-panel（面板自己的档），或者先打开 DSH 桌面端 —— 面板会直接连它。'
+    );
+  }
+  if (kinds.has('wrong-app-flags')) {
+    return (
+      '这个档不接受面板的启动参数：它多半是给别的入口用的（比如 ACP 那种走标准输入输出的档）。' +
+      '把 dshPanel.fallbackProfile 换成 bundles 里有 @deepseek-ai/dsh-web-app 的档。'
+    );
+  }
+  if (kinds.has('port-in-use')) {
+    return '门要用的端口被占着：关掉占用它的进程再重连，或者改 dshPanel.port（门插件里的 port 也要跟着改）。';
+  }
+  return (
+    '在设置里把 dshPanel.dshCommand 填成能用的完整启动命令（例如 ' +
+    'node C:\\Users\\你\\.dsh\\profiles\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js）；' +
+    '或者先打开 DSH 桌面端 —— 面板会直接连它，不用自己启动。'
   );
 }
 
@@ -905,6 +980,7 @@ module.exports = {
   DshPanelView,
   VIEW_ID,
   fallbackFailureText,
+  fallbackAdvice,
   isLoopbackHost,
   isMissingMethod,
 };

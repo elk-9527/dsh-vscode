@@ -15,6 +15,13 @@ const net = require('node:net');
 const path = require('node:path');
 const fs = require('node:fs');
 const { spawn, execFileSync } = require('node:child_process');
+// `$DSH_HOME` 的判定只有一处（sessions.js），这里借它省得两条规则漂移。
+const { resolveSessionsRoot } = require('../dsh/sessions');
+
+/** `$DSH_HOME`（环境变量优先，否则 `~/.dsh`）。 */
+function dshHome(homedir, env = process.env) {
+  return path.dirname(resolveSessionsRoot({ homedir, env }));
+}
 
 /** 探测一个端口是否能连上（不握手，只探 TCP）。 */
 function probePort(host, port, timeoutMs = 800) {
@@ -305,17 +312,36 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [] }) {
     process.platform === 'win32'
       ? spawn(process.env.ComSpec || 'cmd.exe', winArgs, {
           windowsHide: true,
-          stdio: 'ignore',
+          stdio: ['ignore', 'ignore', 'pipe'],
           detached: false,
           windowsVerbatimArguments: true,
         })
       : (() => {
           const parts = resolveCommand(command);
           return spawn(parts[0], [...parts.slice(1), ...args], {
-            stdio: 'ignore',
+            stdio: ['ignore', 'ignore', 'pipe'],
             detached: false,
           });
         })();
+
+  /*
+   * 收着内核的 stderr —— **它退出的真实原因就写在这里**。
+   *
+   * 2026-09-19 踩到的：这一行原来是 `stdio: 'ignore'`，把内核的话全扔了。
+   * 于是用户看到的是面板**猜**出来的原因（"多半是 dsh 不在 PATH 里"），
+   * 而内核其实明明白白说了 `error: profile "desktop" is managed exclusively
+   * by the Electron application` —— 跟 PATH 一点关系都没有，用户按那句建议
+   * 去改 dshCommand 只会越改越远。现在留末尾 2000 字，够放一段错误加上下文。
+   */
+  let stderrTail = '';
+  if (child.stderr) {
+    if (typeof child.stderr.setEncoding === 'function') child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => {
+      stderrTail = (stderrTail + chunk).slice(-2000);
+    });
+    // 管道自己出错（极少见）不该把扩展带崩，也不该变成未捕获异常。
+    child.stderr.on('error', () => {});
+  }
 
   let disposed = false;
   child.on('error', (error) => {
@@ -328,14 +354,27 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [] }) {
 
   return {
     child,
+    /** 内核自己打的最后一段 stderr（可能为空）。 */
+    stderrTail() {
+      return stderrTail.trim();
+    },
     dispose() {
       if (disposed) return;
       disposed = true;
+      // 它自己已经退了的时候（自启失败那条路就是这样），这次收摊多半什么也杀不到，
+      // taskkill 会报"找不到进程"。那不是故障，别在日志里吓人 —— 但仍然要试一次：
+      // 壳退了、底下的内核还活着（Windows 上 dsh 是垫片，这种情形真实存在）。
+      const alreadyExited = child.exitCode !== null || child.signalCode !== null;
       try {
         killTree(child);
-        log('info', '已停掉本扩展拉起的后台 DSH');
+        log(
+          'info',
+          alreadyExited
+            ? '后台 DSH 已经自己退了，顺手清一下可能残留的子孙进程'
+            : '已停掉本扩展拉起的后台 DSH',
+        );
       } catch (error) {
-        log('warn', `停后台 DSH 失败：${error.message}`);
+        log(alreadyExited ? 'info' : 'warn', `停后台 DSH 失败：${error.message}`);
       }
     },
   };
@@ -397,6 +436,110 @@ function runDshSync({ command, args = [], timeoutMs = 120000 }) {
   }
 }
 
+/**
+ * 内核刚退出时，先读它自己说了什么，再决定给用户什么建议。
+ *
+ * 为什么要有这一步（2026-09-19 的教训）：内核退出原因五花八门，而面板原来
+ * 一律猜"dsh 不在 PATH 里"。最典型的一次是 `--profile desktop`：
+ * DSH 回的是 `profile "desktop" is managed exclusively by the Electron
+ * application` —— **那个档命令行根本起不来**，用户按面板的建议去改
+ * dshCommand 是白费力气。所以：认得出来的原因就照实说，认不出来才回退到猜，
+ * 而且原文一字不删地附在后面。
+ *
+ * @returns {{kind: string, reason: string, advice: string}} kind 为 'unknown' 时
+ *   reason/advice 可能为空，调用方自己兜底。
+ */
+function explainKernelFailure({ profile, stderr }) {
+  const text = String(stderr || '');
+  if (/managed exclusively by the Electron application/i.test(text)) {
+    return {
+      kind: 'app-managed-profile',
+      reason: `档「${profile}」只能由 DSH 桌面端启动，命令行起不来`,
+      advice:
+        `把 dshPanel.fallbackProfile 换成面板能自己启动的档（例如 vscode-panel），` +
+        '或者先打开 DSH 桌面端 —— 面板会直接连它，不用自己启动。',
+    };
+  }
+  if (/unknown option/i.test(text)) {
+    return {
+      kind: 'wrong-app-flags',
+      reason: `档「${profile}」不接受面板的启动参数（--no-open/--host/--port）`,
+      advice:
+        '这个档多半是给别的入口用的（比如 ACP 那种走标准输入输出的档）。' +
+        '把 dshPanel.fallbackProfile 换成一个网页档（bundles 里有 @deepseek-ai/dsh-web-app 的）。',
+    };
+  }
+  if (/ENOENT|not recognized|not found|不是内部或外部命令|系统找不到/i.test(text)) {
+    return {
+      kind: 'missing-command',
+      reason: '找不到 dsh 命令',
+      advice: '把 dshPanel.dshCommand 填成完整启动命令，或者确认 dsh 在 PATH 里。',
+    };
+  }
+  if (/EADDRINUSE|address already in use|address in use/i.test(text)) {
+    return {
+      kind: 'port-in-use',
+      reason: '门要用的端口被别的进程占着',
+      advice: '把占用那个端口的进程关掉再重连；或者改 dshPanel.port 和门插件里的 port。',
+    };
+  }
+  return { kind: 'unknown', reason: '', advice: '' };
+}
+
+/**
+ * 面板能自己启动的档：目录里装了门插件、而且 bundles 里有网页那套
+ * （`@deepseek-ai/dsh-web-app`）—— 只有网页档才接受 `--no-open/--host/--port`
+ * 并把门开在 TCP 上。
+ *
+ * 用户设置的那个永远排第一（他明确指定了就尊重他）；后面是按目录**扫**出来的
+ * 备选，用于"设置里那个起不来"时自动换一个 —— 这样插件在别的机器上也能自己
+ * 找到活路，而不是死在一个写死的档名上。
+ *
+ * 已知的坑：`desktop` 档被桌面端独占，命令行起不来。它照样会被扫出来（文件名
+ * 上没有任何标记），所以**不靠名字排除**，而是靠内核自己回的那句错误
+ * （见 {@link explainKernelFailure}）—— 试一次、秒退、换下一个，代价很小。
+ */
+function panelProfileCandidates({
+  configured,
+  homedir = require('node:os').homedir(),
+  env = process.env,
+} = {}) {
+  const list = [];
+  const push = (name) => {
+    const value = String(name || '').trim();
+    if (value && SAFE_PROFILE.test(value) && !list.includes(value)) list.push(value);
+  };
+  push(configured);
+
+  const root = path.join(dshHome(homedir, env), 'profiles');
+  let entries = [];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    entries = [];
+  }
+  const capable = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    try {
+      const raw = fs.readFileSync(path.join(root, entry.name, 'package.json'), 'utf8');
+      const pkg = JSON.parse(raw);
+      const bundles = (pkg.dsh && pkg.dsh.profile && pkg.dsh.profile.bundles) || [];
+      const list0 = Array.isArray(bundles) ? bundles.map(String) : [];
+      const hasDoor = list0.some((name) => /dsh-acp-door/.test(name));
+      const hasWebApp = list0.some((name) => /@deepseek-ai\/dsh-web-app/.test(name));
+      // 插件多的一般更能干（用户的档就是这种），所以按 bundles 数量从多到少。
+      if (hasDoor && hasWebApp) capable.push({ name: entry.name, weight: list0.length });
+    } catch {
+      // 读不动/不是 profile 的目录，跳过就是了，不影响别的候选。
+    }
+  }
+  capable.sort((a, b) => b.weight - a.weight || a.name.localeCompare(b.name));
+  for (const item of capable) push(item.name);
+  // 最多试三个：再多样基本上都是同一个原因在重复失败，白等用户时间。
+  return list.slice(0, 3);
+}
+
 module.exports = {
   probePort,
   waitForPort,
@@ -409,4 +552,6 @@ module.exports = {
   resolveCommand,
   commandLine,
   dshCommandCandidates,
+  explainKernelFailure,
+  panelProfileCandidates,
 };

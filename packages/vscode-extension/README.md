@@ -24,22 +24,40 @@ VS Code 侧边栏（本扩展）
 - 门**只监听本机回环地址**，不接受外部连接。
 - **端口上已经有门就复用**（桌面端开着时就是这种，不会多起进程）；
   **没有门就自己启动一个**，用的是 `dshPanel.fallbackProfile`
-  （默认 `desktop` —— 就是你桌面端那一档，所以记忆、技能、插件完全一致，
-  只是没有窗口）。实测从零到可以提问约 5 秒。
+  （默认 `vscode-panel` —— 面板自己的档，从官方 web 模板建的，装了门和你那套插件）。
 - 关掉 VS Code 时，扩展会把**自己拉起的**那个内核收掉；桌面端那个绝不碰。
 - 想让面板永远用自己的内核（不碰桌面端那个），把 `dshPanel.autoStart` 保持
   打开，并把 `dshPanel.port` 改成一个桌面端不用的端口即可。
+- **自己启动失败时会换档再试**：设置里那个档排第一（尊重你的选择），起不来就
+  在 `$DSH_HOME/profiles` 里找一个装了门、而且是网页档的接着试。内核自己
+  报的错（退出码 + stderr）会被读出来照实转述，不再猜。
 
-### 门要装进哪个档
+### 门要装进哪个档（这里踩过一个大坑）
 
 门插件装在哪个 profile 里，面板就连得上哪个 profile 的 DSH。
-本项目把它装进了用户的 `desktop` 档（记录与卸载方法见 `docs/第1步-装进桌面端.md`），
-于是「先开桌面端、再开 VS Code」时，面板连的就是桌面端那个**正在跑的进程**；
-桌面端没开时，扩展用同一档自己拉一个无窗口的内核。
+
+**坑（2026-09-19）**：一开始默认用 `desktop` 档 —— 想的是"和桌面端同一档，
+记忆技能插件完全一致"。但那个档**被桌面端独占**，普通命令行起不来：
+
+```
+error: profile "desktop" is managed exclusively by the Electron application
+```
+
+于是"桌面端没开"的时候面板必然起不来，而那恰恰是最需要它自己起来的时候。
+现在的做法：
+
+- 面板有自己的档 **`vscode-panel`**（`dsh --profile vscode-panel
+  --from-default-profile web` 建的，再 `dsh plugin --profile vscode-panel add
+  <门插件>` 和你在用的那些插件），命令行能起、能开 TCP 门；
+- PATH 上那个 `dsh` 是**桌面端自己的垫片**（`DSH Desktop.exe` 带
+  `ELECTRON_RUN_AS_NODE` 跑 `desktop-cli.js`），它反而**能**跑 `desktop` 档 ——
+  但它住在一个带哈希的一次性目录里，桌面端换代就换路径，所以一个开得早的
+  VS Code 可能还指着已经删掉的那一代：`dsh` 找不到、`node bin.js` 又拒绝
+  `desktop`，**两条路一起死**。这就是那个 bug 的完整成因。
 
 **注意**：插件是在内核启动时加载的。装完之后，已经在跑的桌面端不会立刻有门 ——
 要么重启一次桌面端（得到一个进程、一个大脑的最优状态），
-要么就让扩展自己拉一个内核（同一档、同一份记忆，只是多一个进程）。
+要么就让扩展自己拉一个内核（同一份记忆，只是多一个进程）。
 
 ### 受限模式（Restricted Mode）也没问题
 
@@ -89,7 +107,7 @@ VS Code 侧边栏（本扩展）
 | `dshPanel.host` | `127.0.0.1` | 「门」的监听地址 |
 | `dshPanel.port` | `47821` | 「门」的端口，要和门插件里写的保持一致 |
 | `dshPanel.autoStart` | `true` | 端口上没有门时，自己启动一个内核（开着就不用先开桌面端） |
-| `dshPanel.fallbackProfile` | `desktop` | 自己启动内核时用哪个 profile（里面要装好门插件）。默认就是用户自己那一档 |
+| `dshPanel.fallbackProfile` | `vscode-panel` | 自己启动内核时用哪个 profile（里面要装好门插件）。**别填 `desktop`** —— 那个档被桌面端独占，命令行起不来 |
 | `dshPanel.dshCommand` | `dsh` | `dsh` 命令的名字或完整路径 |
 | `dshPanel.provider` / `dshPanel.model` | 空 | 新会话的初始模型，留空由内核决定 |
 | `dshPanel.cwd` | 空 | 新会话的工作目录，留空用当前工作区 |
