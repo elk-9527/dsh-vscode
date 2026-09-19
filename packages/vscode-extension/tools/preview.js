@@ -209,7 +209,7 @@ const SCENARIOS = {
    */
   bare() {
     return {
-      steps: [{ message: { type: 'status', state: 'connecting', detail: '连接 127.0.0.1:47821…' } }],
+      steps: [{ message: { type: 'status', state: 'connecting', detail: '正在连接…' } }],
     };
   },
 
@@ -217,7 +217,7 @@ const SCENARIOS = {
   empty() {
     return {
       steps: [
-        { message: { type: 'status', state: 'ready', detail: '已连上正在运行的 DSH' } },
+        { message: { type: 'status', state: 'ready', detail: '就绪' } },
         { message: configMessage },
         { message: presetsMessage },
       ],
@@ -234,7 +234,7 @@ const SCENARIOS = {
   perf() {
     return {
       steps: [
-        { message: { type: 'status', state: 'busy', detail: 'DSH 正在工作…' } },
+        { message: { type: 'status', state: 'busy', detail: '工作中…' } },
         { message: { type: 'user', text: '写一段长文档给我。' } },
         { message: { type: 'assistant', id: 'a1' } },
         { message: { type: 'busy', busy: true } },
@@ -252,7 +252,7 @@ const SCENARIOS = {
   context() {
     return {
       steps: [
-        { message: { type: 'status', state: 'ready', detail: '已连上正在运行的 DSH' } },
+        { message: { type: 'status', state: 'ready', detail: '就绪' } },
         { message: configMessage },
         { message: presetsMessage },
         {
@@ -314,7 +314,7 @@ const SCENARIOS = {
   chat() {
     return {
       steps: [
-        { message: { type: 'status', state: 'ready', detail: '已连上正在运行的 DSH' } },
+        { message: { type: 'status', state: 'ready', detail: '就绪' } },
         { message: configMessage },
         { message: presetsMessage },
         { message: { type: 'usage', used: 12480, size: 262144 } },
@@ -374,7 +374,7 @@ const SCENARIOS = {
   streaming() {
     return {
       steps: [
-        { message: { type: 'status', state: 'busy', detail: 'DSH 正在工作…' } },
+        { message: { type: 'status', state: 'busy', detail: '工作中…' } },
         { message: configMessage },
         { message: { type: 'user', text: '把测试跑一遍，有问题就修。' } },
         { message: { type: 'assistant', id: 'a1' } },
@@ -404,14 +404,14 @@ const SCENARIOS = {
   },
 
   /**
-   * 历史会话：这个场景本身只摆好「已连上 + 工作目录」，浮层里的清单和回放
+   * 历史会话：这个场景本身只摆好「就绪 + 工作目录」，浮层里的清单和回放
    * 都由 uitest 的断言脚本现场注入 —— 因为真实链路是「点开浮层才去要清单」，
    * 提前喂的消息会被「浮层没开就不渲染」的护栏丢掉（那道护栏是对的）。
    */
   history() {
     return {
       steps: [
-        { message: { type: 'status', state: 'ready', detail: '已连上正在运行的 DSH' } },
+        { message: { type: 'status', state: 'ready', detail: '就绪' } },
         { message: { type: 'meta', cwd: 'D:\\dsh-vscode\\packages\\vscode-extension' } },
       ],
     };
@@ -421,7 +421,7 @@ const SCENARIOS = {
   permission() {
     return {
       steps: [
-        { message: { type: 'status', state: 'ready', detail: '已连上正在运行的 DSH' } },
+        { message: { type: 'status', state: 'ready', detail: '就绪' } },
         { message: { type: 'user', text: '删掉 build 目录再重新打包' } },
         { message: { type: 'assistant', id: 'a1' } },
         {
@@ -461,7 +461,7 @@ const SCENARIOS = {
   error() {
     return {
       steps: [
-        { message: { type: 'status', state: 'ready', detail: '已连上正在运行的 DSH' } },
+        { message: { type: 'status', state: 'ready', detail: '就绪' } },
         { message: { type: 'user', text: '帮我看看这个报错是怎么回事。' } },
         {
           message: {

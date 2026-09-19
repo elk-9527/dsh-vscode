@@ -1,24 +1,62 @@
 'use strict';
 
 /**
- * 兜底路径的集成测试：桌面端没在跑时，扩展要自己把后台 DSH 拉起来。
+ * 自启内核的集成测试：端口上什么都没有时，扩展要自己把内核拉起来。
  *
- * 这是**用户明早最可能走的路径**（刚开机，桌面端 DSH 还没启动），所以
- * 必须单独测：拉起 → 等到门开 → 握手 → 建会话 → 跑一个真回合 →
- * 收摊时把后台进程真的杀干净（不留孤儿进程占着端口）。
+ * 这是**最常见的路径**（刚开机、或者用户根本没开桌面端），所以必须单独测：
+ * 拉起 → 等到门开 → 握手 → 建会话 → 跑一个真回合 →
+ * 收摊时把内核进程真的杀干净（不留孤儿进程占着端口）。
  *
- * 前置：47821 端口必须是**空的**。跑之前请先停掉手动启动的试验台。
- * 用法：node test/fallback.js
+ * 端口：默认 47821（和面板默认一致）。但桌面端开着的时候那个端口上已经有门了，
+ * 这个测试就没法做「从零拉起」。所以端口可以用环境变量换：
+ *
+ *     $env:DSH_PANEL_TEST_PORT = '47830'; node test/fallback.js
+ *
+ * 换了端口之后测试会给内核挂一个 `--patch`，把门**钉**到那个端口上
+ * （门那一行的 config 是整段替换的，所以 patch 里必须把每个字段都写全）。
  */
 
 const path = require('node:path');
+const fs = require('node:fs');
+const os = require('node:os');
 const Module = require('node:module');
 
 const SCRATCH = path.resolve(__dirname, '..', '..', '..', 'spike', 'scratch');
 
+/** 测哪个端口：默认跟面板默认一致，可用 DSH_PANEL_TEST_PORT 换一个空的。 */
+const PORT = Number(process.env.DSH_PANEL_TEST_PORT || 47821);
+
+/**
+ * 把门钉到 PORT 上的那个 `--patch` 文件。
+ *
+ * 只在换了端口时才需要：门那一行的 config 是**整段替换**的（实测：
+ * 只写 port 的话 host/provider/model/preset 会一起消失），所以这里把
+ * 每个字段都照抄一遍。47821 时返回 null —— 档里本来就是那个端口，不用补。
+ */
+function writeDoorPortPatch() {
+  if (PORT === 47821) return null;
+  const file = path.join(os.tmpdir(), `dsh-panel-test-door-${PORT}.yml`);
+  const body = [
+    '# 测试用：把门钉到这个端口上（test/fallback.js 生成，可随时删）。',
+    '# 门那一行的 config 是整段替换的，所以每个字段都要写全。',
+    '- id: acp-door',
+    '  config:',
+    '    host: 127.0.0.1',
+    `    port: ${PORT}`,
+    '    provider: opencode-go',
+    '    model: deepseek-v4.1-flash',
+    '    preset: standard',
+    '',
+  ].join('\n');
+  fs.writeFileSync(file, body, 'utf8');
+  return file;
+}
+
+const PATCH = writeDoorPortPatch();
+
 const configValues = {
   host: '127.0.0.1',
-  port: 47821,
+  port: PORT,
   autoStart: true, // ← 本次测试的主角
   // 生产默认是 desktop（用户自己那一档）。测试里刻意用 dshdoor：
   // 让测试去拉起用户的真实配置，会往他的档和记忆里写东西 —— 测试不该有这个权力。
@@ -128,23 +166,26 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
   };
 
   section('0. 前置：端口必须是空的');
-  const alreadyUp = await probePort('127.0.0.1', 47821, 800);
+  const alreadyUp = await probePort('127.0.0.1', PORT, 800);
   if (alreadyUp) {
     // 这不是失败，是「现在没法测」：这个测试要验证「从零拉起一个内核」，
-    // 而 47821 上已经有一个在跑了（比如你的 VS Code 正开着）。
+    // 而这个端口上已经有一个在跑了（比如桌面端 DSH，或者你的 VS Code 正开着）。
     // 用退出码 2 表示跳过，让上层能和真失败区分开。
-    console.log('  ⏭  47821 上已经有一个 DSH 在跑，这个测试现在没法做。');
-    console.log('     它验证的是「从零拉起」，需要端口空着。');
-    console.log('     先关掉 VS Code（或手工起的试验台），再跑一次即可。');
+    console.log(`  ⏭  ${PORT} 上已经有一个 DSH 在跑，这个测试现在没法做。`);
+    console.log('     它验证的是「从零拉起」，需要端口空着。两个办法：');
+    console.log('     ① 关掉桌面端 DSH（或手工起的试验台）再跑；');
+    console.log(`     ② 换个空端口跑：$env:DSH_PANEL_TEST_PORT = '47830'; node test/fallback.js`);
     console.log('     —— 按「跳过」处理，不算失败。');
     process.exit(2);
   }
-  console.log('  ✅ 47821 是空的，可以测兜底路径了');
+  console.log(`  ✅ ${PORT} 是空的，可以测自启内核这条路了${PATCH ? `（门钉在 ${PORT}，patch：${PATCH}）` : ''}`);
 
-  section('1. 打开面板 → 应该自动拉起后台 DSH');
+  section('1. 打开面板 → 应该自己把内核拉起来');
   const panel = new DshPanelView({
     extensionUri: { fsPath: path.resolve(__dirname, '..') },
     log,
+    // 换了端口时，把门也指过去（生产路径不传这个）。
+    spawnArgs: PATCH ? ['--patch', PATCH] : [],
   });
   const view = makeFakeView();
   panel.resolveWebviewView(view);
@@ -156,15 +197,28 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
   const statuses = view.messages
     .filter((item) => item.message.type === 'status')
     .map((item) => item.message);
+  const notices = view.messages
+    .filter((item) => item.message.type === 'notice')
+    .map((item) => item.message.text);
   console.log(`     状态序列：${statuses.map((s) => `${s.state}/${s.detail}`).join(' → ')}`);
+  console.log(`     对话流提示：${notices.join(' ｜ ') || '（无）'}`);
 
-  check('确实发了「正在后台启动」的状态', statuses.some((s) => /后台启动/.test(s.detail || '')), JSON.stringify(statuses));
+  check(
+    '顶栏说的是短状态（没有把「正在后台启动 DSH（档：…）」塞进顶栏）',
+    statuses.every((s) => String(s.detail || '').length <= 24 && !/\n/.test(String(s.detail || ''))),
+    JSON.stringify(statuses.map((s) => s.detail)),
+  );
+  check(
+    '「正在启动内核」这件事说在对话流里',
+    notices.some((text) => /正在启动一个/.test(text)),
+    JSON.stringify(notices),
+  );
   check('最终连上了', statuses.some((s) => s.state === 'ready'), JSON.stringify(statuses.at(-1)));
   check('拿到了会话', Boolean(panel.session && panel.session.sessionId), String(panel.session && panel.session.sessionId));
   check('确实是由本扩展拉起的（记着那个后台进程）', Boolean(panel.background), 'panel.background 是空的');
   console.log(`     从零到可用耗时 ${(took / 1000).toFixed(1)}s`);
 
-  section('2. 兜底连接也能干活');
+  section('2. 自己拉起来的连接也能干活');
   const before = view.messages.length;
   await panel.onWebviewMessage({
     type: 'send',
@@ -182,7 +236,7 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
 
   let portFreed = false;
   try {
-    await waitFor(async () => !(await probePort('127.0.0.1', 47821, 400)), {
+    await waitFor(async () => !(await probePort('127.0.0.1', PORT, 400)), {
       totalMs: 30000,
       intervalMs: 600,
     });

@@ -75,7 +75,8 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
   <main id="messages" class="messages" tabindex="0" aria-live="polite">
     <div class="empty" id="empty">
       <p class="empty-title">DSH Panel</p>
-      <p class="empty-hint">直接提问即可。它用的是你正在运行的 DSH —— 同一份记忆、同一份会话记录、同一套工具。</p>
+      <p class="empty-hint">直接提问即可 —— 内核由插件自己按需启动，不用先去桌面上打开 DSH。</p>
+      <p class="empty-note">记忆、会话记录、插件都来自你的 $DSH_HOME，和桌面端用的是同一份。</p>
     </div>
   </main>
 

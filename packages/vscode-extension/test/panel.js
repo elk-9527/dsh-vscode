@@ -239,9 +239,14 @@ function typesOf(items) {
 
   const afterDrop = view.messages.slice(dropIndex).map((item) => item.message);
   check(
-    '断线被界面看见了',
-    afterDrop.some((item) => item.type === 'status' && item.state === 'error' && /断开/.test(item.detail || '')),
+    '断线被界面看见了（顶栏变短状态，原因进对话流）',
+    afterDrop.some((item) => item.type === 'status' && item.state === 'error' && item.detail === '未连接'),
     JSON.stringify(afterDrop.map((i) => i.type)),
+  );
+  check(
+    '断线的原因写在对话流里（不再是顶栏那一小行）',
+    afterDrop.some((item) => item.type === 'error' && /断开/.test(item.message || '')),
+    JSON.stringify(afterDrop.filter((i) => i.type === 'error').map((i) => i.message)),
   );
   check(
     '断线后会解除「正在回答」状态（否则停止按钮会一直转）',
@@ -265,11 +270,11 @@ function typesOf(items) {
     JSON.stringify(resumeMessages.filter((i) => i.type === 'text').map((i) => i.delta)).slice(0, 200),
   );
 
-  section('8.5 兜底拉起失败时，别让用户干等两分钟');
+  section('8.5 自启内核失败时，别让用户干等两分钟');
   {
     // 场景：门连不上 + 自动拉起 + 命令写错（dshCommand 填了个不存在的路径）。
     // 以前这里会老老实实等满 120 秒的 waitForPort，用户对着
-    // "正在后台启动 DSH…" 干等两分钟，最后只得到一句"没开门"。
+    // "正在启动 DSH…" 干等两分钟，最后只得到一句"没开门"。
     const saved = { ...configValues };
     configValues.autoStart = true;
     configValues.port = 47844; // 这个端口上不会有门
@@ -293,17 +298,25 @@ function typesOf(items) {
     const errorStatus = all.find((item) => item.type === 'status' && item.state === 'error');
     check('命令不存在时给出了错误状态（不是一直转圈）', Boolean(errorStatus),
       JSON.stringify(all.slice(-3)));
-    check('错误里说清了是哪个命令、该怎么办',
-      Boolean(errorStatus) &&
-        errorStatus.detail.includes(configValues.dshCommand) &&
-        /PATH|dshCommand/.test(errorStatus.detail),
-      errorStatus ? errorStatus.detail : '没有错误消息');
+    check('顶栏只放短状态（长诊断不许塞进那一小行）',
+      Boolean(errorStatus) && errorStatus.detail === '未连接',
+      errorStatus ? JSON.stringify(errorStatus.detail) : '没有错误状态');
+    // 长诊断必须进对话流 —— 用户是在对话框里读东西的，不是在顶栏。
+    const errMsg = all.find((item) => item.type === 'error');
+    check('诊断进了对话流，且说清了是哪个命令、该怎么办',
+      Boolean(errMsg) &&
+        String(errMsg.message).includes(configValues.dshCommand) &&
+        /PATH|dshCommand/.test(`${errMsg.message} ${(errMsg.human && errMsg.human.advice) || ''}`),
+      JSON.stringify(errMsg || all.slice(-3)));
+    check('而且给的是结构化错误（有标题，界面才好排版）',
+      Boolean(errMsg && errMsg.human && errMsg.human.title),
+      JSON.stringify(errMsg && errMsg.human));
     check('而且是**早点**说的（没有干等满 120 秒）', elapsed < 15000, `耗时 ${elapsed}ms`);
     badPanel.dispose();
     Object.assign(configValues, saved);
   }
 
-  section('8.6 兜底失败的两种情形，各说各的话（这条分支以前从没被测过）');
+  section('8.6 自启内核失败的两种情形，各说各的话（这条分支以前从没被测过）');
   {
     // 为什么以前测不到：要跑到「进程活着、但门一直没开」这条分支，正常情况下
     // 得等满 120 秒 —— 所以它一直躺在代码里没人验。给 waitForFallbackDoor 加了

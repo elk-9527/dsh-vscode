@@ -1,7 +1,7 @@
 {
   "name": "dsh-panel",
   "displayName": "DSH Panel",
-  "description": "在 VS Code 侧边栏里使用你正在运行的 DeepSeek Harness（同一个内核、同一份记忆、同一份会话记录）。",
+  "description": "在 VS Code 侧边栏里直接用 DeepSeek Harness：内核由插件自己按需启动，不用先打开桌面端；记忆、会话记录、插件与桌面端共用同一份 $DSH_HOME。",
   "version": "0.1.1",
   "private": true,
   "publisher": "local",
@@ -119,17 +119,17 @@
         "dshPanel.port": {
           "type": "number",
           "default": 47821,
-          "description": "DSH「门」的端口。与门插件 cordis.patch.yml 里的 port 保持一致。"
+          "description": "DSH「门」的端口。面板先看这个端口上有没有现成的门（比如桌面端开着的那个）；没有就按下面的设置自己启动一个。要和门插件 cordis.patch.yml 里的 port 一致。"
         },
         "dshPanel.autoStart": {
           "type": "boolean",
           "default": true,
-          "description": "连不上时，自动在后台拉起一个 DSH（与桌面端共用同一份 $DSH_HOME，因此记忆与会话记录是同一份）。关掉则只连已经在跑的。"
+          "description": "端口上没有门时，自己启动一个 DSH 内核（共用同一份 $DSH_HOME，所以记忆、会话记录、插件和桌面端完全一致）。开着就不用先打开桌面端；关掉则只连已经在跑的。"
         },
         "dshPanel.fallbackProfile": {
           "type": "string",
           "default": "desktop",
-          "description": "自动拉起后台 DSH 时使用的 profile 名。默认 desktop —— 就是你桌面端那一档，记忆、技能、插件完全一致，只是没有窗口。这个 profile 里必须装好 dsh-acp-door 门插件。"
+          "description": "自己启动内核时用哪个 profile。默认 desktop —— 就是你桌面端那一档，只是没有窗口，所以记忆、技能、插件完全一致。这个 profile 里必须装好 dsh-acp-door 门插件。"
         },
         "dshPanel.dshCommand": {
           "type": "string",

@@ -151,20 +151,33 @@
 
   // ── 顶部状态 ────────────────────────────────────────
 
+  /**
+   * 顶栏状态只放**短状态**：它是一条很窄的行，塞进去的每个字都会挤掉别的东西。
+   *
+   * 这里做一道防守：万一哪天又有一条长文案走到 status（报错、多行诊断），
+   * 也只显示第一行、并截到 24 个字 —— 完整内容挂在悬浮提示上，一个字都没丢。
+   * 报错本身应该走 `error` 消息进对话流（那才是能读长文的地方）。
+   */
+  function shortStatus(text) {
+    const first = String(text || '').split('\n')[0].trim();
+    if (first.length <= 24) return first;
+    return first.slice(0, 23) + '…';
+  }
+
   function setStatus(kind, detail) {
     const text = detail || '';
     el.statusDot.className = 'dot';
     if (kind === 'ready') {
       el.statusDot.classList.add('ok');
-      el.statusText.textContent = text || '已连接';
+      el.statusText.textContent = shortStatus(text) || '就绪';
     } else if (kind === 'busy') {
       el.statusDot.classList.add('busy');
-      el.statusText.textContent = text || '工作中…';
+      el.statusText.textContent = shortStatus(text) || '工作中…';
     } else if (kind === 'error') {
       el.statusDot.classList.add('err');
-      el.statusText.textContent = text || '出错了';
+      el.statusText.textContent = shortStatus(text) || '未连接';
     } else {
-      el.statusText.textContent = text || '正在连接…';
+      el.statusText.textContent = shortStatus(text) || '正在连接…';
     }
     el.statusText.title = text;
     if (kind === 'ready' || kind === 'busy') syncConfigRow();
@@ -732,6 +745,7 @@
     const div = document.createElement('div');
     div.className = 'msg msg-error';
     if (!human || !human.title) {
+      // 认不出来的错误：原文就是全部信息，直接摊开，不能藏在折叠里。
       div.textContent = text;
       appendNode(div);
       return;
@@ -746,10 +760,24 @@
       advice.textContent = human.advice;
       div.appendChild(advice);
     }
+    const rawText = text || human.raw || '';
     const raw = document.createElement('pre');
     raw.className = 'err-raw';
-    raw.textContent = text || human.raw || '';
-    div.appendChild(raw);
+    raw.textContent = rawText;
+    // 人话已经说清了「发生了什么 + 怎么办」时，内核原文收进折叠里：
+    // 它常常是几十行 JSON，摊开就把对话框变成日志窗口了。
+    // **一个字都没删** —— 点开就是原文，复制也用它。
+    if (rawText && rawText.length > 120) {
+      const fold = document.createElement('details');
+      fold.className = 'err-raw-fold';
+      const summary = document.createElement('summary');
+      summary.textContent = '原始报错（点开）';
+      fold.appendChild(summary);
+      fold.appendChild(raw);
+      div.appendChild(fold);
+    } else if (rawText) {
+      div.appendChild(raw);
+    }
     appendNode(div);
   }
 

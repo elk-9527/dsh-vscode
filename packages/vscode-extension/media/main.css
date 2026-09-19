@@ -254,6 +254,16 @@ body {
   line-height: 1.55;
 }
 
+/* 空态第二行：回答「记忆和会话是哪来的」。
+   用最轻的一档字号和 descriptionForeground 的暗色 —— 它要能被看到，
+   但不该跟第一行抢注意力。 */
+.empty-note {
+  margin: 6px 0 0;
+  font-size: var(--dsh-fs-xs);
+  line-height: 1.55;
+  opacity: 0.9;
+}
+
 .msg {
   display: flex;
   flex-direction: column;
@@ -519,7 +529,10 @@ body {
 }
 
 /* 错误的人话部分：先一句「发生了什么」，再一句「你能做什么」。
-   内核原文跟在下面（.err-raw），一定要看得见，不能被折叠掉。 */
+   内核原文要不要摊开，看人话在不在：
+   - 有人话（.err-title 有内容）时，原文可以收进 .err-raw-fold 的折叠里
+     —— 它常是几十行 JSON，摊开就把对话框变成日志窗口；
+   - 没人话时原文就是唯一信息，必须直接摊开（见 media/main.js 的分支）。 */
 .err-title {
   margin: 0;
   font-weight: 500;
@@ -538,6 +551,23 @@ body {
   font-family: var(--vscode-editor-font-family, monospace);
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* 折叠那行"原始报错（点开）"：要看得出来能点，也要能用键盘点。 */
+.err-raw-fold > summary {
+  margin-top: 4px;
+  color: var(--vscode-descriptionForeground);
+  font-size: var(--dsh-fs-s);
+  cursor: pointer;
+}
+
+.err-raw-fold > summary:hover {
+  color: var(--vscode-foreground);
+}
+
+.err-raw-fold > summary:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
 }
 
 .msg-note {

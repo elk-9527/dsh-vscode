@@ -26,8 +26,12 @@
  * 两个踩过的坑，写在这里免得下次再撞：
  * - 必须用 `--verbose` 启动：不开详细日志时，输出通道的内容不会落到磁盘上的
  *   `1-DSH Panel.log`，于是"扩展自己的日志"这条证据根本读不到；
- * - **不能拿 47821 有没有被监听当判据**：兜底拉起来的内核是按设计用 `--port 0`
- *   （系统随便给一个空闲端口），就是为了不去抢你桌面端那个门的端口。
+ * - **不能拿「端口被监听」当"面板连上了"的判据**：自启起来的内核是按设计用
+ *   `--port 0`（系统随便给一个空闲端口），就是为了不去抢你桌面端那个门的端口。
+ *
+ * 想验「自启模式」（用户最常走的那条路：刚开机、没开桌面端）而桌面端又开着，
+ * 就用 DSH_PANEL_CHECK_PORT / _PROFILE / _DSH 这三个环境变量把这次自检
+ * 引到一个空端口上 —— 见下面 PORT 那段的说明。
  */
 
 const fs = require('node:fs');
@@ -36,7 +40,25 @@ const path = require('node:path');
 const { spawnSync, spawn } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
-const PORT = 47821;
+/**
+ * 验哪条连接路：
+ *
+ * - 默认 47821。那儿有门（桌面端开着）→ 验**接入模式**；没门 → 验**自启模式**。
+ * - 想在看门狗还开着的时候也验「自启」，就换个空端口：
+ *
+ *     $env:DSH_PANEL_CHECK_PORT = '47830'
+ *     $env:DSH_PANEL_CHECK_PROFILE = 'dshdoor'          # 测试档，别动用户的 desktop
+ *     $env:DSH_PANEL_CHECK_DSH = "node <bin.js> --patch <把门钉到 47830 的 patch>"
+ *
+ *   这几个环境变量会被写成**隔离窗口自己的 settings.json**（隔离的 user-data-dir
+ *   里的那一份），所以只影响这次自检，碰不到你的设置。
+ *   为什么需要 `--patch`：内核启动时门监听哪个端口，是**档里**配的；
+ *   面板探测的是 `dshPanel.port`。两者不一致时面板会等不到门（这正是
+ *   "改了端口却忘了改门插件"那个坑），所以自检要自己把两边对齐。
+ */
+const PORT = Number(process.env.DSH_PANEL_CHECK_PORT || 47821);
+const CHECK_PROFILE = process.env.DSH_PANEL_CHECK_PROFILE || '';
+const CHECK_DSH = process.env.DSH_PANEL_CHECK_DSH || '';
 const args = process.argv.slice(2);
 const keep = args.includes('--keep');
 const timeoutIndex = args.indexOf('--timeout');
@@ -182,7 +204,19 @@ function isOurKernel(item, all) {
   if (/^(powershell|pwsh|node)\.exe$/i.test(item.name)) return false;
   if (!/--no-open/.test(cmd)) return false;
   if (!/--profile\s+\S+/.test(cmd)) return false;
-  if (!/(^|[\s"'\\/])dsh(\.cmd)?["'\s]/.test(cmd)) return false;
+  /*
+   * 「命令行里在跑 dsh」有两种写法，都要认：
+   *   ① 裸命令           dsh --profile desktop --no-open …
+   *   ② node 起那个脚本  node C:\…\@deepseek-ai\dsh\lib\bin.js --profile desktop …
+   * ② 是本机常态（`dsh` 不在 PATH 上时 `dshPanel.dshCommand` 就得这么填，见交接文档第八节
+   * 第 13 条），而 2026-09-19 第一次拿 ② 跑自启模式时，这条匹配只认 ① ——
+   * 结果是内核明明起来了、握手也成了，这里却报"没找到内核"（假阴性）。
+   * 匹配的是 cmd.exe 那层壳：真正的内核进程叫 node.exe，被上面那条按名字排除了，
+   * 而它的壳（cmd /d /s /c "…"）才是稳定信号 —— 见下面这段的说明。
+   */
+  const runsDsh =
+    /(^|[\s"'\\/])dsh(\.cmd)?["'\s]/.test(cmd) || /[\\/]dsh[\\/]lib[\\/]bin\.js/i.test(cmd);
+  if (!runsDsh) return false;
   if (belongsToDesktopApp(item, all)) return false;
   return true;
 }
@@ -264,12 +298,15 @@ async function main() {
     process.exit(2);
   }
 
-  // 先看 47821 上有没有门在跑，决定这次是验哪条路：
+  // 先看那个端口上有没有门在跑，决定这次是验哪条路：
   // - 有人在听 → 「接入模式」：面板该直接连上它，**不该**另起内核（这是主用例：
   //   一个进程、一个大脑、同一份记忆）；
-  // - 没人在听 → 「兜底模式」：面板该自己拉一个 desktop 档内核起来。
+  // - 没人在听 → 「自启模式」：面板该自己拉一个内核起来（用户明确要求：
+  //   用这个插件不必先开桌面端）。
   const attached = await portIsUp(PORT);
-  console.log(`  47821 ${attached ? '上有门在跑 → 验「接入模式」' : '上没人 → 验「兜底拉起模式」'}`);
+  console.log(
+    `  ${PORT} ${attached ? '上有门在跑 → 验「接入模式」' : '上没人 → 验「自启模式」'}`,
+  );
 
   const before = codePids();
   const beforePids = new Set(allProcesses().map((item) => item.pid));
@@ -284,6 +321,18 @@ async function main() {
   copyDir(INSTALLED, path.join(extensions, EXT_DIR_NAME));
   console.log(`  隔离目录：${sandbox}`);
   console.log(`  扩展目录里只放这一份：${fs.readdirSync(extensions).join(', ')}`);
+
+  // 只在设了覆盖项时才写设置 —— 写的是**隔离窗口自己的** user settings，
+  // 你的设置一个字都不会动。
+  if (CHECK_PROFILE || CHECK_DSH || PORT !== 47821) {
+    const settings = { 'dshPanel.port': PORT };
+    if (CHECK_PROFILE) settings['dshPanel.fallbackProfile'] = CHECK_PROFILE;
+    if (CHECK_DSH) settings['dshPanel.dshCommand'] = CHECK_DSH;
+    const settingsDir = path.join(userData, 'User');
+    fs.mkdirSync(settingsDir, { recursive: true });
+    fs.writeFileSync(path.join(settingsDir, 'settings.json'), JSON.stringify(settings, null, 2), 'utf8');
+    console.log(`  这次用隔离设置：${JSON.stringify(settings)}`);
+  }
 
   // 启动隔离窗口。DSH_PANEL_AUTOFOCUS=1 是扩展里的自检开关，只在这个进程里生效。
   // --verbose 是必须的：不然输出通道的内容不会写到磁盘上的日志文件里。
@@ -348,7 +397,7 @@ async function main() {
   check('真的建出了会话（端到端成功）', /已建会话/.test(panelText),
     panelText ? `等了 ${waited} 秒` : `等了 ${waited} 秒还没读到扩展日志`);
 
-  // 拉起内核这件事：接入模式下必须**没有**新内核，兜底模式下必须有。
+  // 拉起内核这件事：接入模式下必须**没有**新内核，自启模式下必须有。
   const kernel = ourKernels(beforePids)[0];
   if (attached) {
     check('接入模式：连着正在跑的门，没有另起内核（一个进程、一个大脑）', !kernel,
@@ -358,7 +407,7 @@ async function main() {
     const suspects = newProcesses(beforePids)
       .filter((item) => /--no-open/.test(item.cmdline))
       .map((item) => `${item.pid}(${item.name}: ${item.cmdline.slice(0, 70)})`);
-    check('兜底模式：自己拉起了 DSH 内核（继承你的插件与记忆）', Boolean(kernel),
+    check('自启模式：自己拉起了 DSH 内核（不用先开桌面端）', Boolean(kernel),
       kernel ? `PID ${kernel.pid}（${kernel.cmdline.slice(0, 80)}）`
         : `没找到；现场有 ${suspects.length} 个 --no-open 进程：${suspects.join(' / ') || '一个都没有'}`);
     if (kernel) fs.writeFileSync(path.join(sandbox, 'kernel-cmdline.txt'), kernel.cmdline, 'utf8');

@@ -37,7 +37,16 @@ const suites = [
   // 所以它必须真的 spawn 一次 —— 见 test/spawn-quote.js 的说明。
   { name: '带空格的命令路径（真进程）', file: 'test/spawn-quote.js', always: true },
   { name: '界面（真浏览器）', file: 'tools/uitest.js', always: false, needs: withUi, hint: '加 --ui 才跑' },
-  { name: '兜底拉起（真进程）', file: 'test/fallback.js', always: false, needs: withDsh, hint: '加 --all 才跑（要求 47821 空着）' },
+  // 自启内核：这是**最常见的路径**（刚开机、没开桌面端）。它自己换个空端口跑，
+  // 不必去抢 47821 —— 桌面端开着的时候那上面本来就有门，抢也抢不到。
+  {
+    name: '自启内核（真进程）',
+    file: 'test/fallback.js',
+    always: false,
+    needs: withDsh,
+    env: { DSH_PANEL_TEST_PORT: '47830' },
+    hint: '加 --all 才跑（自己挑端口，不抢 47821）',
+  },
   { name: '断线接回（真 DSH）', file: 'test/resume.js', always: false, needs: withDsh, hint: '加 --all 才跑' },
   { name: '预设/模式（真 DSH）', file: 'test/presets.js', always: false, needs: withDsh, hint: '加 --all 才跑（自己挑端口，不抢 47821）' },
   { name: '面板层（假 vscode + 真门）', file: 'test/panel.js', always: true },
@@ -56,6 +65,7 @@ for (const suite of suites) {
   const result = spawnSync(process.execPath, [path.join(ROOT, suite.file)], {
     cwd: ROOT,
     stdio: 'inherit',
+    env: suite.env ? { ...process.env, ...suite.env } : process.env,
   });
   const ms = Date.now() - started;
   // 退出码 2 = 套件自己说「现在没法测」（例如端口被占），不算失败，
