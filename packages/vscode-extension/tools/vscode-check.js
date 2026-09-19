@@ -413,6 +413,36 @@ async function main() {
     if (kernel) fs.writeFileSync(path.join(sandbox, 'kernel-cmdline.txt'), kernel.cmdline, 'utf8');
   }
 
+  /*
+   * 停一会儿再看一眼（DSH_PANEL_CHECK_LINGER=90）。
+   *
+   * 为什么要有这一步：2026-09-19 用户报「聊两句就 read ECONNRESET」，
+   * 查日志发现**每个内核都在起来约 35 秒后退出 code=1** ——
+   * 而这个自检以前只观察到"会话建出来了"（约 15 秒）就收摊，
+   * 于是"内核起得来、但活不长"这种毛病它是**看不见**的。
+   * 一次全绿的验证并不等于"接下来一分钟也没事"。
+   */
+  const linger = Number(process.env.DSH_PANEL_CHECK_LINGER || 0);
+  if (linger > 0) {
+    console.log(`\n  按要求多盯 ${linger} 秒（看内核会不会自己死掉）…`);
+    let diedAt = 0;
+    let lastText = panelText;
+    for (let waited = 0; waited < linger; waited += 3) {
+      sleep(3000);
+      if (kernel && !allProcesses().some((item) => item.pid === kernel.pid)) {
+        diedAt = waited + 3;
+        break;
+      }
+      lastText = panelLog ? fs.readFileSync(panelLog, 'utf8') : lastText;
+    }
+    check(`盯了 ${linger} 秒，内核一直活着（没有"起来 30 秒就自杀"这种毛病）`,
+      diedAt === 0,
+      diedAt ? `PID ${kernel ? kernel.pid : '?'} 在约 ${diedAt} 秒时没了` : '一直活着');
+    const resetLines = lastText.split('\n').filter((line) => /连接结束|ECONNRESET|后台 DSH 退出了/.test(line));
+    check(`盯着的这段时间连接没断过（${linger} 秒）`, resetLines.length === 0,
+      resetLines.length ? `面板日志里有 ${resetLines.length} 处断连：\n        ${resetLines.join('\n        ')}` : '一次都没断');
+  }
+
   // 收摊：只收这次新出现的进程，只收自己拉起来的内核。
   if (keep) {
     console.log(`\n  --keep：窗口留着，自己关。PID：${newPids.join(', ') || '（没起来）'}`);

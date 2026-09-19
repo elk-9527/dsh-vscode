@@ -551,7 +551,7 @@ class DshPanelView {
     );
     client.on('close', (reason) => {
       // 断开的原因可能很长（内核原文），进对话流；顶栏只说"未连接"。
-      this.postError(`连接断开：${reason}`);
+      this.postError(this.disconnectText(reason));
       this.post({ type: 'status', state: 'error', detail: '未连接' });
       this.post({ type: 'busy', busy: false });
       // 记住这个会话，下次连接时先试着接回来（session/resume 实测有效）。
@@ -560,6 +560,46 @@ class DshPanelView {
       if (this.session === session) this.session = undefined;
       if (this.client === client) this.client = undefined;
     });
+  }
+
+  /**
+   * 连接断了，往对话流里说人话。
+   *
+   * 2026-09-19 用户报"聊两句就 read ECONNRESET"，翻日志才发现面板自己
+   * 拉起的那个内核是**退出 code=1** 死的，而面板只回了一句通用的
+   * "连接断开：read ECONNRESET" —— 用户完全没法判断该不该怪自己。
+   * 现在分两种情形说清楚：
+   *
+   * - **我们自己拉的内核死了** → 报退出码 + 内核最后说的话（原文在输出面板里）；
+   * - **连的是别人正在跑的内核（多半是桌面端）** → 直说那是它退了或重启了，
+   *   面板会自己换一个，别去查配置。
+   *
+   * @param {string} reason 客户端给的断开原因。
+   */
+  disconnectText(reason) {
+    const background = this.background;
+    const child = background && background.child;
+    const died = child && typeof child.exitCode === 'number' && child.exitCode !== null;
+    if (died) {
+      const tail =
+        typeof background.stderrTail === 'function' ? background.stderrTail() : '';
+      const lastLine = tail ? tail.split(/\r?\n/).filter((line) => line.trim()).pop() : '';
+      const why = lastLine
+        ? `它最后说：${lastLine}`
+        : '它一个字都没说就退了 —— 这种情况通常是外面把它杀了，不是它自己崩的';
+      return (
+        `给你干活的那个内核自己退出了（code=${child.exitCode}）。${why}\n` +
+        '完整输出在「输出 → DSH Panel」里。直接发消息就行，我会重新拉起一个并接着上面的对话。'
+      );
+    }
+    if (!background) {
+      return (
+        `连接断开了：${reason}\n` +
+        '刚才连的是别处正在跑的 DSH（多半是你桌面端那个）—— 它退出或重启了。' +
+        '直接发消息就行，面板会自己拉起一个内核，并把上面那段对话接回来。'
+      );
+    }
+    return `连接断开：${reason}`;
   }
 
   /** 界面刚加载完时，把当前状态补一遍。 */

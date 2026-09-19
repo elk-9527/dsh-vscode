@@ -480,6 +480,44 @@ check(
   check('打包清单里的文件都在', missing.length === 0, missing.join(', '));
 }
 
+{
+  /*
+   * 内核死了要留下证据（2026-09-19 第二次踩）。
+   *
+   * 第一次踩的是「stderr 被扔了」→ 修好了，但那只是**收在内存里**，
+   * 结果用户报"聊两句就断"的时候，面板日志里只有一句
+   * `后台 DSH 退出了（code=1）`，内核为什么死一个字都没有。
+   * 这一节拴住三件事：① 内核的输出要转进面板日志；② 它自己退出时
+   * 要说清退出码 + 最后说的话（没说话也要说"没说话"）；③ 日志要限量。
+   */
+  const locate = read('src/door/locate.js');
+  const view = read('src/panel/view.js');
+  check('内核输出：stdout/stderr 都转进面板日志（能翻到原话）',
+    /attach\(child\.stdout/.test(locate) && /attach\(child\.stderr/.test(locate) &&
+      /内核\[\$\{which\}\]/.test(locate),
+    'locate.js 里没看到转发');
+  check('内核输出：两股都真的接着（stdio 不能把 stdout 设成 ignore）',
+    !/stdio: \['ignore', 'ignore', 'pipe'\]/.test(locate) &&
+      (locate.match(/stdio: \['ignore', 'pipe', 'pipe'\]/g) || []).length >= 2,
+    'Windows 和 POSIX 两条 spawn 路径都要接 stdout');
+  check('内核输出：限量（免得插件话多把日志刷爆）',
+    /OUTPUT_LINE_CAP/.test(locate) && /OUTPUT_CHAR_CAP/.test(locate) &&
+      /没记（超过/.test(locate));
+  check('内核退出：说清是自己退的 + 退出码',
+    /后台 DSH 自己退出了（code=/.test(locate));
+  check('内核退出：把最后几行原话打出来', /它退之前最后说的话/.test(locate));
+  check('内核退出：一个字没说的时候，明说「不是它自己崩的」',
+    /一个字都没说就退了/.test(locate));
+  check('断线：能分清「自己拉的内核死了」和「连的是别人的内核」',
+    /disconnectText\(/.test(view) && /给你干活的那个内核自己退出了/.test(view) &&
+      /刚才连的是别处正在跑的 DSH/.test(view));
+  check('断线：告诉用户去哪儿看完整输出', /输出 → DSH Panel/.test(view));
+
+  const logTool = path.join(ROOT, 'tools', 'panel-log.cjs');
+  check('有个工具能把面板日志翻出来（不用自己翻 VS Code 日志目录）',
+    fs.existsSync(logTool) && /DSH Panel\.log/.test(fs.readFileSync(logTool, 'utf8')));
+}
+
 console.log(`\n${'═'.repeat(56)}`);
 if (failed === 0) console.log(`✅ 全部通过：${passed} 项检查`);
 else {

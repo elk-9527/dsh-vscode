@@ -138,6 +138,18 @@ error: profile "desktop" is managed exclusively by the Electron application
 1. 先跑 `DSH：查看日志`，看有没有「连不上」「握手失败」。
 2. 手动确认门在不在：`Test-NetConnection 127.0.0.1 -Port 47821`。
 3. 确认门插件装好了：`dsh plugin --profile <你的 profile> list`。
+4. **对话流里说「内核自己退出了（code=…）」** → 面板自己拉的那个内核死了。
+   下面多半紧跟着内核最后说的话（它自己的原文）。想看全文：
+
+   ```powershell
+   node tools/panel-log.cjs --grep 内核
+   ```
+
+   内核一个字没说就退了，通常意味着**是外面把它杀了**（不是它自己崩的）——
+   比如有人手工 `taskkill`、系统清理工具、或者你的杀软。
+5. **对话流里说「刚才连的是别处正在跑的 DSH（多半是你桌面端那个）」** →
+   断线来自桌面端那边的内核退出/重启，不是面板的问题。直接发消息，
+   面板会自己拉起一个内核并把上下文接回来。
 
 ## 开发
 
@@ -149,7 +161,26 @@ error: profile "desktop" is managed exclusively by the Electron application
 node test/run-all.js        # 快速套件：静态契约 + 拼块单测 + Markdown 单测 + 面板层，约 15s
 node test/run-all.js --ui   # 再加上真浏览器里的界面断言（需要 Chrome）
 node test/run-all.js --all  # 再加上真进程的自启内核、断线接回、模式、端到端，约 3 分钟
+
+# 真 VS Code 隔离窗口里的端到端自检（不碰你自己那个窗口）。**发版前请带上 --linger**：
+$env:DSH_PANEL_CHECK_PORT = '47830'
+$env:DSH_PANEL_CHECK_PROFILE = 'vscode-panel'
+$env:DSH_PANEL_CHECK_DSH = 'node C:\Users\Lenovo\.dsh\profiles\node_modules\@deepseek-ai\dsh\lib\bin.js --patch %TEMP%\dsh-panel-test-door-47830.yml'
+$env:DSH_PANEL_CHECK_LINGER = '90'      # 建出会话之后再多盯 90 秒
+node tools/vscode-check.js
+
+# 面板自己那份日志（「输出 → DSH Panel」）翻出来看 —— 内核的原话就在里面
+node tools/panel-log.cjs                # 最新一条，最后 60 行
+node tools/panel-log.cjs --grep 内核     # 只看内核相关的行
+node tools/panel-log.cjs --list         # 列出每个窗口的面板日志
 ```
+
+**为什么要 `--linger`**：2026-09-19 用户报「聊两句就 `read ECONNRESET`」，
+查日志发现**每个自启的内核都在起来约 35 秒后退出 code=1**。
+而这个自检以前只观察到「会话建出来了」（约 15 秒）就收摊 ——
+也就是说，「内核起得来、但活不长」这种毛病，原来的自检**根本看不见**。
+现在它会多盯 90 秒，并断言这期间内核一直在、连接一次都没断。
+绿灯只代表"到那一刻为止没问题"，不代表"接下来一分钟也没问题"。
 
 单独跑某个套件：
 

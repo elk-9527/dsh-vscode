@@ -307,19 +307,26 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [] }) {
    * 外面再包一层引号是给 cmd `/s` 用的：`/s` 会剥掉最外层的一对引号，
    * 剩下的原样执行（这样路径自身的引号才能活下来）。
    */
+  /*
+   * stdout 也接着 —— 别只接 stderr。
+   *
+   * 2026-09-19：内核启动时会往 **stdout** 打一行 `dsh web: http://127.0.0.1:…/?token=…`，
+   * 崩的时候也可能往 stdout 吐；只接 stderr 的话这些全看不见。
+   * 两股都接上，反正面板日志限量（见下面的 forward）。
+   */
   const winArgs = ['/d', '/s', '/c', `"${line}"`];
   const child =
     process.platform === 'win32'
       ? spawn(process.env.ComSpec || 'cmd.exe', winArgs, {
           windowsHide: true,
-          stdio: ['ignore', 'ignore', 'pipe'],
+          stdio: ['ignore', 'pipe', 'pipe'],
           detached: false,
           windowsVerbatimArguments: true,
         })
       : (() => {
           const parts = resolveCommand(command);
           return spawn(parts[0], [...parts.slice(1), ...args], {
-            stdio: ['ignore', 'ignore', 'pipe'],
+            stdio: ['ignore', 'pipe', 'pipe'],
             detached: false,
           });
         })();
@@ -332,16 +339,55 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [] }) {
    * 而内核其实明明白白说了 `error: profile "desktop" is managed exclusively
    * by the Electron application` —— 跟 PATH 一点关系都没有，用户按那句建议
    * 去改 dshCommand 只会越改越远。现在留末尾 2000 字，够放一段错误加上下文。
+   *
+   * 同日第二次踩到：**留着但不说**等于没留。用户后来又报"聊两句就
+   * read ECONNRESET"，去翻 VS Code 的面板日志，只看到
+   * `后台 DSH 退出了（code=1）` —— 内核为什么死，一个字都没有（那段
+   * stderr 被我们收在内存里、随进程一起没了）。所以现在两条输出都
+   * **转进面板日志**（输出 → DSH Panel，VS Code 会把它落到文件里），
+   * 出问题的现场就能原样翻出来。限个量：一个内核最多记 120 行 / 12KB，
+   * 免得哪个插件话多把日志刷爆。
    */
+  const OUTPUT_LINE_CAP = 120;
+  const OUTPUT_CHAR_CAP = 12 * 1024;
+  let forwardedLines = 0;
+  let forwardedChars = 0;
+  let droppedOutput = 0;
+  let pendingStdout = '';
   let stderrTail = '';
-  if (child.stderr) {
-    if (typeof child.stderr.setEncoding === 'function') child.stderr.setEncoding('utf8');
-    child.stderr.on('data', (chunk) => {
-      stderrTail = (stderrTail + chunk).slice(-2000);
+
+  /** 把内核某一股输出按行转进面板日志（超量就停手并说明）。 */
+  const forward = (which, chunk, isTail) => {
+    const text = isTail ? chunk : (pendingStdout += chunk);
+    const parts = text.split(/\r?\n/);
+    if (!isTail) pendingStdout = parts.pop();
+    for (const line of parts) {
+      const trimmed = line.trimEnd();
+      if (!trimmed) continue;
+      if (forwardedLines >= OUTPUT_LINE_CAP || forwardedChars >= OUTPUT_CHAR_CAP) {
+        droppedOutput += 1;
+        continue;
+      }
+      forwardedLines += 1;
+      forwardedChars += trimmed.length;
+      log('info', `内核[${which}] ${trimmed}`);
+    }
+  };
+
+  const attach = (stream, which, isTail) => {
+    if (!stream) return;
+    if (typeof stream.setEncoding === 'function') stream.setEncoding('utf8');
+    stream.on('data', (chunk) => {
+      const text = String(chunk);
+      if (isTail) stderrTail = (stderrTail + text).slice(-2000);
+      forward(which, text, isTail);
     });
     // 管道自己出错（极少见）不该把扩展带崩，也不该变成未捕获异常。
-    child.stderr.on('error', () => {});
-  }
+    stream.on('error', () => {});
+  };
+
+  attach(child.stdout, 'out', false);
+  attach(child.stderr, 'err', true);
 
   let disposed = false;
   child.on('error', (error) => {
@@ -349,7 +395,18 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [] }) {
   });
   child.on('exit', (code, signal) => {
     if (disposed) return;
-    log('warn', `后台 DSH 退出了（code=${code} signal=${signal}）`);
+    if (droppedOutput > 0) {
+      log('warn', `后台 DSH 的输出还有 ${droppedOutput} 行没记（超过 ${OUTPUT_LINE_CAP} 行了，只留了前面这些）`);
+    }
+    // 不是我们收的摊 —— 它自己死的。这才是要查的那种。
+    log('warn', `后台 DSH 自己退出了（code=${code} signal=${signal}）`);
+    const tail = stderrTail.trim();
+    if (tail) {
+      const last = tail.split(/\r?\n/).filter((line) => line.trim()).slice(-8);
+      log('warn', `它退之前最后说的话：\n${last.join('\n')}`);
+    } else {
+      log('warn', '它一个字都没说就退了（stderr 是空的）—— 通常是外面有人把它杀了，不是它自己崩的');
+    }
   });
 
   return {
