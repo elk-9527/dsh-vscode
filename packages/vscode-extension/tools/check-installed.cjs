@@ -65,7 +65,7 @@ if (drift.length) {
   for (const d of drift) console.log('   - ' + d);
   console.log('\n重打包重装：');
   console.log('  node tools/build-vsix.js');
-  console.log('  & "D:\\Microsoft VS Code\\bin\\code.cmd" --install-extension "build\\dsh-panel-'
+  console.log('  code --install-extension "build\\dsh-panel-'
     + manifest.version + '.vsix" --force');
   console.log('  然后让用户 Developer: Reload Window');
   process.exit(1);

@@ -423,7 +423,7 @@ const SCENARIOS = {
               kind: 'read',
               status: 'completed',
               title: '读取门插件源码',
-              rawInput: { file_path: 'D:\\dsh-vscode\\packages\\dsh-door\\lib\\index.js', limit: 40 },
+              rawInput: { file_path: '<仓库根目录>\\packages\\dsh-door\\lib\\index.js', limit: 40 },
               content: [{ type: 'text', text: "export const inject = ['agents', 'llm', 'sessions'];" }],
             },
           },
@@ -499,7 +499,7 @@ const SCENARIOS = {
     return {
       steps: [
         { message: { type: 'status', state: 'ready', detail: '就绪' } },
-        { message: { type: 'meta', cwd: 'D:\\dsh-vscode\\packages\\vscode-extension' } },
+        { message: { type: 'meta', cwd: '<仓库根目录>\\packages\\vscode-extension' } },
       ],
     };
   },

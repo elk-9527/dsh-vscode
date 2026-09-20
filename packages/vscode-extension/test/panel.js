@@ -15,6 +15,7 @@
 
 const path = require('node:path');
 const Module = require('node:module');
+const TEST_EXTENSION_URI = { fsPath: path.resolve(__dirname, '..') };
 
 // ── 先装假 vscode，再 require 面板 ────────────────────────
 
@@ -168,7 +169,7 @@ function typesOf(items) {
   const door = await ensureDoor({ log });
 
   section('1. 视图注册与 HTML 生成');
-  const panel = new DshPanelView({ extensionUri: { fsPath: 'D:\\dsh-vscode\\packages\\vscode-extension' }, log });
+  const panel = new DshPanelView({ extensionUri: TEST_EXTENSION_URI, log });
   const view = makeFakeView();
   panel.resolveWebviewView(view);
 
@@ -299,7 +300,7 @@ function typesOf(items) {
     configValues.port = 47844; // 该端口上没有该插件监听
     configValues.dshCommand = 'dsh-这个命令不存在-9f3a';
     const badPanel = new DshPanelView({
-      extensionUri: { fsPath: 'D:\\dsh-vscode\\packages\\vscode-extension' },
+      extensionUri: TEST_EXTENSION_URI,
       log,
     });
     // 隔离自动候选：本节只测试「配置的命令无效」这条路径 ——

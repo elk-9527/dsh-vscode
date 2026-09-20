@@ -92,10 +92,10 @@ const timeoutSec = timeoutIndex >= 0 ? Number(args[timeoutIndex + 1]) : 75;
  * VS Code 才会将其视为另一个实例并打开一个真正独立的窗口。
  */
 const CODE_EXE_CANDIDATES = [
-  'D:\\Microsoft VS Code\\Code.exe',
+  process.env.DSH_PANEL_CODE,
   path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Microsoft VS Code', 'Code.exe'),
   path.join(process.env.ProgramFiles || '', 'Microsoft VS Code', 'Code.exe'),
-];
+].filter(Boolean);
 /*
  * 安装目录名 = `<publisher>.<name>-<version>`（VS Code 采用该命名方式）。
  * 不得固定写为 `local.`：0.1.3 起 publisher 更换为市场使用的那个 ID，

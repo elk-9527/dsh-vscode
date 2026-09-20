@@ -6,19 +6,30 @@
  *
  * 安全顺序（由脚本强制执行）：
  *   1. 现场重新计算 A 类集合（与勘察工具使用同一套判定，不使用过期清单）；
- *   2. 先将全部目标备份至 D:\dsh-backups\sessions-cleanup-<时间戳>\（保留目录结构）；
+ *   2. 先将全部目标备份至 <备份根目录>\sessions-cleanup-<时间戳>\（保留目录结构）；
  *   3. 逐个校验备份（文件数与字节数一致）——任何一条不通过即立即中止，不删除任何目录；
  *   4. 全部校验通过后才删除会话目录；测试专用的工作目录若因此为空，则一并删除该目录。
  *
  * 判定规则必须与 spike/session-survey.cjs 保持一致（修改判定时两处同时修改）。
+ * 用法：先设置 DSH_HOME 与 DSH_BACKUP_DIR，再显式传入 --apply；缺少任一项均不会删除文件。
  */
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const zlib = require('node:zlib');
 
-const ROOT = 'C:/Users/Lenovo/.dsh/sessions';
-const BACKUP_BASE = 'D:/dsh-backups';
+const DSH_HOME = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+const BACKUP_BASE = process.env.DSH_BACKUP_DIR;
+if (!process.argv.includes('--apply')) {
+  console.error('此工具会删除测试会话。请先复核目标，再明确传入 --apply。');
+  process.exit(2);
+}
+if (!BACKUP_BASE) {
+  console.error('缺少 DSH_BACKUP_DIR；必须指定备份根目录，脚本不会删除任何文件。');
+  process.exit(2);
+}
+const ROOT = path.join(DSH_HOME, 'sessions');
 
 const TEST_DIR_PATTERNS = [
   /--d-dsh-temp-dsh-e2e-ws-/,

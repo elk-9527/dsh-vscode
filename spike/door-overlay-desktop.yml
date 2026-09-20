@@ -1,19 +1,19 @@
 # 不修改原档的验证方式：将 ACP 接入点插件（dsh-acp-door）叠加到 desktop 档之上，且不修改 desktop 档本身。
 #
 # 用法：
-#   dsh --profile desktop --patch D:\dsh-vscode\spike\door-overlay-desktop.yml --no-open --host 127.0.0.1 --port 0
+#   dsh --profile desktop --patch <仓库根目录>\spike\door-overlay-desktop.yml --no-open --host 127.0.0.1 --port 0
 #
 # 目的有两个：
 #   1. 验证「完整的 13 个插件 + 该插件」这一组合能正常启动；
 #   2. 验证桌面端正在运行时，第二个同档内核能否共存（插件是否争用端口）。
 #
 # 这里使用 47822 端口，避免与扩展默认的 47821 冲突。
-# name 指向 dshdoor 档中已经安装好的该插件 —— 这样它依赖的
-# @agentclientprotocol/sdk 能在邻近位置解析，不需要修改 desktop 档。
+# name 必须替换为 dshdoor 档中已安装插件的本地 file URI；这样它依赖的
+# @agentclientprotocol/sdk 能在邻近位置解析，不需要修改 desktop 档。公开仓库不记录该机器的路径。
 
 - insert:
     - id: acp-door-probe
-      name: file:///C:/Users/Lenovo/.dsh/profiles/dshdoor/node_modules/dsh-acp-door/lib/index.js
+      name: <替换为 dshdoor 档内 dsh-acp-door/lib/index.js 的 file URI>
       config:
         host: 127.0.0.1
         port: 47822

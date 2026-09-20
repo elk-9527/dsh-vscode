@@ -6,8 +6,14 @@ const { execFileSync } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
 const { buildHtml, OUT, ROOT } = require('../packages/vscode-extension/tools/preview');
+const { findChrome, missingChromeMessage } = require('../packages/vscode-extension/tools/chrome.cjs');
 
-const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const CHROME = findChrome();
+
+if (!CHROME) {
+  console.error(missingChromeMessage());
+  process.exit(2);
+}
 
 const HISTORY_MESSAGE = {
   type: 'history',
@@ -18,7 +24,7 @@ const HISTORY_MESSAGE = {
       title: '修门插件的依赖注入',
       turns: 12,
       lastTime: Date.now() - 3600e3,
-      cwd: 'D:/dsh-vscode/packages/vscode-extension',
+      cwd: '<仓库根目录>/packages/vscode-extension',
       preset: 'standard',
     },
     {
@@ -26,7 +32,7 @@ const HISTORY_MESSAGE = {
       title: '帮我看看这个报错是怎么回事',
       turns: 1,
       lastTime: Date.now() - 86400e3,
-      cwd: 'C:/Users/Lenovo',
+      cwd: '<用户目录>',
       decodeError: 'x',
     },
   ],

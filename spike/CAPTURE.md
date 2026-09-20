@@ -4,7 +4,7 @@
 > 复现方式：`node spike/acp-probe.mjs --edit`、`node spike/acp-capabilities.mjs`、`node spike/acp-verify.mjs`
 > 原始帧位于 `spike/capture/*-frames.jsonl`（已列入 gitignore，因为其中含文件内容）。
 
-测试环境：Windows 11 / Node v24.16.0 / DSH Desktop 2.0.10 / `@agentclientprotocol/sdk` 1.4.0 / `DSH_HOME=C:\Users\Lenovo\.dsh`
+测试环境：Windows 11 / Node v24.16.0 / DSH Desktop 2.0.10 / `@agentclientprotocol/sdk` 1.4.0 / `DSH_HOME=$DSH_HOME`
 ACP 面：`agentInfo = { name: "deepseek-harness-acp", version: "0.0.1" }`，`protocolVersion = 1`
 
 ---
@@ -16,8 +16,8 @@ ACP 面：`agentInfo = { name: "deepseek-harness-acp", version: "0.0.1" }`，`pr
 ```bat
 set "ELECTRON_RUN_AS_NODE=1"
 set "DSH_DESKTOP_DEFAULT_PROFILE=desktop"
-set "DSH_HOME=C:\Users\Lenovo\.dsh"
-"D:\Program Files\DSH Desktop\DSH Desktop.exe" --expose-internals "D:\Program Files\DSH Desktop\resources\app\lib\desktop-cli.js" %*
+set "DSH_HOME=$DSH_HOME"
+"<DSH Desktop 安装目录>\DSH Desktop.exe" --expose-internals "<DSH Desktop 安装目录>\resources\app\lib\desktop-cli.js" %*
 ```
 
 **结论：解析该 shim，直接 spawn exe + `desktop-cli.js`，并复刻三个环境变量。**

@@ -15,9 +15,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { buildHtml, OUT, ROOT } = require('../packages/vscode-extension/tools/preview');
+const { findChrome, missingChromeMessage } = require('../packages/vscode-extension/tools/chrome.cjs');
 
 const SHOTS = path.join(ROOT, 'shots');
-const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const CHROME = findChrome();
 
 /** 与 ACP 接入点插件（`dsh-acp-door`）0.0.8 版本真实应答结构一致的样例清单。 */
 const HISTORY_MESSAGE = {
@@ -29,7 +30,7 @@ const HISTORY_MESSAGE = {
       title: '修门插件的依赖注入',
       turns: 12,
       lastTime: Date.now() - 3600e3,
-      cwd: 'D:/dsh-vscode/packages/vscode-extension',
+      cwd: '<仓库根目录>/packages/vscode-extension',
       preset: 'standard',
     },
     {
@@ -37,7 +38,7 @@ const HISTORY_MESSAGE = {
       title: '给面板加历史会话列表',
       turns: 4,
       lastTime: Date.now() - 86400e3,
-      cwd: 'D:/dsh-vscode/packages/vscode-extension',
+      cwd: '<仓库根目录>/packages/vscode-extension',
       preset: 'ptc',
     },
     {
@@ -45,7 +46,7 @@ const HISTORY_MESSAGE = {
       title: '重写界面的渲染循环',
       turns: 21,
       lastTime: Date.now() - 3 * 86400e3,
-      cwd: 'D:/dsh-vscode/packages/dsh-door',
+      cwd: '<仓库根目录>/packages/dsh-door',
       preset: 'standard',
     },
     {
@@ -54,7 +55,7 @@ const HISTORY_MESSAGE = {
       fallbackTitle: '帮我看看这个报错是怎么回事',
       turns: 1,
       lastTime: Date.parse('2026-09-01T09:12:00'),
-      cwd: 'C:/Users/Lenovo',
+      cwd: '<用户目录>',
       decodeError: '有一帧解码失败',
     },
   ],
@@ -105,6 +106,10 @@ ${
 }
 
 function main() {
+  if (!CHROME) {
+    console.error(missingChromeMessage());
+    process.exit(2);
+  }
   fs.mkdirSync(SHOTS, { recursive: true });
   for (const theme of ['light', 'dark']) {
     for (const kind of ['list', 'replay']) {

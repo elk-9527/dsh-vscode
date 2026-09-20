@@ -20,8 +20,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { SCENARIOS, buildHtml, buildReplayScript, OUT, ROOT } = require('./preview');
+const { findChrome, missingChromeMessage } = require('./chrome.cjs');
 
-const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const CHROME = findChrome();
 const WORK = path.join(ROOT, 'build', 'uitest');
 const PROFILE = path.join(ROOT, 'build', 'chrome-profile');
 
@@ -565,9 +566,9 @@ function assertionsScript(scene) {
 
       // 模拟扩展应答（形状对齐 ACP 接入点插件（dsh-acp-door）0.0.8 版的应答）。
       window.postMessage({ type: 'history', skipped: 5, sessions: [
-        { id: 'session-alpha', title: '修门插件的依赖注入', turns: 12, lastTime: Date.now() - 3600e3, cwd: 'D:/dsh-vscode', preset: 'standard' },
-        { id: 'session-beta', title: '重写界面的渲染循环', turns: 4, lastTime: Date.now() - 86400e3, cwd: 'D:/dsh-vscode/packages/vscode-extension', preset: 'ptc' },
-        { id: 'session-gamma', title: '', fallbackTitle: '帮我看看这个报错', turns: 1, lastTime: Date.parse('2025-11-02T09:12:00'), cwd: 'C:/Users/Lenovo', decodeError: '有一帧解码失败' },
+        { id: 'session-alpha', title: '修门插件的依赖注入', turns: 12, lastTime: Date.now() - 3600e3, cwd: '<仓库根目录>', preset: 'standard' },
+        { id: 'session-beta', title: '重写界面的渲染循环', turns: 4, lastTime: Date.now() - 86400e3, cwd: '<仓库根目录>/packages/vscode-extension', preset: 'ptc' },
+        { id: 'session-gamma', title: '', fallbackTitle: '帮我看看这个报错', turns: 1, lastTime: Date.parse('2025-11-02T09:12:00'), cwd: '<用户目录>', decodeError: '有一帧解码失败' },
       ] }, '*');
       await new Promise(function (resolve) { setTimeout(resolve, 400); });
       var items = overlay.querySelectorAll('.history-item');
@@ -626,7 +627,7 @@ function assertionsScript(scene) {
       hbtn.click();
       assert('回放之后还能再打开浮层', visible(overlay));
       window.postMessage({ type: 'history', skipped: 5, sessions: [
-        { id: 'session-alpha', title: '修门插件的依赖注入', turns: 12, lastTime: Date.now() - 3600e3, cwd: 'D:/dsh-vscode', preset: 'standard' },
+        { id: 'session-alpha', title: '修门插件的依赖注入', turns: 12, lastTime: Date.now() - 3600e3, cwd: '<仓库根目录>', preset: 'standard' },
       ] }, '*');
       await new Promise(function (resolve) { setTimeout(resolve, 400); });
       var again = overlay.querySelectorAll('.history-item');
@@ -1086,6 +1087,10 @@ function runChrome(scene) {
 }
 
 function main() {
+  if (!CHROME) {
+    console.log(missingChromeMessage());
+    process.exit(2);
+  }
   fs.mkdirSync(WORK, { recursive: true });
   fs.copyFileSync(path.join(ROOT, 'media', 'main.css'), path.join(WORK, 'main.css'));
   fs.copyFileSync(path.join(ROOT, 'media', 'main.js'), path.join(WORK, 'main.js'));

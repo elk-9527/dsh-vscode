@@ -182,6 +182,9 @@ const workspaceManifest = JSON.parse(fs.readFileSync(path.join(WORKSPACE_ROOT, '
 const ciWorkflow = fs.readFileSync(path.join(WORKSPACE_ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
 const ciNodeVersion = Number(/node-version:\s*(\d+)/.exec(ciWorkflow)?.[1]);
 const doorPublishTool = read('../dsh-door/tools/publish.cjs');
+const chromeLocator = read('tools/chrome.cjs');
+const vscodeCheckTool = read('tools/vscode-check.js');
+const textGate = fs.readFileSync(path.join(WORKSPACE_ROOT, 'tools', 'text', 'run-checks.cjs'), 'utf8');
 const doorPatch = read('../dsh-door/cordis.patch.yml');
 const doorRuntime = read('../dsh-door/lib/index.js');
 const doorPortModule = read('../dsh-door/lib/port.js');
@@ -198,6 +201,16 @@ check(
   /NPM_REGISTRY\s*=\s*'https:\/\/registry\.npmjs\.org'/.test(doorPublishTool) &&
     /\['publish', '--access', 'public', '--registry', NPM_REGISTRY\]/.test(doorPublishTool),
   '发布脚本会受本机镜像 registry 配置影响',
+);
+check(
+  '检查工具可覆盖非标准 Chrome 与 VS Code 安装位置',
+  chromeLocator.includes('process.env.DSH_PANEL_CHROME') && vscodeCheckTool.includes('process.env.DSH_PANEL_CODE'),
+  '缺少 DSH_PANEL_CHROME 或 DSH_PANEL_CODE 覆盖项',
+);
+check(
+  '文本门禁包含公开路径检查',
+  textGate.includes("tools/check-public-paths.cjs"),
+  '公开文件可能再次写入开发机路径',
 );
 
 check(

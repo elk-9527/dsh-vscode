@@ -5,7 +5,8 @@ param([string]$Profile, [int]$Port, [string]$Patch, [string]$Out)
 # the pwsh running this very script has that text in its own command line.
 # This file is ASCII-only on purpose: Windows PowerShell 5.1 parses .ps1 as ANSI,
 # and non-ASCII comments can break the parse.
-$bin = 'C:\Users\Lenovo\.dsh\profiles\node_modules\@deepseek-ai\dsh\lib\bin.js'
+$bin = Join-Path $env:USERPROFILE '.dsh\profiles\node_modules\@deepseek-ai\dsh\lib\bin.js'
+if (-not (Test-Path -LiteralPath $bin)) { throw "DSH CLI was not found: $bin" }
 $lines = New-Object System.Collections.Generic.List[string]
 function Note($t) { $lines.Add($t); $lines | Out-File -FilePath $Out -Encoding utf8 }
 

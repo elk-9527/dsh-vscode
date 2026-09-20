@@ -17,9 +17,10 @@
 
 const { DoorClient } = require('../packages/vscode-extension/src/door/client');
 const { DshSession } = require('../packages/vscode-extension/src/dsh/session');
+const path = require('node:path');
 
 const PORT = Number(process.argv[2] || 47821);
-const CWD = 'D:\\dsh-vscode';
+const CWD = path.resolve(__dirname, '..');
 
 /**
  * 执行一个回合，收集工具调用与正文。

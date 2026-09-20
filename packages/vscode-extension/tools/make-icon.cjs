@@ -14,16 +14,17 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { findChrome, missingChromeMessage } = require('./chrome.cjs');
 
 const ROOT = path.join(__dirname, '..');
-const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const CHROME = findChrome();
 const OUT = path.join(ROOT, 'media', 'icon.png');
 const STAGE = path.join(ROOT, 'build', 'icon');
 /** 底色的选择：VS Code 深色主题中的主按钮蓝，在市场页面上具有足够辨识度且不造成视觉干扰。 */
 const BG = '#0e639c';
 
 if (!fs.existsSync(CHROME)) {
-  console.error(`找不到 Chrome：${CHROME}（改这一行指到你机器上的 chrome.exe）`);
+  console.error(missingChromeMessage());
   process.exit(1);
 }
 

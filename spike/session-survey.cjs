@@ -18,10 +18,12 @@
  */
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const zlib = require('node:zlib');
 
-const ROOT = 'C:/Users/Lenovo/.dsh/sessions';
+const DSH_HOME = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+const ROOT = path.join(DSH_HOME, 'sessions');
 
 /** 测试专用的工作目录模式：匹配这些模式的目录下全部会话均为测试产物。 */
 const TEST_DIR_PATTERNS = [

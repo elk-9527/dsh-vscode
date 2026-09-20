@@ -333,10 +333,15 @@ node test/run-all.js        # 快速套件：静态契约、纯函数与命令�
 node test/run-all.js --ui   # 追加真实浏览器中的界面断言（需要 Chrome）
 node test/run-all.js --all  # 追加面板层、真进程的自启内核、断线接回、模式、权限预设、端到端，约 4 分钟
 
+# Chrome 不在常见安装位置时，显式指定其可执行文件；该值不应写入仓库。
+$env:DSH_PANEL_CHROME = '<chrome.exe 的完整路径>'
+
 # 真实 VS Code 隔离窗口中的端到端自检（不影响用户正在使用的窗口）。**发版前应带上 --linger**：
 $env:DSH_PANEL_CHECK_PORT = '47830'
 $env:DSH_PANEL_CHECK_PROFILE = 'vscode-panel'
-$env:DSH_PANEL_CHECK_DSH = 'node C:\Users\Lenovo\.dsh\profiles\node_modules\@deepseek-ai\dsh\lib\bin.js --patch %TEMP%\dsh-panel-test-door-47830.yml'
+$dshBin = Join-Path $env:USERPROFILE '.dsh\profiles\node_modules\@deepseek-ai\dsh\lib\bin.js'
+$doorPatch = Join-Path $env:TEMP 'dsh-panel-test-door-47830.yml'
+$env:DSH_PANEL_CHECK_DSH = "node `"$dshBin`" --patch `"$doorPatch`""
 $env:DSH_PANEL_CHECK_LINGER = '90'      # 创建会话之后再持续观察 90 秒
 node tools/vscode-check.js
 
@@ -345,6 +350,9 @@ node tools/panel-log.cjs                # 最新一条，最后 60 行
 node tools/panel-log.cjs --grep 内核     # 仅显示内核相关的行
 node tools/panel-log.cjs --list         # 列出每个窗口的面板日志
 ```
+
+`tools/vscode-check.js` 会自动查找常见的 VS Code 安装位置；安装在其他位置时，设置
+`DSH_PANEL_CODE` 为 `Code.exe` 的完整路径。该值仅用于当前终端进程，不应写入设置或仓库。
 
 **`--linger` 的用途**：2026-09-19 用户报告「聊两句就 `read ECONNRESET`」，
 查看日志发现**每个自启内核均在启动约 35 秒后以 code=1 退出**。

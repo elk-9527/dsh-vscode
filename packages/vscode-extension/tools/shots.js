@@ -26,10 +26,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { SCENARIOS, THEMES, OUT } = require('./preview');
+const { findChrome, missingChromeMessage } = require('./chrome.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const SHOTS = path.join(ROOT, 'shots');
-const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const CHROME = findChrome();
 
 function main() {
   const args = process.argv.slice(2);
@@ -37,7 +38,7 @@ function main() {
   const onlyTheme = args[1];
 
   if (!fs.existsSync(CHROME)) {
-    console.log(`找不到 Chrome：${CHROME}`);
+    console.log(missingChromeMessage());
     process.exit(2);
   }
   if (!fs.existsSync(OUT)) {

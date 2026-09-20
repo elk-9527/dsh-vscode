@@ -88,6 +88,15 @@ const CHECKS = [
       note: (/(混着两种：\d+)[^\n]*/.exec(out) || ['', '无输出'])[1],
     }),
   },
+  {
+    name: '公开路径',
+    script: 'tools/check-public-paths.cjs',
+    args: [],
+    judge: (out, code) => ({
+      verdict: code === 0 ? 'pass' : 'fail',
+      note: code === 0 ? (/(已检查 \d+ 个受版本控制文件)/.exec(out) || ['', '无输出'])[1] : '发现开发机绝对路径，详见输出',
+    }),
+  },
 ];
 
 const results = [];
