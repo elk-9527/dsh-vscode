@@ -18,9 +18,13 @@
  * 这个脚本只负责"它不在就明确告诉你"。
  *
  * 用法：
- *   node tools/publish.js                  # 彩排：自检 + 打市场包 + 列出包内文件
- *   node tools/publish.js --yes            # 真发布（需要 VSCE_PAT）
- *   node tools/publish.js --yes --patch    # 版本号 +0.0.1 再发
+ *   node tools/publish.js                  # 彩排：自检 + 打市场包 + 列出包内文件 + 与自产打包比对
+ *   node tools/publish.js --yes            # 真发布（需要 VSCE_PAT；版本号用 package.json 里那个）
+ *   node tools/publish.js --yes --patch    # 先 +0.0.1 再发（也支持 --minor / --major / --version 1.2.3）
+ *
+ * 每次更新都要**换一个新版本号**：市场不接受重发同一个版本号（连只改 README 也算一次更新）。
+ * 带版本参数的写法会走 `npm version` —— 它会自己提交一笔"版本号"提交并打 tag，
+ * 所以**工作区必须是干净的**（这个脚本会先替你检查，脏了就直接告诉你，不让它发到一半才炸）。
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -29,7 +33,13 @@ const { spawnSync } = require('node:child_process');
 const ROOT = path.join(__dirname, '..');
 const args = process.argv.slice(2);
 const go = args.includes('--yes') || args.includes('--force');
-const bump = args.includes('--patch') ? ['patch'] : [];
+/** 版本参数：patch / minor / major / x.y.z；不写就按 package.json 里现有的版本号发。 */
+const bumpArg = (() => {
+  for (const flag of ['patch', 'minor', 'major']) if (args.includes(`--${flag}`)) return flag;
+  const at = args.indexOf('--version');
+  if (at >= 0 && args[at + 1] && !args[at + 1].startsWith('-')) return args[at + 1];
+  return null;
+})();
 
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 const problems = [];
@@ -129,6 +139,7 @@ if (!go) {
   console.log('');
   const same = compareWithShipList();
   console.log('\n  彩排结束。要真发布：先设好 VSCE_PAT，再 node tools/publish.js --yes');
+  console.log('  （市场不接受重发同一个版本号 —— 换版本就加 --patch / --minor / --major / --version 1.2.3）');
   process.exit(same ? 0 : 1);
 }
 
@@ -139,6 +150,25 @@ if (!process.env.VSCE_PAT) {
   process.exit(1);
 }
 
+// 带版本参数时会走 `npm version`：它会自己提交一笔版本提交 + 打 tag。工作区脏的话
+// 那一步会失败，但那时候 vsce 可能已经把包打好了 —— 与其发到一半炸，不如现在就说清。
+if (bumpArg) {
+  const dirty = spawnSync('git', ['status', '--porcelain'], { cwd: ROOT, encoding: 'utf8' });
+  if (dirty.status === 0 && dirty.stdout.trim()) {
+    console.log('\n  ❌ 工作区不干净，不能用 --' + bumpArg + '（npm version 要先提交一笔版本提交）。');
+    console.log('     先 git commit，或者改成不带版本参数（按 package.json 里现有的版本号发）：');
+    console.log(`     当前版本 ${pkg.version} → 也可以自己改好 package.json 再提交。`);
+    process.exit(1);
+  }
+  console.log(`\n  版本参数：${bumpArg}（会先 npm version ${bumpArg} —— 生成一笔版本提交 + tag v…）`);
+  console.log('  ⚠️ 记得先把 CHANGELOG.md 里那一版写上：市场页面的「Changelog」就是读它。');
+}
+
 console.log('\n  ── 真发布 ───────────────────────────────────────────────');
-if (!vsce(['publish', ...bump, '--no-dependencies'])) process.exit(1);
+if (!vsce(['publish', ...(bumpArg ? [bumpArg] : []), '--no-dependencies'])) process.exit(1);
+// 带版本参数时 package.json 已经被 npm version 改过了，重新读一次才拿得到对的版本号。
+const nowVersion = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
 console.log('\n  ✅ 发出去了。市场页面通常几分钟内可见：https://marketplace.visualstudio.com/items?itemName=' + `${pkg.publisher}.${pkg.name}`);
+console.log('     （VS Code 里的用户会在下次检查更新时自动升到这一版。）');
+console.log(`     别忘了本地那份也跟上：node tools/build-vsix.js 然后 code --install-extension build\\${pkg.name}-${nowVersion}.vsix`);
+console.log('     还有：git push（版本提交与 tag 是 vsce 帮你打的），以及刷新备份。');
