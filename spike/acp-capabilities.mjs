@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 /**
- * ACP 能力矩阵探针 —— 逐个试探 DSH 的 ACP 面到底实现了哪些方法。
+ * ACP 能力矩阵探针：逐个探测 DSH 的 ACP 面实现了哪些方法。
  *
- * 为什么需要它：`@agentclientprotocol/sdk` 的 methods 表是**整个 ACP 规范**的方法表，
- * 不代表 DSH 实现了。而 dsh-acp 的 initialize 只公布了一部分 capability
- * （close / list / resume），其余必须实测。
+ * 设置该探针的原因：`@agentclientprotocol/sdk` 的 methods 表是**整个 ACP 规范**的方法表，
+ * 不代表 DSH 已实现其中的全部方法。dsh-acp 的 initialize 只公布了一部分 capability
+ * （close / list / resume），其余方法需要实测确认。
  *
- * 手法：用**不存在的 sessionId** 去调用写操作，就能安全地区分三种情况：
+ * 方法：使用**不存在的 sessionId** 调用写操作，可安全区分三种情况：
  *   - 方法未实现           → code -32601 (method not found)
- *   - 实现了但参数/会话无效 → 参数校验或 not found 类错误
- *   - 真的成功             → 危险，说明它接受任意 id（本脚本不会遇到）
+ *   - 已实现但参数或会话无效 → 参数校验错误或 not found 类错误
+ *   - 实际成功             → 该结果具有风险，说明方法接受任意 id（本脚本不会触发）
  *
  * 用法：node spike/acp-capabilities.mjs
  * 产物：spike/capture/<ts>-capabilities-*.json
@@ -67,7 +67,7 @@ try {
         }),
       );
 
-      // 探针自己的会话；所有写操作都拿它当靶子，绝不碰用户的历史会话
+      // 探针自身的会话；所有写操作均以该会话为目标，不涉及用户的历史会话
       const session = await ctx.buildSession(join(HERE, 'scratch')).start();
       const sid = session.sessionId;
       log(`\n靶子会话: ${sid}\n`);

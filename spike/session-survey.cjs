@@ -1,14 +1,14 @@
 'use strict';
 
 /**
- * 只读勘察 $DSH_HOME/sessions：给用户一份"哪些是测试留下的、哪些是真实会话"的清单。
- * 绝不写、绝不删 —— 只 readdir/stat/readFile。
+ * 只读勘察 $DSH_HOME/sessions：输出"哪些是测试产物、哪些是真实会话"的清单。
+ * 不执行写操作，不执行删除 —— 仅使用 readdir/stat/readFile。
  *
- * 会话文件 session.v3.jsonl.zstd 是**多帧 zstd 拼接**（每帧一批 JSONL 事件，
- * 帧以魔数 28 B5 2F FD 开头）。node 的一次性 zstdDecompressSync 只解第一帧，
- * 所以这里按魔数切帧逐帧解压（对每个工作帧独立解压，实测 3944 帧零失败）。
+ * 会话文件 session.v3.jsonl.zstd 为**多帧 zstd 拼接**（每帧包含一批 JSONL 事件，
+ * 帧以魔数 28 B5 2F FD 开头）。Node 的 zstdDecompressSync 仅解压第一帧，
+ * 因此此处按魔数切帧并逐帧解压（每个有效帧独立解压，实测 3944 帧无失败）。
  *
- * 事件形状（v3 实测）：
+ * 事件结构（v3 实测）：
  *   首行 {type:'session', id, createdAt, cwd}
  *   {type:'session/title', data:{title, source:{kind}}}
  *   {type:'user/message', data:{content:[{type:'text',text}], source:{kind}, role}}
@@ -23,12 +23,12 @@ const zlib = require('node:zlib');
 
 const ROOT = 'C:/Users/Lenovo/.dsh/sessions';
 
-/** 测试专用的工作目录模式：这些目录下的会话全是测试产物。 */
+/** 测试专用的工作目录模式：匹配这些模式的目录下全部会话均为测试产物。 */
 const TEST_DIR_PATTERNS = [
-  /--d-dsh-temp-dsh-e2e-ws-/, // vscode-check 的隔离窗口工作区
-  /不存在/, // fallback 测试的"肯定不存在"目录
-  /spike-scratch--?$/, // 试验台 scratch（两棵树都是）
-  /packages-vscode-extension--?$/, // 测试跑在扩展目录下
+  /--d-dsh-temp-dsh-e2e-ws-/, // vscode-check 使用的隔离窗口工作区
+  /不存在/, // fallback 测试使用的"确定不存在"目录
+  /spike-scratch--?$/, // 试验台 scratch 目录（两棵目录树均匹配）
+  /packages-vscode-extension--?$/, // 测试在扩展目录下运行
 ];
 
 function walkSize(dir) {
@@ -40,7 +40,7 @@ function walkSize(dir) {
   return size;
 }
 
-/** 多帧 zstd 全解（按魔数切帧，坏帧跳过不致命）。 */
+/** 多帧 zstd 完整解压（按魔数切帧，跳过损坏帧且不视为致命错误）。 */
 function readEvents(file) {
   const buf = fs.readFileSync(file);
   const starts = [];
@@ -50,14 +50,14 @@ function readEvents(file) {
   let text = '';
   for (let k = 0; k < starts.length; k++) {
     const end = k + 1 < starts.length ? starts[k + 1] : buf.length;
-    try { text += zlib.zstdDecompressSync(buf.subarray(starts[k], end)).toString('utf8'); } catch { /* 坏帧跳过 */ }
+    try { text += zlib.zstdDecompressSync(buf.subarray(starts[k], end)).toString('utf8'); } catch { /* 跳过损坏帧 */ }
   }
   return text.split('\n').filter((l) => l.trim()).map((l) => {
     try { return JSON.parse(l); } catch { return null; }
   }).filter(Boolean);
 }
 
-/** 提炼一个会话的"名片"：标题、用户第一句话、回合数。 */
+/** 提取一个会话的摘要信息：标题、用户第一句话、回合数。 */
 function summarize(sessionDir) {
   const zstd = path.join(sessionDir, 'session.v3.jsonl.zstd');
   if (!fs.existsSync(zstd)) return { title: '(无 .zstd)', prompt: '', turns: 0 };
@@ -105,7 +105,7 @@ for (const proj of fs.readdirSync(ROOT, { withFileTypes: true })) {
   groups.push({ project: proj.name, count: sessions.length, sessions });
 }
 
-/** 判定：测试目录整目录算测试；真实目录里，0 回合 = 起了没说话；有回合看体积。 */
+/** 判定：测试目录整体计为测试产物；真实目录中 0 回合为已建立但未对话；有回合时按体积判定。 */
 const verdict = (s) => {
   if (s.testDir) return 'A 测试目录（整目录可清）';
   if (s.turns === 0) return 'A 测试残渣（起了会话没说话）';
@@ -122,7 +122,7 @@ for (const g of groups) {
 
 console.log(`$DSH_HOME/sessions 只读勘察报告（生成于 ${localTime(new Date())} 本地）`);
 console.log(`共 ${groups.length} 个工作目录、${total} 个会话。`);
-console.log(`A（测试产物，可清）：${tally.A}    B（疑似测试对话，建议清）：${tally.B}    C（待定/真实，别动）：${tally.C}`);
+console.log(`A（测试产物，可清）：${tally.A}    B（疑似测试对话，建议清）：${tally.B}    C（待定/真实，未处理）：${tally.C}`);
 console.log('只读勘察，未删除任何东西。');
 console.log('');
 console.log('=== 汇总（按目录） ===');

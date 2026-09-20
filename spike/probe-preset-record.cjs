@@ -1,8 +1,8 @@
 'use strict';
 
 /**
- * 会话记录里到底什么时候写 agentPreset：
- * 扫全部记录，按「有没有 agentPreset」分类统计，并对比几个具体会话。
+ * 会话记录中写入 agentPreset 的时机：
+ * 扫描全部记录，按「是否包含 agentPreset」分类统计，并对比若干具体会话。
  */
 
 const fs = require('node:fs');

@@ -1,6 +1,6 @@
 'use strict';
 
-/** 一次性：量历史浮层在 420px 宽度下有没有横向溢出。 */
+/** 一次性脚本：测量历史浮层在 420px 宽度下是否出现横向溢出。 */
 
 const { execFileSync } = require('node:child_process');
 const path = require('node:path');

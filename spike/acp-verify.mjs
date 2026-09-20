@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * ACP 验证探针（第二轮）—— 回答 M1/M2 必须先知道的三件事：
- *   ① 运行时切模型（session/set_config_option）→ 已在第一轮验证，这里固化下来；
- *   ② 停止按钮到底怎么实现（session/cancel 未实现，改试 AbortSignal → $/cancel_request）；
- *   ③ 历史会话恢复（session/resume）能不能用，以及"全局 session/update 路由"是否可行。
+ * ACP 验证探针（第二轮）：回答 M1/M2 必须先确定的三件事：
+ *   ① 运行时切换模型（session/set_config_option）→ 已在第一轮验证，此处固化该结论；
+ *   ② 停止按钮的实现方式（session/cancel 未实现，改用 AbortSignal → $/cancel_request）；
+ *   ③ 历史会话恢复（session/resume）是否可用，以及"全局 session/update 路由"是否可行。
  *
  * ③ 的意义：SDK 的 buildSession/ActiveSession 只覆盖 session/new。
- *   如果我要同时支持"新建"和"恢复"，就必须自己在连接级别按 sessionId 路由更新。
- *   本探针用 onNotification 全局订阅来证明这条路走得通。
+ *   若需同时支持"新建"与"恢复"，则需要在连接级别按 sessionId 自行路由更新。
+ *   本探针使用 onNotification 全局订阅验证该方案可行。
  *
  * 用法：node spike/acp-verify.mjs
  */
@@ -32,7 +32,7 @@ const check = (name, ok, detail) => {
   log(`  ${ok ? '✅' : '❌'} ${name}${detail === undefined ? '' : `  — ${clip(JSON.stringify(detail), 200)}`}`);
 };
 
-/** 全局更新路由：证明"一个连接上多个会话按 sessionId 分流"可行。 */
+/** 全局更新路由：验证"单个连接上多个会话按 sessionId 分流"可行。 */
 const updatesBySession = new Map();
 function routeUpdate(n) {
   const sid = n.sessionId;
@@ -64,13 +64,13 @@ try {
       report.initialize = { protocolVersion: init.protocolVersion, capabilities: init.agentCapabilities };
       check('initialize', init.protocolVersion === 1, init.agentCapabilities);
 
-      // ── 挑一个历史会话当恢复靶子（只挑 scratch 目录下的，绝不碰桌面端会话）──
+      // ── 选取一个历史会话作为恢复目标（仅选取 scratch 目录下的会话，不涉及桌面端会话）──
       const list = await ctx.request(acp.methods.agent.session.list, { cwd: SCRATCH });
       const candidate = list.sessions?.[0]?.sessionId ?? null;
       report.sessionList = { cwd: SCRATCH, count: list.sessions?.length ?? 0, candidate };
       check('session/list 支持 cwd 过滤', Array.isArray(list.sessions), { count: list.sessions?.length ?? 0 });
 
-      // ── 新建会话 + 切模型 ──
+      // ── 新建会话并切换模型 ──
       const session = await ctx.buildSession(SCRATCH).start();
       const sid = session.sessionId;
       const cfg = await ctx.request(acp.methods.agent.session.setConfigOption, {
@@ -81,8 +81,8 @@ try {
       const nowModel = cfg.configOptions?.find((o) => o.id === 'model')?.currentValue;
       check('session/set_config_option 运行时切模型', nowModel === MODEL, { currentValue: nowModel });
 
-      // reasoning_effort：广告出来的选项不一定被具体路由接受（实测 low 被 opencode-go 拒绝），
-      // 所以逐个试探，记录真实可用的集合 —— 这决定 M1 的 UI 该怎么呈现"不可用"。
+      // reasoning_effort：公布出来的选项未必被具体路由接受（实测 low 被 opencode-go 拒绝），
+      // 因此逐个探测并记录真实可用的集合 —— 该集合决定 M1 的 UI 如何呈现"不可用"。
       const effortOptions = (cfg.configOptions?.find((o) => o.id === 'reasoning_effort')?.options ?? []).map(
         (o) => o.value,
       );
@@ -107,7 +107,7 @@ try {
         report.effortProbe.accepted.length > 0,
         report.effortProbe,
       );
-      // 回到一个安全值，避免影响后面的回合
+      // 恢复为安全值，避免影响后续回合
       if (report.effortProbe.accepted.includes('high')) {
         await ctx.request(acp.methods.agent.session.setConfigOption, {
           sessionId: sid,
@@ -149,7 +149,7 @@ try {
         { stopReason: cancelled?.stopReason ?? null, error: cancelErr, ms: Date.now() - t0 },
       );
 
-      // 中断后会话还能继续用吗？（能，才算真的稳）
+      // 验证中断后同一会话是否仍可使用（可用是会话状态稳定的前提）
       const after = await (async () => {
         session.prompt('回复恰好一个词：alive');
         for (;;) {
@@ -163,7 +163,7 @@ try {
       session.dispose();
       report.closedSession = sid;
 
-      // ── ③ 恢复历史会话 + 全局更新路由 ──
+      // ── ③ 恢复历史会话并验证全局更新路由 ──
       log('\n── 会话恢复测试 ──');
       if (!candidate) {
         check('session/resume', false, '没有可恢复的历史会话（先跑一次 acp-probe.mjs 生成）');

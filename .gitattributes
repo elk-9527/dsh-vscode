@@ -1,12 +1,12 @@
-# 换行与二进制的规矩：谁在这台机器上提交都一样，别让 CRLF 混进历史。
+# 换行与二进制的规则：在任何机器上提交的结果一致，且 CRLF 不进入历史。
 #
-# 背景：这个仓库一路在 Windows 上开发，而门包的 package.json 曾经被
-# PowerShell 悄悄加过 UTF-8 BOM，装进用户档之后内核 JSON.parse 直接崩
-# （事故记录见 packages/vscode-extension/test/static.js 里那条 BOM 断言）。
-# 换行/BOM 这类"看不见的字节"必须有明文规矩，不能靠"我记得"。
+# 背景：本仓库一直在 Windows 上开发，而 ACP 接入点插件（dsh-acp-door）的
+# package.json 曾被 PowerShell 加入 UTF-8 BOM，安装到用户档之后内核的
+# JSON.parse 直接抛出异常（事故记录见 packages/vscode-extension/test/static.js
+# 中的 BOM 断言）。换行与 BOM 这类不可见的字节需要明文规定，不能依赖人工记忆。
 #
-# text=auto 的含义：git 按内容判断是不是文本，文本一律以 LF 存进历史，
-# 检出时再按平台转换。图片和包体明确标成二进制，避免被当文本处理。
+# text=auto 的含义：git 按内容判断是否为文本，文本一律以 LF 存入历史，
+# 检出时再按平台转换。图片与包体明确标记为二进制，避免按文本处理。
 * text=auto
 
 *.png binary

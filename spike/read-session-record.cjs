@@ -1,10 +1,10 @@
 'use strict';
 
 /**
- * 一次性探针：看看内核的会话记录能不能解开、里面记的 preset 是什么。
+ * 一次性探针：检查内核的会话记录能否解压，以及其中记录的 preset 取值。
  *
- * 为什么要看它：预设这件事是门替内核接出来的，门自己的日志只能证明
- * 「它调了 select()」，而**内核自己记下来的**才是独立证据。
+ * 检查该记录的原因：预设由 ACP 接入点插件（`dsh-acp-door`）代为内核设置，
+ * 该插件自身的日志只能证明「它调用了 select()」，而**内核自身记录的**内容才是独立证据。
  */
 
 const fs = require('node:fs');
@@ -19,7 +19,7 @@ const root = path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 
 const entries = fs.readdirSync(root, { withFileTypes: true }).filter((item) => item.isDirectory());
 console.log('第一层目录：', entries.map((item) => item.name).join(', '));
 
-/** 递归找所有 .zstd（真实形状是 sessions/<项目目录>/<会话id>/session.v3.jsonl.zstd）。 */
+/** 递归查找所有 .zstd 文件（实际结构为 sessions/<项目目录>/<会话id>/session.v3.jsonl.zstd）。 */
 function findAll(dir, depth = 0) {
   const out = [];
   if (depth > 4) return out;

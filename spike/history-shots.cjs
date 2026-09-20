@@ -1,11 +1,11 @@
 'use strict';
 
 /**
- * 一次性：给「历史会话」浮层拍预览图。
+ * 一次性脚本：为「历史会话」浮层生成预览图。
  *
- * 为什么不进 shots.js：shots.js 只会按时序回放消息，而历史清单有「浮层没开
- * 就不渲染」的护栏（这条护栏是对的），所以浮层内容必须「点开按钮之后再喂」
- * —— 这里用一段专用脚本模拟：点按钮 → 喂清单 / 喂回放。
+ * 未纳入 shots.js 的原因：shots.js 仅按时序回放消息，而历史清单设有「浮层未打开
+ * 则不渲染」的护栏（该护栏为必要设计），因此浮层内容需要在「点击按钮之后再送入」
+ * —— 此处使用一段专用脚本模拟：点击按钮 → 送入清单 / 送入回放。
  *
  * 用法：node spike/history-shots.js
  * 输出：packages/vscode-extension/shots/history-{light,dark}.png
@@ -19,7 +19,7 @@ const { buildHtml, OUT, ROOT } = require('../packages/vscode-extension/tools/pre
 const SHOTS = path.join(ROOT, 'shots');
 const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 
-/** 跟门 0.0.8 真实应答同形状的样例清单。 */
+/** 与 ACP 接入点插件（`dsh-acp-door`）0.0.8 版本真实应答结构一致的样例清单。 */
 const HISTORY_MESSAGE = {
   type: 'history',
   skipped: 44,

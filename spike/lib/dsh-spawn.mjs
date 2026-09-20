@@ -1,12 +1,12 @@
 /**
  * 启动 dsh 的 ACP 内核进程：定位可执行文件、spawn、双向抓包。
  *
- * M0 期间这段逻辑被三个探针共用；M1 会把它提炼成
- * packages/extension/src/dsh/{locate,process}.ts，本文件是它的行为基准。
+ * M0 期间该逻辑由三个探针共用；M1 将其提炼为
+ * packages/extension/src/dsh/{locate,process}.ts，本文件为该实现的行为基准。
  *
  * profile 由环境变量 DSH_PROFILE 决定：
- *   - `acp`    官方精简 ACP 面（只有 dsh-base + dsh-acp-app）
- *   - `vscode` 与桌面端同一套插件 + ACP 出口（记忆/技能/工具与桌面端一致）
+ *   - `acp`    官方精简 ACP 面（仅包含 dsh-base + dsh-acp-app）
+ *   - `vscode` 与桌面端相同的插件集合 + ACP 出口（记忆/技能/工具与桌面端一致）
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { createWriteStream, mkdirSync, readFileSync } from 'node:fs';
@@ -14,7 +14,7 @@ import { Transform } from 'node:stream';
 
 const PROFILE = process.env.DSH_PROFILE ?? 'acp';
 
-/** 从 dsh.cmd 里抽出 `set "K=V"` 环境变量（只用于复现启动条件，不外传）。 */
+/** 从 dsh.cmd 中提取 `set "K=V"` 环境变量（仅用于复现启动条件，不外传）。 */
 function envFromShim(text) {
   const out = {};
   for (const m of text.matchAll(/^\s*set\s+"([^"]+)=([^"]*)"\s*$/gm)) out[m[1]] = m[2];
@@ -24,9 +24,9 @@ function envFromShim(text) {
 /**
  * 解析顺序：显式设置 > PATH > 解析 Windows 批处理 shim。
  *
- * 解析 shim 的意义：绕开 cmd.exe，直接起
+ * 解析 shim 的作用：绕过 cmd.exe，直接启动
  * `"DSH Desktop.exe" --expose-internals <...>\lib\desktop-cli.js`，
- * stdio 管道更干净，也避开 .cmd 的引号转义坑。
+ * stdio 管道更为简洁，同时避免 .cmd 的引号转义问题。
  */
 export function locateDsh() {
   if (process.env.DSH_EXECUTABLE) {
@@ -58,7 +58,7 @@ export function locateDsh() {
   return { kind: 'path', command: first, args: ['--profile', PROFILE], env: {} };
 }
 
-/** 逐行切分并旁路记录，但原样透传字节。 */
+/** 逐行切分并旁路记录，同时原样透传字节。 */
 function tap(dir, onLine) {
   let buf = '';
   return new Transform({

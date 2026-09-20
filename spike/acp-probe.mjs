@@ -1,19 +1,19 @@
 #!/usr/bin/env node
 /**
- * M0 协议探针 —— 用真实的 `dsh --profile acp` 验证 ACP 行为，并把双向原始帧全部抓下来。
+ * M0 协议探针：使用真实的 `dsh --profile acp` 验证 ACP 行为，并抓取全部双向原始帧。
  *
- * 为什么要这么做：M1 的前端渲染必须建立在真实字段上，而不是文档推断。
- * 本脚本同时解决三件事：
- *   1. 验证 Windows 上如何 spawn dsh（dsh.cmd 是批处理 shim，Node 不能直接执行）；
- *   2. 打印 @agentclientprotocol/sdk 里真实存在的方法路径，避免手搓协议时猜错名字；
- *   3. 落盘原始帧 JSONL + 摘要 JSON，作为 M1 的 fixtures 来源。
+ * 采用该方式的原因：M1 的前端渲染必须以真实字段为依据，而非文档推断。
+ * 本脚本同时完成三件事：
+ *   1. 验证 Windows 上 spawn dsh 的方式（dsh.cmd 是批处理 shim，Node 无法直接执行）；
+ *   2. 打印 @agentclientprotocol/sdk 中真实存在的方法路径，避免手工实现协议时方法名有误；
+ *   3. 落盘原始帧 JSONL 与摘要 JSON，作为 M1 的 fixtures 来源。
  *
  * 用法：
- *   node spike/acp-probe.mjs            # 只跑一次最省的文本回合
- *   node spike/acp-probe.mjs --edit     # 追加一次"改文件"回合，用来抓 diff 内容
+ *   node spike/acp-probe.mjs            # 只执行一次开销最小的文本回合
+ *   node spike/acp-probe.mjs --edit     # 追加一次"改文件"回合，用于抓取 diff 内容
  *
  * 产物：
- *   spike/capture/<ts>-frames.jsonl  双向原始帧（c2s = 客户端发，s2c = 内核发）
+ *   spike/capture/<ts>-frames.jsonl  双向原始帧（c2s = 客户端发送，s2c = 内核发送）
  *   spike/capture/<ts>-stderr.log    内核 stderr（日志，非协议）
  *   spike/capture/<ts>-summary.json  初始化结果、会话 id、更新统计、方法路径清单
  */
@@ -30,10 +30,10 @@ const WANT_EDIT = process.argv.includes('--edit');
 const WATCHDOG_MS = Number(process.env.PROBE_TIMEOUT_MS ?? 300_000);
 
 // ─────────────────────────────────────────────────────────────
-// 一、定位 dsh 可执行文件（M1 会把这部分提炼成 packages/extension/src/dsh/locate.ts）
+// 一、定位 dsh 可执行文件（M1 将该部分提炼为 packages/extension/src/dsh/locate.ts）
 // ─────────────────────────────────────────────────────────────
 
-/** 从 dsh.cmd 里抽出 `set "K=V"` 形式的环境变量（不打印、不外传，只用于复现启动条件）。 */
+/** 从 dsh.cmd 中提取 `set "K=V"` 形式的环境变量（不打印、不外传，仅用于复现启动条件）。 */
 function envFromShim(text) {
   const out = {};
   for (const m of text.matchAll(/^\s*set\s+"([^"]+)=([^"]*)"\s*$/gm)) out[m[1]] = m[2];
@@ -42,8 +42,8 @@ function envFromShim(text) {
 
 /**
  * 解析顺序：显式设置 > PATH 上的 dsh > 解析 Windows 批处理 shim。
- * 解析 shim 的意义：绕开 cmd.exe 这一层，直接起 `DSH Desktop.exe --expose-internals desktop-cli.js`，
- * stdio 管道更干净，也避免 .cmd 引号转义的坑。
+ * 解析 shim 的作用：绕过 cmd.exe 这一层，直接启动 `DSH Desktop.exe --expose-internals desktop-cli.js`，
+ * stdio 管道更为简洁，同时避免 .cmd 引号转义问题。
  */
 function locateDsh() {
   if (process.env.DSH_EXECUTABLE) {
@@ -70,14 +70,14 @@ function locateDsh() {
         env: envFromShim(text),
       };
     }
-    // shim 形式不认识就退回 shell 启动
+    // shim 形式无法识别时回退到 shell 启动
     return { kind: 'shell', command: 'dsh --profile acp', args: [], env: {}, shell: true, shimPath: first };
   }
   return { kind: 'path', command: first, args: ['--profile', 'acp'], env: {} };
 }
 
 // ─────────────────────────────────────────────────────────────
-// 二、抓包：双向每一行都落盘，同时把 s2c 原样喂给 SDK
+// 二、抓包：双向每一行均落盘，同时将 s2c 原样传给 SDK
 // ─────────────────────────────────────────────────────────────
 
 const captureDir = join(HERE, 'capture');
@@ -89,7 +89,7 @@ const summaryPath = join(captureDir, `${stamp}-summary.json`);
 const frames = createWriteStream(framesPath, { flags: 'a' });
 const stderrLog = createWriteStream(stderrPath, { flags: 'a' });
 
-/** 逐行切分并旁路记录，但原样透传字节。 */
+/** 逐行切分并旁路记录，同时原样透传字节。 */
 function tap(dir) {
   let buf = '';
   return new Transform({
@@ -110,7 +110,7 @@ function tap(dir) {
 // 三、小工具
 // ─────────────────────────────────────────────────────────────
 
-/** 把 SDK 的方法表摊平成 "agent.session.new = session/new" 这样的路径清单。 */
+/** 将 SDK 的方法表展开为 "agent.session.new = session/new" 形式的路径清单。 */
 function methodPaths(obj, prefix = '') {
   const out = [];
   for (const [k, v] of Object.entries(obj ?? {})) {
@@ -126,7 +126,7 @@ const log = (...a) => console.log(...a);
 
 const seen = { updates: [], toolCalls: new Map(), permissions: [], diffs: [] };
 
-/** 更新处理：既打印给人看，也留下结构化统计。 */
+/** 更新处理：既打印输出，也记录结构化统计。 */
 async function onUpdate(notification) {
   const u = notification.update;
   const kind = u?.sessionUpdate;
@@ -187,7 +187,7 @@ async function onUpdate(notification) {
   }
 }
 
-/** ACP v1 的 diff 就在 tool call 内容里：{type:"diff", path, oldText, newText}。 */
+/** ACP v1 的 diff 位于 tool call 内容中：{type:"diff", path, oldText, newText}。 */
 function collectDiff(u) {
   const blocks = [];
   if (Array.isArray(u.content)) blocks.push(...u.content);
@@ -207,7 +207,7 @@ function collectDiff(u) {
   }
 }
 
-/** 权限询问：探针自动放行（只作用于 scratch 目录），并记录选项形状。 */
+/** 权限询问：探针自动放行（仅作用于 scratch 目录），并记录选项的字段结构。 */
 async function requestPermission(params) {
   const options = params?.options ?? [];
   seen.permissions.push({
@@ -319,15 +319,15 @@ child.on('error', (err) => {
   finish(3);
 });
 
-// 双向抓包 + SDK 接线
+// 双向抓包与 SDK 接线
 const toChild = tap('c2s');
 const fromChild = tap('s2c');
 toChild.pipe(child.stdin);
 child.stdout.pipe(fromChild);
 
-// ── 跑协议 ─────────────────────────────────────────────────
+// ── 运行协议 ─────────────────────────────────────────────────
 try {
-  // 先看一眼 SDK 到底有哪些方法，避免猜名字
+  // 先查看 SDK 提供的方法清单，避免方法名错误
   summary.methods = methodPaths(acp.methods);
   log(`\nSDK 方法表（ACP ${acp.PROTOCOL_VERSION}）:`);
   for (const p of summary.methods) log(`  ${p}`);
@@ -342,7 +342,7 @@ try {
   await acp
     .client({ name: 'dsh-vscode-probe', version: '0.0.0' })
     .onRequest(acp.methods.client.session.requestPermission, (ctx) => requestPermission(ctx.params))
-    // DSH 的 ACP 面不支持客户端文件系统代理，这里留桩：一旦被调用就说明前提变了
+    // DSH 的 ACP 面不支持客户端文件系统代理，此处留桩：该方法一旦被调用即说明前提已改变
     .onRequest(acp.methods.client.fs.readTextFile, (ctx) => {
       log(`\n⚠️ 内核竟然调用了客户端 readTextFile: ${JSON.stringify(ctx.params).slice(0, 200)}`);
       return { content: '' };
@@ -362,7 +362,7 @@ try {
       log(`   agentCapabilities=${JSON.stringify(init.agentCapabilities)}`);
       log(`   authMethods=${JSON.stringify(init.authMethods)}\n`);
 
-      // ② 故意用空参数问一次 session/list，让校验错误把真实 schema 交代出来
+      // ② 故意以空参数请求一次 session/list，通过校验错误获取真实 schema
       try {
         const list = await ctx.request(acp.methods.agent.session.list, {});
         summary.listProbe = { ok: true, result: list };
@@ -372,12 +372,12 @@ try {
         log(`\n📋 session/list 空参数被拒（正好用来看 schema）:\n   ${clip(String(e?.message ?? e), 900)}\n`);
       }
 
-      // ③ 建会话并跑回合
+      // ③ 建立会话并执行回合
       return ctx.buildSession(scratch).withSession(async (session) => {
         summary.session = {
           keys: Object.keys(session),
           sessionId: session.sessionId,
-          // 配置选项（模型 / 推理强度）通常挂在建会话结果上，原样留档
+          // 配置选项（模型 / 推理强度）通常随建会话结果返回，按原样留存
           configOptions: session.configOptions ?? session.newSessionResponse?.configOptions ?? null,
           modes: session.modes ?? session.newSessionResponse?.modes ?? null,
         };
@@ -387,13 +387,13 @@ try {
           log(`   配置选项: ${JSON.stringify(summary.session.configOptions).slice(0, 600)}`);
         }
 
-        // ④ 运行时切换模型：这是关键结论——模型选择是 ACP 调用，不需要改任何配置文件。
-        //    acp profile 默认钉在 deepseek-official，本机那条路由的 key 无效；
-        //    opencode-go 才是可用路由，而它就在 configOptions 里。
+        // ④ 运行时切换模型：关键结论为模型选择属于 ACP 调用，无需修改任何配置文件。
+        //    acp profile 默认固定在 deepseek-official，本机该路由的 key 无效；
+        //    可用的路由为 opencode-go，该路由位于 configOptions 中。
         const modelValue = process.env.PROBE_MODEL ?? '["opencode-go","deepseek-v4.1-flash"]';
         try {
-          // 注意：ClientContext 只暴露 buildSession / request / notify，
-          // 会话级方法（set_config_option、cancel、close…）一律走通用 request。
+          // 注意：ClientContext 仅暴露 buildSession / request / notify，
+          // 会话级方法（set_config_option、cancel、close…）均通过通用 request 调用。
           const res = await ctx.request(acp.methods.agent.session.setConfigOption, {
             sessionId: session.sessionId,
             configId: 'model',

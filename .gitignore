@@ -3,7 +3,7 @@ dist/
 out/
 *.vsix
 
-# M0 原始抓包可能包含文件内容，不入库（`packages/acp/` 那个空壳 2026-09-20 已删）
+# M0 原始抓包可能包含文件内容，不纳入版本控制（`packages/acp/` 的占位目录已于 2026-09-20 删除）
 spike/capture/
 spike/scratch/
 
@@ -16,28 +16,28 @@ spike/scratch/
 # 扩展的构建与测试产物：vsix、界面预览页、无头浏览器临时配置
 packages/vscode-extension/build*/
 
-# 随手用的构建/诊断临时目录：临时脚本、跑测试的日志、调查记录。
-# 注意 `packages/vscode-extension/build*` 那条只管得住扩展自己那个目录，
-# 仓库根目录的 build/ 原来**不在**忽略范围里 —— 2026-09-19 发现，
-# 一次 git add -A 就会把一堆临时物收进去。这里一并忽略。
+# 临时使用的构建与诊断目录：临时脚本、测试日志、调查记录。
+# 注意 `packages/vscode-extension/build*` 只覆盖扩展自身的目录，
+# 仓库根目录的 build/ 原先不在忽略范围内 —— 2026-09-19 发现，
+# 一次 git add -A 就会把大量临时文件纳入版本控制。此处一并忽略。
 build/
 
-# 界面截图（tools/shots.js 生成，改界面前后对比用）。不放 build/ 里：
-# build-vsix 会把整个 build/ 清掉，图会跟着没。
+# 界面截图（由 tools/shots.js 生成，用于改界面前后对比）。不放入 build/：
+# build-vsix 会清空整个 build/，截图会随之丢失。
 packages/vscode-extension/shots/
 
-# 改用户档之前的备份（体积大，且是机器专属的，不入库）
-# 2026-09-19 补记：这条规则**管不住已经在跟踪的文件** —— 最早加进去的 5 个
-# 文件一直躺在版本控制里（`git status` 干净，所以一直没人发现）。
-# 已用 `git rm -r --cached backup` 摘出：磁盘上文件一个没少，只是不再进 git。
+# 修改用户档之前的备份（体积大，且为机器专属，不纳入版本控制）
+# 2026-09-19 补记：这条规则不影响已被跟踪的文件 —— 最早加入的 5 个
+# 文件一直处于版本控制中（`git status` 显示干净，因此未被发现）。
+# 已用 `git rm -r --cached backup` 移出：磁盘上的文件没有减少，只是不再进入 git。
 backup/
 
-# 试验台用的临时配置（每次现写现删）
+# 试验台使用的临时配置（每次使用后删除）
 spike/door-*.yml
 
-# WorkBuddy 的项目记忆（agent 工作数据，本机专属，不入库）
+# WorkBuddy 的项目记忆（agent 工作数据，本机专属，不纳入版本控制）
 .workbuddy/
 
-# 会话勘察报告（含用户会话标题等个人信息，不入库；工具本身在 spike/session-survey.cjs）
+# 会话勘察报告（含用户会话标题等个人信息，不纳入版本控制；工具本身位于 spike/session-survey.cjs）
 spike/session-survey-report.txt
 

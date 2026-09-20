@@ -1,16 +1,16 @@
 'use strict';
 
 /**
- * 试验台：断线接回之后，会话的「手」还在不在？
+ * 试验台：断线重连之后，会话的工具能力是否保留。
  *
- * 背景：门建的会话，记录里**没有** agentPreset（桌面端建的有，因为桌面端
- * 建会话时就把预设写进去了）。而 resume 一条老会话时，门那头的补挂会被内核
- * 拒绝（agent-preset/locked，属于正常），于是这次会话用什么预设完全取决于
- * 内核**从记录里重建**出什么。要是重建出来一个没预设的 agent —— 那就是
- * 「有嘴没手」：能聊天，但一个工具都没有。
+ * 背景：ACP 接入点插件（`dsh-acp-door`）建立的会话，记录中**没有** agentPreset（桌面端建立的会话有，
+ * 因为桌面端在建立会话时即写入预设）。resume 一条既有会话时，该插件一端的补挂操作会被内核
+ * 拒绝（agent-preset/locked，属于预期行为），因此该会话最终使用的预设完全取决于
+ * 内核**从记录中重建**的结果。若重建出的 agent 没有预设，则该会话
+ * 仅能进行对话，没有任何工具可用。
  *
- * 这个试验台就干两件事：先在新建的会话里让它跑个命令（看有没有手），
- * 再断线、resume、再让它跑一次（看手还在不在）。
+ * 本试验台执行两件事：先在新建的会话中执行一条命令（验证工具是否可用），
+ * 再断线、resume、再次执行（验证工具是否仍然可用）。
  *
  * 用法：node spike/resume-tools.cjs <端口>
  */
@@ -22,11 +22,11 @@ const PORT = Number(process.argv[2] || 47821);
 const CWD = 'D:\\dsh-vscode';
 
 /**
- * 跑一个回合，把工具调用与正文都收集起来。
+ * 执行一个回合，收集工具调用与正文。
  *
- * 这里用的是 DshSession（面板用的同一层）而不是裸的 DoorClient ——
- * 工具/正文是它把 ACP 通知解析出来的，直接听 client 是听不到的
- * （client 只发 'update'/'notification' 这种原始事件）。
+ * 此处使用 DshSession（与面板同一层）而非直接使用 DoorClient：
+ * 工具与正文由 DshSession 解析 ACP 通知得到，直接监听 client 无法获取
+ * （client 仅发出 'update'/'notification' 等原始事件）。
  */
 function attach(session) {
   const turn = { tools: [], answer: '' };
@@ -37,7 +37,7 @@ function attach(session) {
   session.on('busy', (payload) => {
     if (payload.busy === false) turn.settled = true;
   });
-  // 故意断线时它会报「连接断了」，这里不关心（不接这个事件 Node 会直接抛）。
+  // 主动断线时该事件报告连接中断，此处不作处理（不监听该事件时 Node 会直接抛出）。
   session.on('error', (payload) => console.log(`  [session error] ${payload.message}`));
   return turn;
 }
@@ -48,7 +48,7 @@ function describe(turn) {
 }
 
 async function main() {
-  console.log(`连门 127.0.0.1:${PORT}`);
+  console.log(`连接该插件 127.0.0.1:${PORT}`);
 
   const first = new DoorClient({ host: '127.0.0.1', port: PORT, log: () => {} });
   await first.connect();
@@ -60,7 +60,7 @@ async function main() {
   await sessionA.send('用 shell 跑一下 node -v，把版本号原样告我，别做别的。');
   console.log(`断线前：${describe(turnA)}`);
 
-  // 模拟断线（面板被关掉 / 内核重启 / 网络抖一下）
+  // 模拟断线（面板关闭 / 内核重启 / 网络波动）
   first.close();
   await new Promise((resolve) => setTimeout(resolve, 800));
 
@@ -92,6 +92,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.log(`试验台崩了：${error && error.stack ? error.stack : error}`);
+  console.log(`试验台发生异常：${error && error.stack ? error.stack : error}`);
   process.exit(1);
 });

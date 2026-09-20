@@ -1,68 +1,77 @@
 # DSH in VS Code
 
-把 [DeepSeek Harness](https://github.com/deepseek-ai)（DSH）搬进 VS Code 的侧边栏：
-点开面板就能提问，**不用先打开桌面端**；记忆、会话记录、插件与桌面端共用同一份
-`$DSH_HOME`。
+在 VS Code 侧边栏中接入 [DeepSeek Harness](https://github.com/deepseek-ai)（以下简称 DSH）：
+无需先启动桌面端即可直接提问。记忆、会话记录、插件与桌面端共用同一份 `$DSH_HOME`。
 
-这个仓库里是它的**两半** —— 一个 VS Code 扩展，和一个 DSH 插件。两个都要装。
+本仓库由两个组成部分构成，两者都需要安装。
 
-| 包 | 是什么 | 装在哪 |
+| 包 | 内容 | 安装位置 |
 | --- | --- | --- |
-| [`packages/vscode-extension`](packages/vscode-extension)（`dsh-panel`） | VS Code 扩展：侧边栏面板，自己就是 ACP 客户端 | VS Code 市场 / `.vsix` |
-| [`packages/dsh-door`](packages/dsh-door)（`dsh-acp-door`） | DSH 插件：在**正在运行的内核**上多开一扇只监听 `127.0.0.1` 的 ACP 门 | `dsh plugin add` / DSH 插件市场 |
+| [`packages/vscode-extension`](packages/vscode-extension)（`dsh-panel`） | VS Code 扩展：侧边栏面板，本身即 ACP 客户端 | VS Code 市场 / `.vsix` |
+| [`packages/dsh-door`](packages/dsh-door)（`dsh-acp-door`） | DSH 插件：在运行中的内核上提供仅监听 `127.0.0.1` 的 ACP 接入点 | `dsh plugin add` / DSH 插件市场 |
 
-为什么需要两半：ACP 默认走标准输入输出，那根线只能在进程**启动的那一刻**接上；
-而你桌面端已经开着了。所以由插件在内核里开一扇本机端口，扩展再连上去 ——
-驱动的是**同一个** DSH，不是第二个 agent、也不是第二份记忆。
+## 为什么需要两个组成部分
+
+ACP 默认使用标准输入输出传输，该通道只能在进程启动时建立，而桌面端此时已经启动并持有内核。
+因此由插件在内核内提供一个仅监听本机回环地址的接入点，扩展连接到该接入点：
 
 ```
-VS Code ── DSH Panel 扩展
+VS Code ── DSH Panel 扩展（ACP 客户端）
               │  ACP over 127.0.0.1:47821
               ▼
-        dsh-acp-door（插件）
+        dsh-acp-door（插件：本机 ACP 接入点）
               │
               ▼
-        正在运行的 DSH 内核（agents / 会话 / 记忆 / 工具 / 权限）—— 只有一份
+        运行中的 DSH 内核（agents / 会话 / 记忆 / 工具 / 权限）—— 只有一份
 ```
 
-## 装
+扩展驱动的是同一个 DSH 实例，不产生第二个 agent，也不产生第二份记忆。
+
+## 安装
 
 ```sh
-# 1) 给 DSH 装上插件（装进你平时用的那个档；装完重启内核/桌面端）
-dsh plugin --profile <你的档> add dsh-acp-door
+# 1) 为 DSH 安装插件（安装到日常使用的 profile；完成后重启内核或桌面端）
+dsh plugin --profile <profile> add dsh-acp-door
 
-# 2) 装 VS Code 扩展
+# 2) 安装 VS Code 扩展
 code --install-extension <publisher>.dsh-panel
 ```
 
-市场：VS Code 市场搜 **DSH Panel**；DSH 插件市场搜 **dsh-acp-door**。
+市场入口：VS Code 市场搜索 **DSH Panel**；DSH 插件市场搜索 **dsh-acp-door**。
 
 ## 开发
 
 ```sh
 pnpm install
 
-# 扩展：单元/静态测试 + 界面回放测试
+# 扩展：单元与静态测试 + 界面回放测试
 cd packages/vscode-extension
 node test/run-all.js --all        # 全部测试
-node tools/uitest.js              # 界面回放（几百项断言）
-node tools/build-vsix.js          # 打本地安装包
-node tools/publish.js             # 市场发布彩排（自检 + 打包 + 文件清单比对）
+node tools/uitest.js              # 界面回放测试（无头 Chrome）
+node tools/build-vsix.js          # 生成本地安装包
+node tools/publish.js             # 市场发布前自检（自检 + 打包 + 文件清单比对）
 
-# 插件：开一扇门做端到端试验
+# 插件：纯函数套件，以及端到端试验
 cd packages/dsh-door
-node test/run-all.js
-node tools/publish.cjs            # npm 发布彩排 + 生成上架要提的那个 yml
+node test/frames.js               # 帧判定
+node test/permission.js           # 权限预设方法
+node test/port.js                 # 端口判定
+node test/sessions.js             # 会话读取
+node tools/publish.cjs            # npm 发布前自检，并生成上架所需的 yml
 ```
 
-要求：Node ≥ 20、pnpm、本机装了 DSH、Windows（界面测试用无头 Chrome 回放）。
+其中插件的四个套件也由扩展的 `test/run-all.js` 一并执行（见该文件中的套件清单）。
 
-## 目录里还有什么
+运行要求：Node ≥ 20、pnpm、本机已安装 DSH、Windows（界面回放测试在无头 Chrome 中执行）。
 
-- `docs/` —— 中文工作笔记：交接文档、恢复方法、发布清单、界面设计基线。
-  **里面有这台机器的绝对路径**，属于工作记录，不是产品文档。
-- `spike/` —— 最初摸 ACP 协议时的探针脚本。
-- `packages/*/test`、`packages/*/tools` —— 测试与诊断工具，都不进发布包。
+## 目录说明
+
+- `docs/` —— 中文工作记录：交接文档、恢复方法、发布清单、界面设计基线。
+  其中包含本机的绝对路径，属于工作记录，不是产品文档。
+- [`docs/注释与文档规范.md`](docs/注释与文档规范.md) —— 本仓库中文文本的写作标准：源码注释与
+  JSDoc、各 README、`docs/` 下的说明文档，以及面向用户的界面文案。
+- `spike/` —— 早期用于确认 ACP 协议行为的探测脚本。
+- `packages/*/test`、`packages/*/tools` —— 测试与诊断工具，均不进入发布包。
 
 ## 许可
 

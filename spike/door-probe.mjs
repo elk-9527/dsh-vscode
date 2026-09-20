@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 /**
- * 第 0 步闸门：验证「门」是否真的把外部程序接进了**正在运行的内核**。
+ * 第 0 步前置校验：验证 ACP 接入点插件（`dsh-acp-door`）是否将外部程序接入了**正在运行的内核**。
  *
- * 与 acp-probe.mjs 的区别：这里**不启动任何新进程**，
- * 只是 TCP 连上 dsh-acp-door 开的那个回环端口。
+ * 与 acp-probe.mjs 的区别：本脚本**不启动任何新进程**，
+ * 仅通过 TCP 连接该插件开启的回环端口。
  *
- * 要证明三件事：
- *   1. 门能握手（说明 ACP 桥挂起来了）；
- *   2. 能建会话、能跑回合（说明复用的是内核，不是空壳）；
- *   3. **会话拿到了工具**（桌面端把全局工具行关掉了，改成按会话挂载 ——
- *      这一条是乙方案能否成立的关键，所以专门用一个"必须读文件"的回合来验）。
+ * 需要证明三件事：
+ *   1. 该插件能够握手（说明 ACP 桥已挂载）；
+ *   2. 能够建立会话、执行回合（说明复用真实内核，而非空壳）；
+ *   3. **会话已获取工具**（桌面端关闭了全局工具行，改为按会话挂载 ——
+ *      该条是乙方案能否成立的关键，因此专门使用一个"必须读文件"的回合验证）。
  *
  * 用法：
  *   node spike/door-probe.mjs
@@ -122,7 +122,7 @@ function finish(code) {
   report.toolCalls = [...seen.toolCalls.entries()].map(([id, v]) => ({ toolCallId: id, ...v }));
   writeFileSync(reportPath, JSON.stringify(report, null, 2), 'utf8');
   log(`\n\n──────── 结论 ────────`);
-  log(`连上门的握手     : ${report.verdict.handshake ?? '未完成'}`);
+  log(`与该插件的握手   : ${report.verdict.handshake ?? '未完成'}`);
   log(`建会话           : ${report.verdict.session ?? '未完成'}`);
   log(`回合完成         : ${report.verdict.turn ?? '未完成'}`);
   log(`会话拿到工具了吗 : ${report.verdict.tools ?? '未能判断'}`);
@@ -146,12 +146,12 @@ if (!existsSync(helloPath)) {
   writeFileSync(helloPath, 'export function greet(name: string): string {\n  return `hello, ${name}`;\n}\n', 'utf8');
 }
 
-// ── 连门 ────────────────────────────────────────────────────
-log(`连接门 ${HOST}:${PORT} …`);
+// ── 连接 ACP 接入点插件（`dsh-acp-door`） ───────────────────
+log(`连接该插件 ${HOST}:${PORT} …`);
 const socket = await new Promise((res, rej) => {
   const s = net.connect(PORT, HOST);
   s.once('connect', () => res(s));
-  s.once('error', (e) => rej(new Error(`连不上门（${HOST}:${PORT}）：${e.message}`)));
+  s.once('error', (e) => rej(new Error(`无法连接该插件（${HOST}:${PORT}）：${e.message}`)));
 });
 socket.setNoDelay(true);
 log('✅ 已连上');
@@ -160,7 +160,7 @@ log('✅ 已连上');
 const { readable: socketRead, writable: socketWrite } = Duplex.toWeb(socket);
 const outboundLog = tap('c2s');
 const inboundLog = tap('s2c');
-// SDK 要写 → 先过记录 → 再写进 socket；socket 收到 → 先过记录 → 再给 SDK 读。
+// SDK 写入 → 先经记录 → 再写入 socket；socket 收到 → 先经记录 → 再交由 SDK 读取。
 outboundLog.readable.pipeTo(socketWrite).catch(() => {});
 const stream = acp.ndJsonStream(outboundLog.writable, socketRead.pipeThrough(inboundLog));
 
@@ -185,7 +185,7 @@ try {
       try {
         const list = await ctx.request(acp.methods.agent.session.list, {});
         report.listProbe = { ok: true, count: Array.isArray(list?.sessions) ? list.sessions.length : null };
-        log(`📋 门里能列出已有会话：${JSON.stringify(report.listProbe)}  ← 说明它读的是同一份会话记录`);
+        log(`📋 该插件能列出已有会话：${JSON.stringify(report.listProbe)}  ← 说明它读的是同一份会话记录`);
       } catch (e) {
         report.listProbe = { ok: false, error: String(e?.message ?? e) };
         log(`📋 session/list 失败: ${clip(report.listProbe.error, 300)}`);
@@ -209,7 +209,7 @@ try {
           log(`🎛 切模型失败（继续）: ${clip(report.modelSwitchError, 200)}`);
         }
 
-        // 这一回合是闸门核心：必须用到工具才能答对。
+        // 该回合是前置校验的核心：必须使用工具才能正确作答。
         const prompts = [
           `用你的工具读取文件，把它的第 1 行原样贴给我。文件路径：${helloPath} 。只做这一件事，不要解释。`,
         ];
@@ -230,12 +230,12 @@ try {
           }
         }
 
-        // 判定：只要有一次工具真的跑起来了，就说明会话拿到了工具。
+        // 判定：只要存在一次工具成功执行，即说明会话已获取工具。
         const calls = [...seen.toolCalls.values()];
         const ran = calls.filter((c) => c.status === 'completed' || c.status === 'in_progress');
         if (calls.length === 0) {
           report.verdict.tools =
-            '❌ 一次工具调用都没有 —— 会话可能没挂上工具集（桌面端把全局工具行关掉了，靠 preset 挂载）';
+            '❌ 一次工具调用都没有 —— 会话可能没挂上工具集（桌面端已关闭全局工具行，改由 preset 挂载）';
         } else if (ran.length === 0) {
           report.verdict.tools = `⚠️ 有工具调用但都没跑起来：${calls.map((c) => `${c.title}=${c.status}`).join(', ')}`;
         } else {

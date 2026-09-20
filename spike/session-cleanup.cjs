@@ -1,16 +1,16 @@
 'use strict';
 
 /**
- * 清理 $DSH_HOME/sessions 里的测试产物（A 类）。
- * 用户 2026-09-17 确认：只清 A（测试专用目录全部 + 起了会话没说话的空壳）。
+ * 清理 $DSH_HOME/sessions 中的测试产物（A 类）。
+ * 用户于 2026-09-17 确认：仅清理 A 类（测试专用目录全部，以及已建立会话但未产生对话的空目录）。
  *
- * 安全顺序（脚本内强制）：
- *   1. 现场重算 A 集合（与勘察工具同一套判定，不用陈旧清单）；
- *   2. 全部先备份到 D:\dsh-backups\sessions-cleanup-<时间戳>\（保留目录结构）；
- *   3. 逐个校验备份（文件数与字节数一致）——有任何一条不过，立即中止、一个都不删；
- *   4. 全部校验通过后才删除会话目录；测试专用的工作目录若因此空了，连目录一起收走。
+ * 安全顺序（由脚本强制执行）：
+ *   1. 现场重新计算 A 类集合（与勘察工具使用同一套判定，不使用过期清单）；
+ *   2. 先将全部目标备份至 D:\dsh-backups\sessions-cleanup-<时间戳>\（保留目录结构）；
+ *   3. 逐个校验备份（文件数与字节数一致）——任何一条不通过即立即中止，不删除任何目录；
+ *   4. 全部校验通过后才删除会话目录；测试专用的工作目录若因此为空，则一并删除该目录。
  *
- * 判定规则必须与 spike/session-survey.cjs 保持一致（改判定时两处一起改）。
+ * 判定规则必须与 spike/session-survey.cjs 保持一致（修改判定时两处同时修改）。
  */
 
 const fs = require('node:fs');
@@ -45,7 +45,7 @@ function readEvents(file) {
   let text = '';
   for (let k = 0; k < starts.length; k++) {
     const end = k + 1 < starts.length ? starts[k + 1] : buf.length;
-    try { text += zlib.zstdDecompressSync(buf.subarray(starts[k], end)).toString('utf8'); } catch { /* 坏帧跳过 */ }
+    try { text += zlib.zstdDecompressSync(buf.subarray(starts[k], end)).toString('utf8'); } catch { /* 跳过损坏帧 */ }
   }
   return text.split('\n').filter((l) => l.trim()).map((l) => {
     try { return JSON.parse(l); } catch { return null; }
@@ -60,15 +60,15 @@ function summarize(sessionDir) {
   return { turns };
 }
 
-/** 与 session-survey.cjs 的 verdict 同一套规则，只取 A 类。 */
+/** 与 session-survey.cjs 的 verdict 使用同一套规则，仅取 A 类。 */
 function isClassA(projName, sessionDir) {
   if (TEST_DIR_PATTERNS.some((re) => re.test(projName))) return true;
   const kb = walkSize(sessionDir) / 1024;
   const { turns } = summarize(sessionDir);
-  return turns === 0; // 起了会话没说话（A 类只有这一种出现在真实目录里）
+  return turns === 0; // 已建立会话但未产生对话（真实目录中仅存在这一种 A 类）
 }
 
-// ---------- 1. 现场重算 A 集合 ----------
+// ---------- 1. 现场重新计算 A 类集合 ----------
 const targets = [];
 for (const proj of fs.readdirSync(ROOT, { withFileTypes: true })) {
   if (!proj.isDirectory()) continue;
@@ -95,7 +95,7 @@ for (const t of targets) {
   fs.cpSync(t.dir, dest, { recursive: true });
 }
 
-// ---------- 3. 校验备份（有任何一条不过就中止，一个都不删） ----------
+// ---------- 3. 校验备份（任何一条不通过即中止，不删除任何目录） ----------
 let backupOk = true;
 for (const t of targets) {
   const dest = path.join(backupDir, t.project, t.id);
@@ -125,7 +125,7 @@ for (const t of targets) {
   deleted += 1;
   emptiedProjects.add(t.projectDir);
 }
-// 测试专用的工作目录若空了，连目录一起收走；真实目录哪怕空了也保留。
+// 测试专用的工作目录若为空，则一并删除该目录；真实目录即使为空也保留。
 for (const projDir of emptiedProjects) {
   const projName = path.basename(projDir);
   const testOnly = TEST_DIR_PATTERNS.some((re) => re.test(projName));
