@@ -58,9 +58,9 @@ const CHECKS = [
   {
     name: '覆盖面',
     script: 'tools/text/coverage-audit.cjs',
-    args: [],
+    args: basePass,
     judge: (out) => ({
-      verdict: /其中工作区未改动：0 个/.test(out) ? 'pass' : 'fail',
+      verdict: /其中未被触及：0 个；无法读取：0 个/.test(out) ? 'pass' : 'fail',
       note: (/(含中文的已跟踪文件：\d+ 个[^\n]*)/.exec(out) || ['', '无输出'])[1],
     }),
   },
