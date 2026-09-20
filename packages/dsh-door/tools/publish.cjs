@@ -23,6 +23,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const ROOT = path.join(__dirname, '..');
+const NPM_REGISTRY = 'https://registry.npmjs.org';
 const go = process.argv.slice(2).includes('--yes');
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 
@@ -112,15 +113,15 @@ console.log('\n  提到这里：https://github.com/awesome-dsh-plugin/awesome-ds
 console.log('  （一个文件就是全部投稿；README 由他们的脚本生成，别手工改。）');
 
 if (!go) {
-  console.log('\n  彩排结束。真发到 npm：先 npm login（或配好 NODE_AUTH_TOKEN），再 node tools/publish.cjs --yes');
+  console.log('\n  彩排结束。真发到 npm：先 npm login --registry=https://registry.npmjs.org（或配好 NODE_AUTH_TOKEN），再 node tools/publish.cjs --yes');
   process.exit(problems.length ? 1 : 0);
 }
 if (problems.length) {
   console.log(`\n  ❌ 还有 ${problems.length} 项没准备好（见上），先解决再发。`);
   process.exit(1);
 }
-console.log('\n  ── 真发布到 npm ─────────────────────────────────────────');
-const pub = spawnSync('npm', ['publish', '--access', 'public'], {
+console.log('\n  ── 真发布到 npm 官方注册表 ──────────────────────────────');
+const pub = spawnSync('npm', ['publish', '--access', 'public', '--registry', NPM_REGISTRY], {
   cwd: ROOT,
   stdio: 'inherit',
   shell: true,

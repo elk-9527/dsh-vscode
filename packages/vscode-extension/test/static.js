@@ -181,6 +181,7 @@ const settings = extensionManifest.contributes.configuration.properties;
 const workspaceManifest = JSON.parse(fs.readFileSync(path.join(WORKSPACE_ROOT, 'package.json'), 'utf8'));
 const ciWorkflow = fs.readFileSync(path.join(WORKSPACE_ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
 const ciNodeVersion = Number(/node-version:\s*(\d+)/.exec(ciWorkflow)?.[1]);
+const doorPublishTool = read('../dsh-door/tools/publish.cjs');
 const doorPatch = read('../dsh-door/cordis.patch.yml');
 const doorRuntime = read('../dsh-door/lib/index.js');
 const doorPortModule = read('../dsh-door/lib/port.js');
@@ -191,6 +192,12 @@ check(
   'CI 的 Node.js 版本满足已锁定 pnpm 11 的要求',
   workspaceManifest.packageManager === 'pnpm@11.19.0' && ciNodeVersion >= 22,
   `packageManager=${workspaceManifest.packageManager}；CI Node=${ciNodeVersion || '未找到'}`,
+);
+check(
+  '该插件发布显式指向 npm 官方注册表',
+  /NPM_REGISTRY\s*=\s*'https:\/\/registry\.npmjs\.org'/.test(doorPublishTool) &&
+    /\['publish', '--access', 'public', '--registry', NPM_REGISTRY\]/.test(doorPublishTool),
+  '发布脚本会受本机镜像 registry 配置影响',
 );
 
 check(
