@@ -5,10 +5,10 @@
   "type": "module",
   "description": "将 DeepSeek Harness 接入 VS Code 的两个组成部分：VS Code 扩展 dsh-panel 与 DSH 插件 dsh-acp-door",
   "license": "MIT",
-  "homepage": "https://github.com/TODO-owner/TODO-repo#readme",
+  "homepage": "https://github.com/elk-9527/dsh-vscode#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/TODO-owner/TODO-repo.git"
+    "url": "https://github.com/elk-9527/dsh-vscode.git"
   },
   "scripts": {
     "probe": "node spike/acp-probe.mjs",

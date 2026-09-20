@@ -24,13 +24,13 @@
     "agent client protocol",
     "vscode"
   ],
-  "homepage": "https://github.com/TODO-owner/TODO-repo/tree/main/packages/dsh-door#readme",
+  "homepage": "https://github.com/elk-9527/dsh-vscode/tree/main/packages/dsh-door#readme",
   "bugs": {
-    "url": "https://github.com/TODO-owner/TODO-repo/issues"
+    "url": "https://github.com/elk-9527/dsh-vscode/issues"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/TODO-owner/TODO-repo.git",
+    "url": "https://github.com/elk-9527/dsh-vscode.git",
     "directory": "packages/dsh-door"
   },
   "dependencies": {
