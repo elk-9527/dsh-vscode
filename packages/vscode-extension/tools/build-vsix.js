@@ -1,12 +1,12 @@
 'use strict';
 
 /**
- * 把扩展打成一个 .vsix（本地安装用，不发商店）。
+ * 将扩展打包为一个 .vsix 文件（供本地安装，不发布至商店）。
  *
- * 为什么自己写而不是用 @vscode/vsce：
- * 1. vsix 就是一个特定结构的 zip，规则很固定，自己打完全可控；
- * 2. 不用往这台机器上再装一个 npm 包（少一份污染，也少一处会坏的地方）；
- * 3. 什么时候想改打包内容，改一个数组就行。
+ * 自行实现而不使用 @vscode/vsce 的原因：
+ * 1. vsix 文件是结构固定的 zip 归档，自行打包可完全控制内容；
+ * 2. 无需在本机额外安装 npm 包（减少一处依赖污染与一处潜在故障点）；
+ * 3. 调整打包内容时，仅需修改一个数组。
  *
  * vsix 的结构：
  *   extension.vsixmanifest    声明（标识、版本、依赖的 VS Code 版本、资源清单）
@@ -42,7 +42,7 @@ function copyInto(from, to) {
   fs.copyFileSync(from, to);
 }
 
-/** zip 里每种扩展名的 Content-Type；漏一种就有文件装不进去。 */
+/** zip 中每种扩展名的 Content-Type；缺少任一条目都会导致相应文件无法安装。 */
 const CONTENT_TYPES = {
   '.json': 'application/json',
   '.js': 'application/javascript',
@@ -111,15 +111,15 @@ function manifestXml(manifest) {
 function main() {
   const manifest = readManifest();
 
-  // 1) 清空并重新搭台
-  //    沙箱对「一次删超过 50 个文件」会拦（SAFE_DELETE_BULK_CONFIRM_REQUIRED），
-  //    uitest 场景页一多 build 就超阈值。删不动就把旧目录改名挪开（不删，留着人工清）。
+  // 1) 清空并重建暂存目录
+  //    沙箱会拦截「一次删除超过 50 个文件」的操作（SAFE_DELETE_BULK_CONFIRM_REQUIRED），
+  //    uitest 场景页数量增多后 build 即超出该阈值。删除失败时把旧目录改名移开（不删除，保留供人工清理）。
   try {
     fs.rmSync(BUILD, { recursive: true, force: true });
   } catch (err) {
     const stale = path.join(path.dirname(BUILD), `build_stale_bak`);
     console.warn(`  ⚠ build 清理被拦（${err.code || err.message}），改名挪到 ${stale}`);
-    fs.rmSync(stale, { recursive: true, force: true }); // 上一次挪开的残留，一般不存在
+    fs.rmSync(stale, { recursive: true, force: true }); // 上一次改名遗留的残留，通常不存在
     fs.renameSync(BUILD, stale);
   }
   const extensionDir = path.join(STAGE, 'extension');
@@ -133,11 +133,11 @@ function main() {
     copyInto(from, path.join(extensionDir, item));
   }
 
-  // 2) 两个描述文件（必须没有 BOM，否则 VS Code 解析会炸）
+  // 2) 两个描述文件（不得包含 BOM，否则 VS Code 解析失败）
   fs.writeFileSync(path.join(STAGE, 'extension.vsixmanifest'), manifestXml(manifest), 'utf8');
   fs.writeFileSync(path.join(STAGE, '[Content_Types].xml'), contentTypesXml(), 'utf8');
 
-  // 3) 打成 zip（用 .NET 的实现，它在 .NET Core 上写的是正斜杠，符合 vsix 要求）
+  // 3) 打包为 zip（使用 .NET 的实现，该实现在 .NET Core 上写入正斜杠路径，符合 vsix 要求）
   const vsix = path.join(BUILD, `${manifest.name}-${manifest.version}.vsix`);
   execFileSync(
     'pwsh',
@@ -149,7 +149,7 @@ function main() {
     { stdio: 'inherit' },
   );
 
-  // 4) 自检：把 zip 里的条目名读回来，确认用的正斜杠、且该有的都在
+  // 4) 自检：读回 zip 中的条目名，确认路径使用正斜杠且必需条目齐全
   const check = execFileSync(
     'pwsh',
     [

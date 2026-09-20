@@ -1,14 +1,14 @@
 'use strict';
 
 /**
- * 界面预览器：把 webview 的 HTML/CSS/JS 拿到真浏览器里渲染，方便截图检查。
+ * 界面预览器：在真实浏览器中渲染 webview 的 HTML/CSS/JS，便于截图检查。
  *
- * 为什么需要它：面板跑在 VS Code 的 webview 里，没有自动化手段能可靠地
- * 点开它、截图。但界面层只有三样东西：一份 HTML 骨架、一份 CSS、一份 JS。
- * 把这三样塞进无头 Chrome，就能**真的看到**界面长什么样 —— 而不是靠想象。
+ * 设置该脚本的原因：面板运行在 VS Code 的 webview 中，没有自动化手段可以可靠地
+ * 打开并截图。界面层仅由三部分组成：一份 HTML 骨架、一份 CSS、一份 JS。
+ * 将这三部分载入无头 Chrome，即可直接观察界面外观，无需依赖推测。
  *
- * 关键细节：HTML 骨架直接用 src/panel/html.js 里那个**生产用的**函数生成，
- * 所以预览不会和真实界面脱节（改了 html.js，预览立刻跟着变）。
+ * 关键细节：HTML 骨架直接由 src/panel/html.js 中生产环境使用的函数生成，
+ * 因此预览与真实界面不会脱节（修改 html.js 后预览立即随之变化）。
  *
  * 用法：
  *   node tools/preview.js             # 生成所有场景 × 深浅两套主题
@@ -22,8 +22,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { renderHtml, makeNonce } = require('../src/panel/html');
 const { describeError } = require('../src/dsh/errors');
-// 权限那条链路的界面文案（中文标签、确认门）用**生产代码**生成，
-// 预览与界面测试就不会跟 src/dsh/permission.js 脱节。
+// 权限那条链路的界面文案（中文标签、确认环节）由生产代码生成，
+// 预览与界面测试就不会与 src/dsh/permission.js 脱节。
 const { decorateOptions } = require('../src/dsh/permission');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -32,9 +32,9 @@ const OUT = path.join(ROOT, 'build', 'preview');
 /**
  * 主题变量。
  *
- * 注意：这里只是**预览用的近似值**（取自 VS Code 默认主题的公开色值），
- * 真正的面板里一个硬编码颜色都没有，全部靠 VS Code 注入的变量。
- * 这份表的作用是让我在没有编辑器的情况下也能看见真实观感。
+ * 注意：此处仅为预览使用的近似值（取自 VS Code 默认主题的公开色值），
+ * 真实面板中不存在硬编码颜色，全部依赖 VS Code 注入的变量。
+ * 这份表的作用是在没有编辑器的情况下也能查看真实观感。
  */
 const THEMES = {
   dark: {
@@ -127,7 +127,7 @@ const THEMES = {
   },
 };
 
-// ── 场景：每一步要么「发一条消息给界面」，要么只是「等一会儿」 ──────────
+// ── 场景：每一步要么向界面发送一条消息，要么仅等待一段时间 ──────────
 
 const configMessage = {
   type: 'config',
@@ -156,8 +156,8 @@ const configMessage = {
 };
 
 /**
- * 门在 session/new 回复里补的那份预设清单（真实形状，对着 dsh-acp-door 抄的）。
- * 界面上的「模式」下拉就是拿它渲染的。
+ * ACP 接入点插件（`dsh-acp-door`）在 session/new 回复中补全的预设清单（真实形状，依据该插件实现）。
+ * 界面上的「模式」下拉即使用该清单渲染。
  */
 const presetsMessage = {
   type: 'presets',
@@ -172,11 +172,11 @@ const presetsMessage = {
 };
 
 /**
- * 权限选择器那一份状态（界面上顶栏那个「权限」按钮 + 点开的小卡片）。
+ * 权限选择器那一份状态（界面上顶栏的「权限」按钮与其展开的小卡片）。
  *
- * 选项是**用生产的翻译函数**生成的（`decorateOptions`），所以中文标签、
- * 说明、以及「完全权限要确认」这件事，预览与界面测试看到的都跟真面板一致；
- * 清单本身照这台机器上内核给的四档抄（含 Auto Approval 插件加的那一档）。
+ * 选项由生产环境的翻译函数生成（`decorateOptions`），因此中文标签、
+ * 说明以及「完全权限需要确认」这一约束，在预览与界面测试中的表现与真实面板一致；
+ * 清单本身依据本机内核返回的四档记录（含 Auto Approval 插件增加的那一档）。
  */
 const permissionStateMessage = {
   type: 'permissionState',
@@ -224,19 +224,19 @@ const longAnswer = [
 ];
 
 /**
- * 一段真实的 429 报错原文（额度用完时内核就是这么回的，一字不改）。
- * 用它来画错误场景：以前这段英文 JSON 是直接甩给用户的。
+ * 一段真实的 429 报错原文（额度用完时内核即返回该内容，未作任何修改）。
+ * 该原文用于构造错误场景：此前这段英文 JSON 会直接展示给用户。
  */
 const ERROR_RAW =
   '回合失败：Internal error: turn failed: 429: {"type":"GoUsageLimitError","message":"5-hour usage limit reached. Resets in 12min..."}';
 
 const SCENARIOS = {
   /**
-   * 刚打开、还没连上：什么都不该露出来。
+   * 刚打开、尚未连接：不应展示任何内容。
    *
-   * 这个场景是专门为「CSS 的 hidden 陷阱」写的：`hidden` 属性会被作者样式里的
-   * `display:flex` 盖掉，于是配置行、用量条、权限区会一直挂在那儿。这里什么都不发，
-   * 断言里逐条量它们「真的看不见」。
+   * 该场景针对「CSS 的 hidden 陷阱」：`hidden` 属性会被作者样式中的
+   * `display:flex` 覆盖，导致配置行、用量条、权限区持续显示。该场景不发送任何消息，
+   * 断言逐条测量上述元素确实不可见。
    */
   bare() {
     return {
@@ -244,7 +244,7 @@ const SCENARIOS = {
     };
   },
 
-  /** 空状态：刚打开面板。 */
+  /** 空状态：面板刚打开。 */
   empty() {
     return {
       steps: [
@@ -256,13 +256,13 @@ const SCENARIOS = {
   },
 
   /**
-   * 短文案：把"提示能有多短"摆出来给人看（2026-09-19 用户第二次提意见之后）。
+   * 短文案：展示提示文本可以达到的最短长度（2026-09-19 用户第二次提出意见之后）。
    *
-   * 为什么值得单独一个场景：文案是**看不见的规格** —— 只写在文档里就会慢慢长回去。
-   * 这里把自启、复用、重开这三种最常见的提示连同一张报错卡片摆在一起，
-   * 既能截图给人看，也给「每行 ≤32 字」那条测试留一个可对照的样子。
+   * 单独设置该场景的原因：文案属于不可见的规格，仅记录在文档中会逐渐变长。
+   * 此处将自启、复用、重开这三种最常见的提示与一张报错卡片并列展示，
+   * 既可用于截图查看，也为「每行 ≤32 字」那条测试提供可对照的样本。
    *
-   * 报错卡片走的是**生产代码** `describeError`（原文折在「原始报错（点开）」里）。
+   * 报错卡片使用生产代码 `describeError`（原文折叠在「原始报错（展开）」中）。
    */
   concise() {
     return {
@@ -272,8 +272,8 @@ const SCENARIOS = {
         { message: { type: 'status', state: 'ready', detail: '就绪' } },
         { message: configMessage },
         { message: presetsMessage },
-        { message: { type: 'notice', text: '接着用已经开着的 DSH。' } },
-        { message: { type: 'notice', text: '已按「标准模式」重开。' } },
+        { message: { type: 'notice', text: '继续使用当前正在运行的 DSH。' } },
+        { message: { type: 'notice', text: '已按「标准模式」重新开启。' } },
         {
           message: {
             type: 'error',
@@ -291,11 +291,11 @@ const SCENARIOS = {
   },
 
   /**
-   * 权限选择器：顶栏那个按钮 + 点开的小卡片。
+   * 权限选择器：顶栏的按钮与其展开的小卡片。
    *
-   * 单独一个场景，因为它是**唯一**一处「清单由内核给、界面只负责画」的控件：
-   * 卡片里每一档都带说明、当前那档打勾、最宽的那档还要过一道确认门。
-   * 这些在无头 Chrome 里点得动（见 tools/uitest.js 的 access 断言）。
+   * 单独设置该场景，因为它是唯一一处「清单由内核提供、界面只负责渲染」的控件：
+   * 卡片中每一档均带说明、当前档位打勾、最宽的档位还需要经过一道确认环节。
+   * 这些操作在无头 Chrome 中可以点击（见 tools/uitest.js 的 access 断言）。
    */
   access() {
     return {
@@ -304,19 +304,19 @@ const SCENARIOS = {
         { message: configMessage },
         { message: presetsMessage },
         { message: permissionStateMessage },
-        // 顺便把用量条也点上：这是配置行**最挤**的一种组合（模型 + 模式 + 权限 + 用量
-        // 四个都在），宽度怎么分就看它了（见 media/main.css 里 #config-row 那段）。
+        // 同时启用用量条：这是配置行最紧凑的一种组合（模型 + 模式 + 权限 + 用量
+        // 四项同时存在），宽度分配情况由该组合体现（见 media/main.css 里 #config-row 那段）。
         { message: { type: 'usage', used: 12480, size: 262144 } },
       ],
     };
   },
 
   /**
-   * 压力：一口气灌几百个流式增量，看耗时和 DOM 会不会失控。
+   * 压力：一次性注入数百个流式增量，观察耗时与 DOM 是否失控。
    *
-   * 为什么单独一个场景：面板每攒一批增量就把整段正文重新渲染一遍 markdown，
-   * 长回答就是 O(n²) 量级 —— 这个复杂度本身还行，但一旦有人不小心让它变成
-   * "每个字都重渲染整棵树"，界面就会肉眼可见地卡。这里量一个上限，卡住回归。
+   * 单独设置该场景的原因：面板每累积一批增量即重新渲染整段正文的 markdown，
+   * 长回答的复杂度为 O(n²) 量级；该复杂度本身可以接受，但若演变为
+   * 「每个字符都重新渲染整棵 DOM 树」，界面会出现明显卡顿。此处测量一个上限，用于阻止回归。
    */
   perf() {
     return {
@@ -330,11 +330,11 @@ const SCENARIOS = {
   },
 
   /**
-   * 带编辑器上下文：挂上"当前文件"和"选中的代码"，然后发出去。
+   * 带编辑器上下文：挂上「当前文件」与「选中的代码」，然后发送。
    *
-   * 这一段测的是「附件块」这条链路：挂上去看得见吗、点 × 拿得掉吗、
-   * 发出去的时候带上了吗、发完清空了吗、"已经被发出去的那条消息"里还看不看得出
-   * 它当时带了什么。
+   * 这一段验证「附件块」这条链路：挂上后是否可见、点击 × 是否可以移除、
+   * 发送时是否携带、发送后是否清空、已发送的那条消息中是否仍能显示
+   * 当时携带的内容。
    */
   context() {
     return {
@@ -445,7 +445,7 @@ const SCENARIOS = {
             },
           },
         },
-        // 正文按块推，模拟真实流式
+        // 正文按块推送，模拟真实流式输出
         ...longAnswer.map((chunk, index) => ({
           message: { type: 'text', id: 'a1', delta: chunk },
           delay: index === 0 ? 60 : 15,
@@ -457,7 +457,7 @@ const SCENARIOS = {
     };
   },
 
-  /** 正在流式输出的中间态（看光标、看布局稳不稳）。 */
+  /** 正在流式输出的中间状态（用于观察光标与布局稳定性）。 */
   streaming() {
     return {
       steps: [
@@ -491,9 +491,9 @@ const SCENARIOS = {
   },
 
   /**
-   * 历史会话：这个场景本身只摆好「就绪 + 工作目录」，浮层里的清单和回放
-   * 都由 uitest 的断言脚本现场注入 —— 因为真实链路是「点开浮层才去要清单」，
-   * 提前喂的消息会被「浮层没开就不渲染」的护栏丢掉（那道护栏是对的）。
+   * 历史会话：该场景本身只设置「就绪 + 工作目录」，浮层中的清单与回放
+   * 均由 uitest 的断言脚本现场注入；原因是真实链路为「点开浮层才请求清单」，
+   * 提前传入的消息会被「浮层未打开则不渲染」的防护逻辑丢弃（该防护逻辑是正确的）。
    */
   history() {
     return {
@@ -504,7 +504,7 @@ const SCENARIOS = {
     };
   },
 
-  /** 权限询问（内核反过来问客户端）。 */
+  /** 权限询问（内核向客户端发起询问）。 */
   permission() {
     return {
       steps: [
@@ -540,10 +540,10 @@ const SCENARIOS = {
   },
 
   /**
-   * 内核报错：界面上必须**先说人话，再给原文**。
+   * 内核报错：界面上应当先给出可读说明，再给出原文。
    *
-   * `human` 这一段不是手抄的，是**真的调一次** `src/dsh/errors.js` 里的
-   * 分类器算出来的 —— 所以这个预览页画的就是生产路径会给用户看的东西。
+   * `human` 这一段并非人工编写，而是实际调用 `src/dsh/errors.js` 中的
+   * 分类器计算得出；因此该预览页渲染的内容与生产路径向用户展示的内容一致。
    */
   error() {
     return {
@@ -565,7 +565,7 @@ const SCENARIOS = {
 
 // ── 生成 ────────────────────────────────────────────────
 
-/** 把界面逻辑脚本的地址换成同目录下的相对路径。 */
+/** 将界面逻辑脚本的地址替换为同目录下的相对路径。 */
 function buildHtml(themeName) {
   const nonce = makeNonce();
   const html = renderHtml({
@@ -580,8 +580,8 @@ function buildHtml(themeName) {
     .map(([name, value]) => `  ${name}: ${value};`)
     .join('\n');
 
-  // 预览专用的注入：主题变量 + 假的 acquireVsCodeApi。
-  // 必须在 main.js 之前执行，所以插在它的 script 标签前面。
+  // 预览专用的注入内容：主题变量与仿真的 acquireVsCodeApi。
+  // 必须在 main.js 之前执行，因此插入在其 script 标签之前。
   const prelude = `<style>
 :root {
 ${themeVars}
@@ -600,10 +600,10 @@ window.acquireVsCodeApi = function () {
 </script>
 `;
 
-  // 预览页里要把生产 CSP 摘掉。
-  // 生产 HTML 的 CSP 只允许带 nonce 的脚本，而我插进去的「主题变量 + 假
-  // acquireVsCodeApi + 回放脚本」是不带 nonce 的，会被直接拦掉 —— 这恰恰
-  // 说明生产环境的 CSP 是有效的。预览不加载任何远程内容，摘掉没有风险。
+  // 预览页中需要移除生产环境的 CSP。
+  // 生产 HTML 的 CSP 只允许带 nonce 的脚本，而此处插入的「主题变量 + 仿真
+  // acquireVsCodeApi + 回放脚本」不带 nonce，会被直接拦截；这一现象
+  // 说明生产环境的 CSP 有效。预览不加载任何远程内容，移除该策略不存在风险。
   const withoutCsp = html.replace(
     /<meta http-equiv="Content-Security-Policy"[^>]*>\s*/,
     '<!-- 预览专用：这里故意没有 CSP（见 tools/preview.js 的说明） -->\n',
@@ -645,8 +645,8 @@ function main() {
     for (const themeName of Object.keys(THEMES)) {
       if (onlyTheme && onlyTheme !== themeName) continue;
       let html = buildHtml(themeName);
-      // replay 脚本也要放 main.js 之前？不用 —— 它只用 setTimeout，
-      // 但必须保证 main.js 已经注册好监听，所以放到 main.js 之后。
+      // replay 脚本无需置于 main.js 之前：该脚本仅使用 setTimeout，
+      // 但必须保证 main.js 已注册监听，因此放在 main.js 之后。
       html = html.replace('</body>', `${buildReplayScript(steps)}\n</body>`);
       const file = path.join(OUT, `${name}-${themeName}.html`);
       fs.writeFileSync(file, html, 'utf8');
@@ -665,5 +665,5 @@ if (require.main === module) {
   main();
 }
 
-// 给 tools/uitest.js 复用，免得场景定义和主题变量写两份。
+// 供 tools/uitest.js 复用，避免场景定义与主题变量重复维护。
 module.exports = { SCENARIOS, THEMES, buildHtml, buildReplayScript, OUT, ROOT };

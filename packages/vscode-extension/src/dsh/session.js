@@ -1,12 +1,12 @@
 'use strict';
 
 /**
- * 一个会话的完整状态机：连内核、建会话、跑回合、收流、改配置。
+ * 单个会话的完整状态机：连接内核、建立会话、执行回合、接收流、修改配置。
  *
- * 这个文件**刻意不依赖 vscode** —— 于是它能在命令行里被直接跑起来测试，
- * 不必开编辑器。面板只负责把这里的事件翻译成 webview 消息。
+ * 本文件**刻意不依赖 vscode** —— 因此可以在命令行中直接运行测试，
+ * 不需要启动编辑器。面板仅负责将此处的事件转换为 webview 消息。
  *
- * 事件（都用 emit 往外发，面板按需转发）：
+ * 事件（均通过 emit 向外发送，面板按需转发）：
  *   'user'             {text}
  *   'assistant'        {id, ...}        助手消息开始
  *   'text'             {id, delta}      正文增量
@@ -24,7 +24,7 @@
 const { EventEmitter } = require('node:events');
 const { readDoorMeta } = require('../door/client');
 
-/** 没有 sessionId 的会话——用一个稳定的哨兵，方便日志里一眼看出问题。 */
+/** 会话 id 缺失时使用的稳定哨兵，便于在日志中直接识别问题。 */
 let nextId = 1;
 
 class DshSession extends EventEmitter {
@@ -42,21 +42,21 @@ class DshSession extends EventEmitter {
     this.log = log || (() => {});
     /** @type {string|null} */
     this.sessionId = null;
-    /** @type {any[]} session/new 返回的配置项（模型清单在这里）。 */
+    /** @type {any[]} session/new 返回的配置项（模型清单位于此处）。 */
     this.configOptions = [];
     /**
-     * 门补的那份预设信息：`{presets, current, requested, fallback}`。
+     * 该插件附加的预设信息：`{presets, current, requested, fallback}`。
      *
-     * 为什么会有这个东西：预设不是 ACP 的概念，是门（dsh-acp-door）替内核
-     * 接出来的 —— 桌面端把工具改成「按会话挂预设」，而 ACP 建 agent 时从不点名
-     * 预设，不补就是一个没有工具的 agent。见 dsh-acp-door 的 frames.js。
+     * 存在该字段的原因：预设不是 ACP 的概念，而是由 ACP 接入点插件（dsh-acp-door）替内核
+     * 接出的 —— 桌面端已将工具改为「按会话挂载预设」，而 ACP 创建 agent 时不指定
+     * 预设，若不补充则得到一个没有工具的 agent。见 dsh-acp-door 的 frames.js。
      * @type {{presets?: object[], current?: string, requested?: string, fallback?: boolean}|undefined}
      */
     this.doorMeta = undefined;
     /** @type {{used: number, size: number}|null} */
     this.usage = null;
     this.busy = false;
-    /** @type {Map<string, object>} 本回合里的工具卡片，按 toolCallId 合并。 */
+    /** @type {Map<string, object>} 本回合中的工具卡片，按 toolCallId 合并。 */
     this.tools = new Map();
     /** @type {Map<string, object>} 助手消息，按 id 索引。 */
     this.messages = new Map();
@@ -67,32 +67,32 @@ class DshSession extends EventEmitter {
     this.client.on('close', this._onClose);
   }
 
-  /** 当前回合的中断控制器（私有字段拿不到，给面板读用）。 */
+  /** 当前回合的中断控制器（私有字段无法在外部访问，供面板读取）。 */
   get currentAbort() {
     return this.#current;
   }
 
   /**
-   * 建立一个新会话。
+   * 建立一个新的会话。
    *
    * @param {object} options
    * @param {string} options.cwd 工作目录。
-   * @param {string} [options.provider] 想要的模型服务商（可空）。
-   * @param {string} [options.model] 想要的模型名（可空）。
+   * @param {string} [options.provider] 指定的模型服务商（可为空）。
+   * @param {string} [options.model] 指定的模型名（可为空）。
    * @returns {Promise<string>} sessionId
    */
   async start({ cwd, provider, model, preset }) {
     const result = await this.client.newSession(cwd, { preset });
     if (!result || !result.sessionId) {
-      throw new Error(`session/new 没有返回 sessionId：${JSON.stringify(result)}`);
+      throw new Error(`session/new 未返回 sessionId：${JSON.stringify(result)}`);
     }
     this.sessionId = result.sessionId;
     this.configOptions = Array.isArray(result.configOptions) ? result.configOptions : [];
     this.emit('session', { sessionId: this.sessionId });
     this.emit('config', { configOptions: this.configOptions });
 
-    // 门会在回复里补一份「有哪些预设、这次用的哪个」（ACP 的 _meta 扩展点）。
-    // 内核自己不给这份信息 —— 预设压根不是 ACP 的概念，是门替它接出来的。
+    // 该插件会在回复中附加「可用预设清单与本次使用的预设」（ACP 的 _meta 扩展点）。
+    // 内核本身不提供该信息 —— 预设不是 ACP 的概念，而是由该插件替内核接出的。
     const doorMeta = readDoorMeta(result);
     if (doorMeta) {
       this.doorMeta = doorMeta;
@@ -118,16 +118,16 @@ class DshSession extends EventEmitter {
    * @param {string} sessionId
    * @param {string} cwd
    * @param {object} [options]
-   * @param {string} [options.preset] 这段会话本来用哪个预设。
-   *   必须带上：内核不会把走门建的会话的预设记进会话记录，门只能靠客户端
-   *   点名（或它自己记得的）来补挂 —— 不补，接回来的会话就没有工具。
+   * @param {string} [options.preset] 该会话原先使用的预设。
+   *   需要携带：内核不会将经由接入点创建的会话的预设写入会话记录，该插件只能依据客户端
+   *   指定（或自身记录的）值补挂 —— 不补充时，恢复后的会话不具备工具。
    */
   async resume(sessionId, cwd, { preset } = {}) {
     const result = await this.client.resumeSession(sessionId, cwd, { preset });
     this.sessionId = sessionId;
     this.configOptions = Array.isArray(result && result.configOptions) ? result.configOptions : [];
-    // 门在 resume 的回复里也会补一份预设清单，照 session/new 一样处理，
-    // 免得重连之后面板上的「模式」下拉空着。
+    // 该插件在 resume 的回复中同样会附加预设清单，处理方式与 session/new 一致，
+    // 以避免重连后面板上的「模式」下拉框为空。
     const doorMeta = readDoorMeta(result);
     if (doorMeta) {
       this.doorMeta = doorMeta;
@@ -140,17 +140,17 @@ class DshSession extends EventEmitter {
   }
 
   /**
-   * 发一条消息并跑完整个回合。
+   * 发送一条消息并执行完整个回合。
    *
    * @param {string} text
    * @param {object} [options]
-   * @param {Array<object>} [options.attachments] 一起带上的编辑器上下文
-   *   （当前文件 / 选中的代码），由 door/client.js 拼成 ACP 内容块。
+   * @param {Array<object>} [options.attachments] 一并携带的编辑器上下文
+   *   （当前文件 / 选中的代码），由 door/client.js 组装为 ACP 内容块。
    * @returns {Promise<{stopReason?: string}>}
    */
   async send(text, { attachments = [] } = {}) {
     if (!this.sessionId) throw new Error('还没有会话');
-    if (this.busy) throw new Error('上一个回合还没结束');
+    if (this.busy) throw new Error('上一个回合尚未结束');
     if ((!text || !text.trim()) && attachments.length === 0) return { stopReason: 'empty' };
 
     const id = `m${nextId++}`;
@@ -158,7 +158,7 @@ class DshSession extends EventEmitter {
     this.messages.set(id, entry);
     this.tools = new Map();
 
-    // 界面上要能看出这条消息带了什么上下文 —— 带上清单，渲染时显示成附件。
+    // 界面需要显示该消息携带的上下文 —— 附带清单，渲染时显示为附件。
     this.emit('user', { text, attachments });
     this.emit('assistant', { id });
     this.busy = true;
@@ -193,7 +193,7 @@ class DshSession extends EventEmitter {
   stop() {
     const controller = this.#current;
     if (!controller) {
-      this.log('info', '当前没有正在跑的回合，忽略中断请求');
+      this.log('info', '当前没有正在执行的回合，忽略中断请求');
       return false;
     }
     controller.abort();
@@ -203,22 +203,22 @@ class DshSession extends EventEmitter {
   /**
    * 按会话切换模型。
    *
-   * @param {string} value `configOptions` 里那个 value 原样传回（它是 JSON 字符串）。
+   * @param {string} value `configOptions` 中的 value 原样回传（该值为 JSON 字符串）。
    */
   async setModel(value) {
     if (!this.sessionId) throw new Error('还没有会话');
     const reply = await this.client.setConfigOption(this.sessionId, 'model', value);
-    // 内核（dsh-acp 的 setSessionConfigOption）明明白白回了
-    // `{configOptions: [...]}`，这是权威值 —— 它可能把请求归一化成别的，
-    // 也可能连带改了别的项。以前这里是自己把本地那份改成请求的值，
-    // 等于在内核不认账时给用户看一个假状态（踩过：注释里写着"别自己猜"，
-    // 代码在猜）。现在以回复为准，只在老内核不回这个字段时才退回本地改。
+    // 内核（dsh-acp 的 setSessionConfigOption）明确返回
+    // `{configOptions: [...]}`，这是权威值 —— 内核可能将请求归一化为其他值，
+    // 也可能同时修改其他项。此处原先的实现是将本地副本改为请求的值，
+    // 相当于在内核未采纳时向用户展示错误状态（已发生过：注释中写明"不要自行推测"，
+    // 而代码实际在推测）。当前以内核回复为准，仅在旧版内核不返回该字段时才退回本地修改。
     const options = reply && Array.isArray(reply.configOptions) ? reply.configOptions : null;
     if (options) {
       this.configOptions = options;
       const current = modelCurrentValue(this.configOptions);
       if (current && current !== value) {
-        this.log('warn', `请求的模型是 ${value}，内核定成了 ${current}（以内核为准）`);
+        this.log('warn', `请求的模型为 ${value}，内核确定为 ${current}（以内核为准）`);
       }
     } else {
       this.configOptions = this.configOptions.map((option) =>
@@ -226,10 +226,10 @@ class DshSession extends EventEmitter {
       );
     }
     this.emit('config', { configOptions: this.configOptions });
-    this.log('info', `模型已切到 ${modelCurrentValue(this.configOptions) || value}`);
+    this.log('info', `模型已切换为 ${modelCurrentValue(this.configOptions) || value}`);
   }
 
-  /** 内核问权限时，替用户作答。 */
+  /** 内核请求权限时，代替用户作答。 */
   answerPermission(requestId, optionId) {
     if (optionId) this.client.respond(requestId, { outcome: { outcome: 'selected', optionId } });
     else this.client.respond(requestId, { outcome: { outcome: 'cancelled' } });
@@ -246,14 +246,14 @@ class DshSession extends EventEmitter {
   async _applyModel(provider, model) {
     const option = this.configOptions.find((item) => item && item.id === 'model');
     if (!option) {
-      this.log('warn', '内核没给 model 配置项，跳过模型设置');
+      this.log('warn', '内核未提供 model 配置项，跳过模型设置');
       return;
     }
     const wanted = JSON.stringify([provider, model]);
     if (option.currentValue === wanted) return;
     const choices = flattenChoices(option);
     if (!choices.some((choice) => choice.value === wanted)) {
-      this.log('warn', `模型 ${wanted} 不在内核给的可选清单里，保持原样`);
+      this.log('warn', `模型 ${wanted} 不在内核提供的可选清单中，保持原样`);
       return;
     }
     await this.setModel(wanted);
@@ -293,7 +293,7 @@ class DshSession extends EventEmitter {
         rawInput: null,
         content: null,
       };
-      // 内核会重复发同样的帧，所以这里必须幂等合并：只覆盖「有值」的字段。
+      // 内核会重复发送相同的帧，因此此处采用幂等合并：仅覆盖「有值」的字段。
       if (update.title) existing.title = update.title;
       if (update.kind) existing.kind = update.kind;
       if (update.status) existing.status = update.status;
@@ -329,7 +329,7 @@ class DshSession extends EventEmitter {
       return;
     }
 
-    // 剩下的类型先记日志，别静默丢掉——将来加功能时知道有什么可用。
+    // 其余类型先记录日志，不静默丢弃——以便后续扩展功能时了解可用类型。
     this.log('info', `暂未处理的会话更新：${kind}`);
   }
 
@@ -342,7 +342,7 @@ class DshSession extends EventEmitter {
   }
 }
 
-/** 从 ACP 的 content block 里取纯文本。 */
+/** 从 ACP 的 content block 中提取纯文本。 */
 function textOf(content) {
   if (!content) return '';
   if (typeof content === 'string') return content;
@@ -351,7 +351,7 @@ function textOf(content) {
   return '';
 }
 
-/** 把 configOptions 里可能是「分组」或「平铺」的选项拍平。 */
+/** 将 configOptions 中可能为「分组」或「平铺」的选项展开为一维列表。 */
 function flattenChoices(option) {
   const out = [];
   const walk = (list) => {
@@ -368,7 +368,7 @@ function flattenChoices(option) {
   return out;
 }
 
-/** 从（可能被嵌套分组的）configOptions 里读出 model 当前的 value。 */
+/** 从（可能按嵌套分组的）configOptions 中读出 model 当前的 value。 */
 function modelCurrentValue(options) {
   if (!Array.isArray(options)) return null;
   const found = options.find((option) => option && option.id === 'model');

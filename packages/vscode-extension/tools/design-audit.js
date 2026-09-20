@@ -1,17 +1,17 @@
 'use strict';
 
 /**
- * 界面设计基线审计：把现在这套 CSS 里「手工凑出来的数」量出来。
+ * 界面设计基线审计：测量当前 CSS 中手工设定的各项数值。
  *
- * 为什么要有这个：美化这一步要等你的样稿，但"现在到底用了几个间距值、
- * 几种字号、几个圆角"是客观数据，先量出来 —— 样稿一到就知道要改哪些地方，
- * 改完再跑一次还能证明"确实收敛到了新基线"，而不是凭感觉说"更整齐了"。
+ * 设置该脚本的原因：界面美化需要等待样稿，而当前实际使用了几个间距值、
+ * 几种字号、几个圆角属于客观数据，可以先行测量；样稿确定后即可据此确定需要修改的位置，
+ * 修改后重新运行一次即可证明数值已收敛到新基线，无需凭主观判断说明界面更为整齐。
  *
- * 判据（不是审美，是纪律）：
- *   - 间距（padding/margin/gap）应当落在一个尺度上，而不是 3/5/7/9/11px 混用；
- *   - 字号种类应当少而有序（层级靠字号+字重，不靠"多一种就多一档"）；
- *   - 圆角应当只有少数几档（按层级，不按元素）；
- *   - 颜色一律走 VS Code 主题变量（这是硬规矩：跟随主题）。
+ * 判据（属于工程约束，不属于审美判断）：
+ *   - 间距（padding/margin/gap）应当落在同一个尺度上，不得混用 3/5/7/9/11px；
+ *   - 字号种类应当少而有序（层级由字号与字重体现，不采用「多一种字号即多一档」的做法）；
+ *   - 圆角应当只有少数几档（按层级划分，不按元素划分）；
+ *   - 颜色一律使用 VS Code 主题变量（硬性约束：跟随主题）。
  *
  * 用法：node tools/design-audit.js          # 打印报告
  *      node tools/design-audit.js --strict  # 发现硬编码颜色就退出码非 0
@@ -28,7 +28,7 @@ const RADIUS = /^border(-(top|bottom)-(left|right))?-radius$/;
 
 function declarations(text) {
   const list = [];
-  // 去掉注释，免得注释里的示例被算进统计。
+  // 移除注释，避免注释中的示例被计入统计。
   const clean = text.replace(/\/\*[\s\S]*?\*\//g, '');
   const re = /([a-z-]+)\s*:\s*([^;{}]+);/g;
   let match;
@@ -38,7 +38,7 @@ function declarations(text) {
   return list;
 }
 
-/** 把 "8px 12px" 这类展开成一个个长度值。 */
+/** 将 "8px 12px" 这类取值展开为单个长度值。 */
 function lengths(value) {
   return value
     .split(/\s+/)
@@ -96,8 +96,8 @@ function main() {
 
   const spacingValues = sorted(spacing);
   console.log(`间距值（${spacingValues.length} 种）：${spacingValues.map((v) => `${v}px`).join(' / ')}`);
-  // 基线：2px 刻度（2/4/8/12/16）。不查 4px 是因为下拉框、小块这类
-  // 紧凑元素合法地用 2px，4px 判据会把它们误报成出格。
+  // 基线：2px 刻度（2/4/8/12/16）。不检查 4px 的原因：下拉框与小块这类
+  // 紧凑元素合法地使用 2px，若以 4px 为判据会将其误报为不符合尺度。
   const offScale = spacingValues.filter((value) => value % 2 !== 0);
   console.log(`  不在 2px 刻度上的：${offScale.length ? offScale.map((v) => `${v}px`).join(' / ') : '没有'}`);
 
@@ -113,7 +113,7 @@ function main() {
   console.log(`\n主题变量用了 ${themeVars.size} 个：${[...themeVars].sort().slice(0, 8).join(', ')}${themeVars.size > 8 ? ' …' : ''}`);
   console.log(`硬编码颜色：${hardcodedColors.length ? hardcodedColors.join(' / ') : '没有（全部走主题变量）'}`);
 
-  // 报告那些"只用了一次的间距值" —— 这类值最像随手写的。
+  // 报告仅使用过一次的间距值：此类数值通常为临时加入的取值。
   const singletons = spacingValues.filter((value) => spacing.get(value).length === 1);
   console.log(`\n只用了一次的间距值：${singletons.length ? singletons.map((v) => `${v}px`).join(' / ') : '没有'}`);
 

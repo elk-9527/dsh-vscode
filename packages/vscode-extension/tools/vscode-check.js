@@ -1,37 +1,37 @@
 'use strict';
 
 /**
- * 真编辑器里的自检：装上了吗、激活了吗、面板真的连上了吗。
+ * 真实编辑器中的自检：扩展是否已安装、是否已激活、面板是否已连接。
  *
- * 为什么需要这个：其它测试都是用「假 vscode」跑的（快、能断言），但**没有一条
- * 能证明真 VS Code 会加载这个扩展**。这一步专门补那个洞。
+ * 设置该脚本的原因：其它测试均使用仿真的 vscode 环境运行（执行快、可断言），
+ * 但没有任何一项能够证明真实 VS Code 会加载该扩展。该脚本用于覆盖这一处缺口。
  *
- * 怎么做到不打扰用户：
- * - 用**自己的** `--user-data-dir` 和 `--extensions-dir` 开一个隔离窗口 ——
- *   你的设置、你的扩展、你正开着的那个窗口，一概不碰；
- * - 靠扩展里的自检开关 `DSH_PANEL_AUTOFOCUS=1` 让它 1.5 秒后自己展开面板
- *   （无人值守时点不了活动栏图标）；
- * - 验完把它自己的进程树收掉，只收**启动之后新出现**的那些。
+ * 不干扰用户的操作方式：
+ * - 使用独立的 `--user-data-dir` 与 `--extensions-dir` 启动隔离窗口，
+ *   不接触用户设置、用户扩展以及用户已打开的窗口；
+ * - 通过扩展中的自检开关 `DSH_PANEL_AUTOFOCUS=1` 使其在 1.5 秒后自动展开面板
+ *   （无人值守时无法点击活动栏图标）；
+ * - 验证结束后结束该次启动的进程树，且仅结束启动之后新出现的进程。
  *
- * 判据（缺一条都算失败，不会含糊过去）：
- * 1. 隔离窗口真的起来了（出现新的 Code.exe）；
- * 2. 扩展真的被激活了（扩展宿主日志里有 `_doActivateExtension <publisher>.dsh-panel`）；
- * 3. 面板真的挂进了活动栏（渲染进程日志里有 `Added views:dshPanel.chat`）；
- * 4. 面板真的展开了（扩展自己的日志里有「面板已打开」）；
- * 5. 真的连上了 DSH（扩展自己的日志里有「握手完成」和「已建会话」）——
- *    这是端到端最硬的一条：真 VS Code → 真扩展 → 真内核。
- * 6. 收摊之后不留窗口、不留孤儿内核；
- * 7. 你自己正开着的窗口从头到尾没被动过。
+ * 判据（缺少任意一条即判定失败，不做模糊处理）：
+ * 1. 隔离窗口确实启动（出现新的 Code.exe）；
+ * 2. 扩展确实被激活（扩展宿主日志中存在 `_doActivateExtension <publisher>.dsh-panel`）；
+ * 3. 面板确实挂载到活动栏（渲染进程日志中存在 `Added views:dshPanel.chat`）；
+ * 4. 面板确实展开（扩展自身的日志中存在「面板已打开」）；
+ * 5. 确实连接到 DSH（扩展自身的日志中存在「握手完成」与「已建会话」）——
+ *    这是端到端最强的一条证据：真 VS Code → 真扩展 → 真内核。
+ * 6. 收尾之后不残留窗口、不残留孤儿内核；
+ * 7. 用户当时已打开的窗口全程未被影响。
  *
- * 两个踩过的坑，写在这里免得下次再撞：
- * - 必须用 `--verbose` 启动：不开详细日志时，输出通道的内容不会落到磁盘上的
- *   `1-DSH Panel.log`，于是"扩展自己的日志"这条证据根本读不到；
- * - **不能拿「端口被监听」当"面板连上了"的判据**：自启起来的内核是按设计用
- *   `--port 0`（系统随便给一个空闲端口），就是为了不去抢你桌面端那个门的端口。
+ * 两个已发生的问题记录如下，以避免再次出现：
+ * - 必须使用 `--verbose` 启动：未开启详细日志时，输出通道的内容不会写入磁盘上的
+ *   `1-DSH Panel.log`，因此扩展自身的日志这条证据无法读取；
+ * - 不得以「端口处于监听状态」作为面板已连接的判据：自启的内核按设计使用
+ *   `--port 0`（由系统分配一个空闲端口），其目的正是不占用桌面端 ACP 接入点插件（`dsh-acp-door`）的端口。
  *
- * 想验「自启模式」（用户最常走的那条路：刚开机、没开桌面端）而桌面端又开着，
- * 就用 DSH_PANEL_CHECK_PORT / _PROFILE / _DSH 这三个环境变量把这次自检
- * 引到一个空端口上 —— 见下面 PORT 那段的说明。
+ * 需要验证「自启模式」（用户最常采用的路径：刚开机、未启动桌面端）而桌面端又已启动时，
+ * 可使用 DSH_PANEL_CHECK_PORT / _PROFILE / _DSH 这三个环境变量将该次自检
+ * 引导到一个空闲端口，说明见下方 PORT 一段。
  */
 
 const fs = require('node:fs');
@@ -41,36 +41,36 @@ const { spawnSync, spawn } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 /**
- * 验哪条连接路：
+ * 验证哪一条连接路径：
  *
- * - 默认 47821。那儿有门（桌面端开着）→ 验**接入模式**；没门 → 验**自启模式**。
- * - 想在看门狗还开着的时候也验「自启」，就换个空端口：
+ * - 默认为 47821。桌面端已启动时该端口存在 ACP 接入点插件（`dsh-acp-door`），此时验证接入模式；否则验证自启模式。
+ * - 需要在桌面端 ACP 接入点插件进程仍运行的情况下也验证「自启」时，改用其它空闲端口：
  *
  *     $env:DSH_PANEL_CHECK_PORT = '47830'
- *     $env:DSH_PANEL_CHECK_PROFILE = 'dshdoor'          # 测试档，别动用户的 desktop
- *     $env:DSH_PANEL_CHECK_DSH = "node <bin.js> --patch <把门钉到 47830 的 patch>"
+ *     $env:DSH_PANEL_CHECK_PROFILE = 'dshdoor'          # 测试档，请勿改动用户的 desktop
+ *     $env:DSH_PANEL_CHECK_DSH = "node <bin.js> --patch <将 ACP 接入点插件绑定到 47830 的 patch>"
  *
- *   这几个环境变量会被写成**隔离窗口自己的 settings.json**（隔离的 user-data-dir
- *   里的那一份），所以只影响这次自检，碰不到你的设置。
+ *   这几个环境变量会写入隔离窗口自身的 settings.json（隔离的 user-data-dir
+ *   中的那一份），因此只影响该次自检，不涉及用户设置。
  *
- *   端口怎么对齐（2026-09-19 变了，以前必须靠 `--patch`）：
- *   现在面板启动内核时会把它要连的端口写进环境变量 `DSH_ACP_DOOR_PORT`，
- *   门优先读它（见 dsh-door/lib/port.js），所以**自检不用再自己糊 patch**：
- *   设了 DSH_PANEL_CHECK_PORT，面板和门就都在那个端口上。
- *   档里的门如果是旧版（不认这个变量），面板会两个端口都盯，照样能接上 ——
- *   那条兼容路也在这里被真实走了一遍。
+ *   端口的对齐方式（2026-09-19 发生变化，此前必须依赖 `--patch`）：
+ *   当前面板在启动内核时会将其需要连接的端口写入环境变量 `DSH_ACP_DOOR_PORT`，
+ *   该插件优先读取该变量（见 dsh-door/lib/port.js），因此自检无需再自行构造 patch：
+ *   设置 DSH_PANEL_CHECK_PORT 之后，面板与该插件均使用该端口。
+ *   档中的该插件若为旧版本（不识别该变量），面板会同时监听两个端口，仍可连接，
+ *   这条兼容路径在此处也被真实执行一次。
  *
- *   还有一种组合要**两个端口不一样**：接的那台换不了权限时，面板会改用自己
- *   启动的那台（2026-09-20 用户报「切不了权限」的那个修法）。验这条就用
+ *   还有一种组合需要两个端口不同：所连接的那台无法切换权限时，面板会改用自身
+ *   启动的那台（2026-09-20 用户报告「切不了权限」的修复方式）。验证该路径使用
  *
- *     $env:DSH_PANEL_CHECK_PORT = '47821'       # 有现成的门（桌面端那个旧组件）
- *     $env:DSH_PANEL_CHECK_SELF_PORT = '47832'  # 空着的，给自启那台用
+ *     $env:DSH_PANEL_CHECK_PORT = '47821'       # 存在现成的 ACP 接入点插件（桌面端那个旧组件）
+ *     $env:DSH_PANEL_CHECK_SELF_PORT = '47832'  # 空闲端口，供自启的实例使用
  *
- *   两个口相同时，"换内核"会换成同一个口上那台（等于没换）—— 那是设置的边界，
- *   不是这条路的毛病。
+ *   两个端口相同时，「换内核」会切换到同一端口上的实例（等同于未切换）；这属于设置的边界，
+ *   不属于该路径的缺陷。
  */
 const PORT = Number(process.env.DSH_PANEL_CHECK_PORT || 47821);
-/** 自启内核用的端口（默认跟 PORT 一致；见写设置那一段的注释）。 */
+/** 自启内核使用的端口（默认与 PORT 一致；见写设置那一段的注释）。 */
 const SELF_PORT = Number(process.env.DSH_PANEL_CHECK_SELF_PORT || PORT);
 const CHECK_PROFILE = process.env.DSH_PANEL_CHECK_PROFILE || '';
 const CHECK_DSH = process.env.DSH_PANEL_CHECK_DSH || '';
@@ -80,12 +80,12 @@ const timeoutIndex = args.indexOf('--timeout');
 const timeoutSec = timeoutIndex >= 0 ? Number(args[timeoutIndex + 1]) : 75;
 
 /**
- * 可执行文件和命令行分开记：
+ * 可执行文件与命令行分开记录：
  *
- * 必须直接起 **Code.exe**，不能走 `bin\code.cmd`。踩过：code.cmd 会把命令行
- * 转发给你**正在跑的那个实例**，于是"隔离窗口"根本不会出现（也验不了任何东西），
- * 表现是一句含糊的"新 PID 无"。带上自己的 `--user-data-dir` 直接起 exe，
- * VS Code 才会当成另一个实例、开一个真正独立的窗口。
+ * 必须直接启动 **Code.exe**，不得经由 `bin\code.cmd`。已发生的问题：code.cmd 会把命令行
+ * 转发给正在运行的实例，导致隔离窗口不会出现（也无法验证任何内容），
+ * 表现为含义不明的「新 PID 无」。携带自身的 `--user-data-dir` 直接启动 exe 时，
+ * VS Code 才会将其视为另一个实例并打开一个真正独立的窗口。
  */
 const CODE_EXE_CANDIDATES = [
   'D:\\Microsoft VS Code\\Code.exe',
@@ -93,10 +93,10 @@ const CODE_EXE_CANDIDATES = [
   path.join(process.env.ProgramFiles || '', 'Microsoft VS Code', 'Code.exe'),
 ];
 /*
- * 安装目录名 = `<publisher>.<name>-<version>`（VS Code 自己就是这么命名的）。
- * **别写死 `local.`** —— 0.1.3 起 publisher 换成了市场要用的那个 ID，
- * 写死的结果是"扩展明明装着，自检却说找不到"。
- * 大小写也不假设：市场规定 publisher 只能小写，但要是被手改过，就按实际存在的找。
+ * 安装目录名 = `<publisher>.<name>-<version>`（VS Code 采用该命名方式）。
+ * 不得固定写为 `local.`：0.1.3 起 publisher 更换为市场使用的那个 ID，
+ * 固定写入的结果是扩展已安装而自检报告找不到。
+ * 大小写同样不做假设：市场规定 publisher 只能为小写，若被手工修改，则按实际存在的目录查找。
  */
 const MANIFEST = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 const EXTENSIONS_DIR = path.join(os.homedir(), '.vscode', 'extensions');
@@ -126,7 +126,7 @@ function check(name, ok, detail) {
   }
 }
 
-/** 跑一条命令，拿回 stdout（失败不抛）。 */
+/** 执行一条命令并返回 stdout（失败时不抛出异常）。 */
 function run(command, argv, options = {}) {
   const result = spawnSync(command, argv, {
     encoding: 'utf8',
@@ -137,7 +137,7 @@ function run(command, argv, options = {}) {
   return { out: `${result.stdout || ''}${result.stderr || ''}`, code: result.status };
 }
 
-/** 某个端口上有没有人在听（用来判断是"接入模式"还是"兜底拉起模式"）。 */
+/** 某个端口是否处于监听状态（用于判断是接入模式还是后备拉起模式）。 */
 function portIsUp(port) {
   const net = require('node:net');
   return new Promise((resolve) => {
@@ -165,15 +165,15 @@ function codePids() {
 }
 
 /**
- * 所有进程的 PID、名字、父 PID、命令行。
+ * 所有进程的 PID、名称、父 PID、命令行。
  *
- * 收摊要靠它：只收「启动之后新出现的**我们自己的**」进程。
- * 宁可多花一秒枚举，也不能靠猜名字去 taskkill —— 那是会误伤别人进程的做法。
+ * 收尾依赖该数据：仅结束「启动之后新出现的、由本脚本启动的」进程。
+ * 即使枚举需要多耗一秒，也不得按名称推测并调用 taskkill，该做法会误终止其它进程。
  *
- * 为什么还要看名字和父进程（这一夜踩到的）：**用户自己的 DSH Desktop 拉起的内核
- * 命令行里一样有 `--no-open`** —— 只按命令行匹配，就会把"用户正在用的内核"
- * 当成"我们拉的"，轻则误报，重则把它杀掉。所以下面还要排除
- * 「祖先是 DSH Desktop.exe」以及「我们自己的 shell/node」这两类。
+ * 还需要读取名称与父进程的原因（当夜出现的问题）：用户自身的 DSH Desktop 启动的内核
+ * 命令行中同样包含 `--no-open`；若仅按命令行匹配，会把「用户正在使用的内核」
+ * 判定为「本脚本启动的」，轻则误报，重则将其终止。因此下方还需要排除
+ * 「祖先是 DSH Desktop.exe」以及「本脚本自身的 shell/node」这两类。
  */
 function allProcesses() {
   const { out } = run('powershell', [
@@ -202,7 +202,7 @@ function newProcesses(beforePids) {
   return allProcesses().filter((item) => !beforePids.has(item.pid));
 }
 
-/** 往上找几层，看这个进程是不是桌面端（用户自己的 DSH Desktop）的后代。 */
+/** 向上逐层查找，判断该进程是否为桌面端（用户自身的 DSH Desktop）的后代。 */
 function belongsToDesktopApp(item, all) {
   const byPid = new Map(all.map((entry) => [entry.pid, entry]));
   let current = item;
@@ -215,17 +215,17 @@ function belongsToDesktopApp(item, all) {
 }
 
 /**
- * 这个新进程是不是「扩展/测试拉起来的 DSH」。
+ * 判断该新进程是否为「扩展或测试启动的 DSH」。
  *
- * 现场长这样（实测看来的，别再猜）：
+ * 实际命令行如下（来源于实测结果，无需推测）：
  *   cmd.exe /d /s /c "dsh --profile desktop --no-open --host 127.0.0.1 --port 0"
- * 后面才是真正的内核 `DSH Desktop.exe`（它的命令行里反而没有 --profile/--no-open，
- * 所以认那个 cmd.exe 才是最可靠的信号 —— 一开始我按进程名排除 cmd.exe，结果
- * 自己拉起来的那个永远认不出来）。
+ * 其后才是真正的内核 `DSH Desktop.exe`（其命令行中没有 --profile/--no-open，
+ * 因此识别该 cmd.exe 是最可靠的信号；最初按进程名排除 cmd.exe 时，
+ * 自行启动的进程始终无法被识别）。
  *
- * 排除两类，都是为了不误伤：
- * - 我们自己的 powershell/node（它们的命令行里**写着**过滤条件，会自我匹配）；
- * - 祖先是用户自己的 DSH Desktop 的进程。
+ * 排除以下两类，目的均为避免误终止：
+ * - 本脚本自身的 powershell/node（其命令行中写有过滤条件，会匹配到自身）；
+ * - 祖先是用户自身 DSH Desktop 的进程。
  */
 function isOurKernel(item, all) {
   const cmd = item.cmdline;
@@ -234,14 +234,14 @@ function isOurKernel(item, all) {
   if (!/--no-open/.test(cmd)) return false;
   if (!/--profile\s+\S+/.test(cmd)) return false;
   /*
-   * 「命令行里在跑 dsh」有两种写法，都要认：
-   *   ① 裸命令           dsh --profile desktop --no-open …
-   *   ② node 起那个脚本  node C:\…\@deepseek-ai\dsh\lib\bin.js --profile desktop …
-   * ② 是本机常态（`dsh` 不在 PATH 上时 `dshPanel.dshCommand` 就得这么填，见交接文档第八节
-   * 第 13 条），而 2026-09-19 第一次拿 ② 跑自启模式时，这条匹配只认 ① ——
-   * 结果是内核明明起来了、握手也成了，这里却报"没找到内核"（假阴性）。
-   * 匹配的是 cmd.exe 那层壳：真正的内核进程叫 node.exe，被上面那条按名字排除了，
-   * 而它的壳（cmd /d /s /c "…"）才是稳定信号 —— 见下面这段的说明。
+   * 「命令行中运行 dsh」存在两种写法，均需识别：
+   *   ① 直接命令         dsh --profile desktop --no-open …
+   *   ② node 启动该脚本  node C:\…\@deepseek-ai\dsh\lib\bin.js --profile desktop …
+   * ② 是本机常态（`dsh` 不在 PATH 上时 `dshPanel.dshCommand` 需要按此填写，见交接文档第八节
+   * 第 13 条）；2026-09-19 第一次使用 ② 运行自启模式时，该匹配仅识别 ①，
+   * 结果是内核已启动、握手已完成，此处却报告「没找到内核」（假阴性）。
+   * 匹配的是 cmd.exe 这一层外壳：真正的内核进程名为 node.exe，已被上一条按名称排除，
+   * 而其外壳（cmd /d /s /c "…"）才是稳定信号，说明见下面这一段。
    */
   const runsDsh =
     /(^|[\s"'\\/])dsh(\.cmd)?["'\s]/.test(cmd) || /[\\/]dsh[\\/]lib[\\/]bin\.js/i.test(cmd);
@@ -250,13 +250,13 @@ function isOurKernel(item, all) {
   return true;
 }
 
-/** 找出这次新拉起的内核。 */
+/** 找出本次新启动的内核。 */
 function ourKernels(beforePids) {
   const all = allProcesses();
   return all.filter((item) => !beforePids.has(item.pid) && isOurKernel(item, all));
 }
 
-/** 在隔离目录里找某个日志文件（日志目录带时间戳，所以得递归找）。 */
+/** 在隔离目录中查找某个日志文件（日志目录带时间戳，因此需要递归查找）。 */
 function findLog(userData, name) {
   const root = path.join(userData, 'logs');
   if (!fs.existsSync(root)) return null;
@@ -278,7 +278,7 @@ function findLog(userData, name) {
   return null;
 }
 
-/** 扩展自己的输出通道日志（文件名形如 `1-DSH Panel.log`）。 */
+/** 扩展自身的输出通道日志（文件名形如 `1-DSH Panel.log`）。 */
 function findPanelLog(userData) {
   const root = path.join(userData, 'logs');
   if (!fs.existsSync(root)) return null;
@@ -319,7 +319,7 @@ async function main() {
   console.log(`  （隔离目录，不碰你正开着的窗口；等最多 ${timeoutSec} 秒）\n`);
 
   if (!CODE_EXE) {
-    console.log('  ⏭  找不到 VS Code 的 Code.exe（这台机器上没法做这一步）');
+    console.log('  ⏭  找不到 VS Code 的 Code.exe（该机器上无法执行此步骤）');
     process.exit(2);
   }
   if (!fs.existsSync(INSTALLED)) {
@@ -327,14 +327,14 @@ async function main() {
     process.exit(2);
   }
 
-  // 先看那个端口上有没有门在跑，决定这次是验哪条路：
-  // - 有人在听 → 「接入模式」：面板该直接连上它，**不该**另起内核（这是主用例：
-  //   一个进程、一个大脑、同一份记忆）；
-  // - 没人在听 → 「自启模式」：面板该自己拉一个内核起来（用户明确要求：
-  //   用这个插件不必先开桌面端）。
+  // 先检查该端口上是否存在运行中的 ACP 接入点插件（`dsh-acp-door`），据此确定本次验证的路径：
+  // - 存在监听 → 「接入模式」：面板应当直接连接该实例，不应另起内核（这是主要用例：
+  //   一个进程、一个内核、同一份记忆）；
+  // - 不存在监听 → 「自启模式」：面板应当自行启动一个内核（用户明确要求：
+  //   使用该插件时无需预先启动桌面端）。
   const attached = await portIsUp(PORT);
   console.log(
-    `  ${PORT} ${attached ? '上有门在跑 → 验「接入模式」' : '上没人 → 验「自启模式」'}`,
+    `  ${PORT} ${attached ? '上有该插件在运行 → 验「接入模式」' : '上没有进程 → 验「自启模式」'}`,
   );
 
   const before = codePids();
@@ -351,18 +351,18 @@ async function main() {
   console.log(`  隔离目录：${sandbox}`);
   console.log(`  扩展目录里只放这一份：${fs.readdirSync(extensions).join(', ')}`);
 
-  // 只在设了覆盖项时才写设置 —— 写的是**隔离窗口自己的** user settings，
-  // 你的设置一个字都不会动。
+  // 仅在设置了覆盖项时才写入设置；写入的是隔离窗口自身的 user settings，
+  // 用户设置不会被修改。
   if (CHECK_PROFILE || CHECK_DSH || PORT !== 47821 || SELF_PORT !== PORT) {
     const settings = { 'dshPanel.port': PORT };
     /*
-     * 自启的内核把门钉在"面板自己的端口"上；自检里默认让它和 PORT 一致，
-     * 于是"接入"和"自启"两条路都落在同一个端口上，端口空着就走自启。
+     * 自启的内核将 ACP 接入点插件绑定在「面板自身的端口」上；自检中默认使其与 PORT 一致，
+     * 因此「接入」与「自启」两条路径都落在同一个端口上，端口空闲时即采用自启。
      *
-     * 但有一条路需要两者**不同**：`DSH_PANEL_CHECK_PORT=47821`（桌面端那个
-     * 旧连接组件所在的口）+ 另一个空着的自启口 —— 那是「接上了，但那台换不了
-     * 权限，于是改用自己启动的那台」这条路（2026-09-20 用户报的那个）。
-     * 用 DSH_PANEL_CHECK_SELF_PORT 指定它。
+     * 但有一条路径需要两者不同：`DSH_PANEL_CHECK_PORT=47821`（桌面端那个
+     * 旧连接组件所在的端口）加另一个空闲的自启端口；该路径即「已接入，但该实例无法切换
+     * 权限，因此改用自身启动的实例」（2026-09-20 用户报告的情况）。
+     * 使用 DSH_PANEL_CHECK_SELF_PORT 指定该端口。
      */
     settings['dshPanel.selfStartPort'] = SELF_PORT;
     if (CHECK_PROFILE) settings['dshPanel.fallbackProfile'] = CHECK_PROFILE;
@@ -373,8 +373,8 @@ async function main() {
     console.log(`  这次用隔离设置：${JSON.stringify(settings)}`);
   }
 
-  // 启动隔离窗口。DSH_PANEL_AUTOFOCUS=1 是扩展里的自检开关，只在这个进程里生效。
-  // --verbose 是必须的：不然输出通道的内容不会写到磁盘上的日志文件里。
+  // 启动隔离窗口。DSH_PANEL_AUTOFOCUS=1 是扩展中的自检开关，仅在该进程中生效。
+  // --verbose 为必需项：否则输出通道的内容不会写入磁盘上的日志文件。
   const child = spawn(
     CODE_EXE,
     [
@@ -395,7 +395,7 @@ async function main() {
   );
   child.unref();
 
-  // 等：新窗口出现 + 扩展自己的日志里出现「已建会话」（端到端成功的标志）。
+  // 等待：新窗口出现，且扩展自身的日志中出现「已建会话」（端到端成功的标志）。
   const started = Date.now();
   let newPids = [];
   let panelLog = null;
@@ -409,21 +409,21 @@ async function main() {
   }
   const waited = ((Date.now() - started) / 1000).toFixed(0);
 
-  // 权限那一路是**会话建好之后紧接着**读的（同一毫秒级），而上面那个循环是
-  // 一看到「已建会话」就跳出、当场把日志读成了字符串 —— 差几毫秒就会读到
-  // 「还没有那一行」的旧快照，于是断言误报（真踩过：13 项里红这一项，
-  // 而日志文件里其实有那行）。所以这里再等一小会儿，专门等它出现；
-  // 两样都没有才是真的没结果（那正是要报出来的情况）。
+  // 权限那一路是在会话建立之后紧接着读取的（同一毫秒级），而上面那个循环
+  // 一看到「已建会话」即跳出，并当场把日志读取为字符串；相差几毫秒就会读到
+  // 尚不包含该行的旧快照，导致断言误报（已实际发生：13 项中该项失败，
+  // 而日志文件中实际存在该行）。因此此处再等待一小段时间，以等待该行出现；
+  // 两者均未出现才属于确实没有结果（该情况正是需要报告的情况）。
   /*
-   * 权限那一路：**等到有结论**再判断。
+   * 权限那一路：等待出现结论之后再判断。
    *
-   * 三种结论都算"有结果"：读到了清单 / 换了内核之后读到了（同样是「当前权限：」）/
-   * 明确说清了换不了（「权限预设读不到（…）」而且日志不再动）。
+   * 以下三种结论均视为有结果：读取到清单 / 更换内核之后读取到（同样为「当前权限：」）/
+   * 明确说明无法切换（「权限预设读取失败（…）」且日志不再变化）。
    *
-   * 为什么不能"一看到「权限预设读不到」就跳出"：接上的那台换不了权限时，面板
-   * 会去启动自己那台（要十几秒），日志里**先出现的是换之前那条** ——
-   * 一看到它就跳出，就会把"正在换"当成"换不了"（2026-09-20 真踩过：
-   * 断言红，而日志再往后几行就写着「改用面板自己启动的」+「当前权限：」）。
+   * 不能「一看到「权限预设读取失败」就跳出」的原因：所连接的实例无法切换权限时，面板
+   * 会启动自身的内核（耗时十几秒），日志中先出现的是切换之前的那一条；
+   * 若一看到该条即跳出，会把「正在切换」判定为「无法切换」（2026-09-20 已实际发生：
+   * 断言失败，而日志随后几行即记录「改用面板自己启动的」与「当前权限：」）。
    */
   const accessStart = Date.now();
   let lastLen = -1;
@@ -435,7 +435,7 @@ async function main() {
     if (panelText.length !== lastLen) {
       lastLen = panelText.length;
       stableSince = Date.now();
-    } else if (Date.now() - stableSince > 5000 && /权限预设读不到（/.test(panelText)) {
+    } else if (Date.now() - stableSince > 5000 && /权限预设读取失败（/.test(panelText)) {
       break;
     }
     sleep(700);
@@ -449,8 +449,8 @@ async function main() {
   check('扩展真的被激活了（扩展宿主日志里有它）',
     new RegExp(`_doActivateExtension ${EXT_ID.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`).test(exthostText),
     exthost ? `找的是 _doActivateExtension ${EXT_ID}` : '没有扩展宿主日志');
-  // 命令清单从清单文件里读，别在这里再抄一份 —— 抄一份就会漏掉后加的
-  // （「打开面板」就是这么被漏掉的：这正是早上"找不到入口"的那个坑）。
+  // 命令清单从清单文件中读取，不得在此处重复复制；重复复制会遗漏后续新增项
+  // （「打开面板」即因此被遗漏：这正是当日早晨「找不到入口」问题的成因）。
   const declaredCommands = require('../package.json').contributes.commands.map((item) => item.command);
   check(`清单里的命令都注册上了（${declaredCommands.length} 个）`,
     declaredCommands.every((name) => exthostText.includes(name)),
@@ -468,21 +468,21 @@ async function main() {
   check('真的建出了会话（端到端成功）', /已建会话/.test(panelText),
     panelText ? `等了 ${waited} 秒` : `等了 ${waited} 秒还没读到扩展日志`);
 
-  // 权限选择器：界面那一半在 tools/uitest.js 里用真浏览器点过了，这里要证明
-  // **真窗口里那份清单也是从内核读回来的**（扩展 → DSH → 内核 permissionPresets）。
-  // 连的那台不支持权限方法时，正确的结果是**改用面板自己启动的那台**
-  // （2026-09-20 用户报「改了之后我切换不了权限了」的修法）；实在换不了才走
-  // 「换不了权限」那句解释。三种结果都算过，但不许一样都没有。
+  // 权限选择器：界面部分已在 tools/uitest.js 中用真实浏览器点击验证，此处需要证明
+  // 真实窗口中的那份清单同样是从内核读取的（扩展 → DSH → 内核 permissionPresets）。
+  // 所连接的实例不支持权限方法时，正确结果为改用面板自身启动的实例
+  // （2026-09-20 用户报告「修改之后无法切换权限」的修复方式）；确实无法切换时才采用
+  // 「换不了权限」那句解释。三种结果均视为通过，但不允许三者均未出现。
   const accessRead = /当前权限：/.test(panelText);
-  const accessUnavailable = /权限预设读不到（/.test(panelText);
+  const accessUnavailable = /权限预设读取失败（/.test(panelText);
   const switched = /改用面板自己启动的/.test(panelText);
   check('权限那一路有结果（读到清单，或者换了内核，或者明确说清为什么换不了）',
     accessRead || switched || accessUnavailable,
     accessRead ? '读到了清单' : switched ? '换了内核' : accessUnavailable ? '走了「换不了」那条解释' : '三样都没有');
   if (switched) {
-    // 换内核这条路的完整证据链：先说清为什么（old-door），再换，最后读到了清单。
+    // 更换内核这条路径的完整证据链：先说明原因（old-door），再更换，最后读取到清单。
     const at = panelText.indexOf('改用面板自己启动的');
-    const whyBefore = /权限预设读不到（old-door）/.test(panelText.slice(0, at));
+    const whyBefore = /权限预设读取失败（old-door）/.test(panelText.slice(0, at));
     const readAfter = /当前权限：/.test(panelText.slice(at));
     check('换内核之前说清了原因，换完之后真的读到了权限清单',
       whyBefore && readAfter,
@@ -494,15 +494,15 @@ async function main() {
       /当前权限：.+（[\w-]+）/.test(line), line.trim().slice(0, 90));
   }
   /*
-   * 「界面文案里不许有内部词（门 / 包名 / 版本号）」这条不在这儿验 ——
-   * 输出面板里的日志本来就该带这些词（它是给排障看的）。那条规矩守在
-   * **真发出去的消息**上：test/panel.js §8.9 把整套跑下来发过的每条提示、
-   * 报错标题/建议、顶栏状态都扫了一遍，tools/uitest.js 再在真浏览器里看渲染结果。
+   * 「界面文案中不得出现内部词（ACP 接入点插件 / 包名 / 版本号）」这一条不在此处验证：
+   * 输出面板中的日志本身应当包含这些词（该日志用于排障）。该约束作用在
+   * 实际发送的消息上：test/panel.js §8.9 扫描了整套流程中发送过的每条提示、
+   * 报错标题与建议、顶栏状态，tools/uitest.js 再在真实浏览器中检查渲染结果。
    */
 
-  // 拉起内核这件事：接入模式下（且不需要换内核时）必须**没有**新内核，自启模式下必须有。
-  // 「接了又换掉」是第三种：接上的那台换不了权限（桌面端那个内核就是），
-  // 面板会改用自己启动的那台 —— 这时**必须**有新内核，不然权限还是切不了。
+  // 内核启动的情况：接入模式下（且不需要更换内核时）必须没有新内核，自启模式下必须有新内核。
+  // 「已接入但更换内核」属于第三种情况：所连接的实例无法切换权限（桌面端那个内核即如此），
+  // 面板会改用自身启动的实例；此时必须有新内核，否则权限仍然无法切换。
   const kernel = ourKernels(beforePids)[0];
   const suspects = () =>
     newProcesses(beforePids)
@@ -514,28 +514,28 @@ async function main() {
       kernel ? `PID ${kernel.pid}（${kernel.cmdline.slice(0, 80)}）`
         : `没找到；现场有 ${suspects().length} 个 --no-open 进程：${suspects().join(' / ') || '一个都没有'}`);
   } else if (attached) {
-    check('接入模式：连着正在跑的门，没有另起内核（一个进程、一个大脑）', !kernel,
+    check('接入模式：连接正在运行的该插件，没有另起内核（一个进程、一个大脑）', !kernel,
       kernel ? `却拉起了 PID ${kernel.pid}` : '没有新内核');
   } else {
-    // 找不到时把「所有像内核的进程」列出来，方便一眼看出是漏判还是真没起。
-    check('自启模式：自己拉起了 DSH 内核（不用先开桌面端）', Boolean(kernel),
+    // 未找到时列出所有与内核特征相符的进程，便于直接判断属于漏判还是确实未启动。
+    check('自启模式：自行启动了 DSH 内核（无需先开桌面端）', Boolean(kernel),
       kernel ? `PID ${kernel.pid}（${kernel.cmdline.slice(0, 80)}）`
         : `没找到；现场有 ${suspects().length} 个 --no-open 进程：${suspects().join(' / ') || '一个都没有'}`);
   }
   if (kernel) fs.writeFileSync(path.join(sandbox, 'kernel-cmdline.txt'), kernel.cmdline, 'utf8');
 
   /*
-   * 停一会儿再看一眼（DSH_PANEL_CHECK_LINGER=90）。
+   * 等待一段时间后再次检查（DSH_PANEL_CHECK_LINGER=90）。
    *
-   * 为什么要有这一步：2026-09-19 用户报「聊两句就 read ECONNRESET」，
-   * 查日志发现**每个内核都在起来约 35 秒后退出 code=1** ——
-   * 而这个自检以前只观察到"会话建出来了"（约 15 秒）就收摊，
-   * 于是"内核起得来、但活不长"这种毛病它是**看不见**的。
-   * 一次全绿的验证并不等于"接下来一分钟也没事"。
+   * 设置该步骤的原因：2026-09-19 用户报告「聊两句就 read ECONNRESET」，
+   * 查日志发现每个内核都在启动约 35 秒后以 code=1 退出；
+   * 而该自检此前只观察到「会话已建立」（约 15 秒）即收尾，
+   * 因此「内核可以启动但存活时间过短」这类问题在该自检中不可见。
+   * 一次全部通过的验证并不等于接下来一分钟内不会出现异常。
    */
   const linger = Number(process.env.DSH_PANEL_CHECK_LINGER || 0);
   if (linger > 0) {
-    console.log(`\n  按要求多盯 ${linger} 秒（看内核会不会自己死掉）…`);
+    console.log(`\n  按要求持续观察 ${linger} 秒（观察内核是否自行退出）…`);
     let diedAt = 0;
     let lastText = panelText;
     for (let waited = 0; waited < linger; waited += 3) {
@@ -546,29 +546,29 @@ async function main() {
       }
       lastText = panelLog ? fs.readFileSync(panelLog, 'utf8') : lastText;
     }
-    check(`盯了 ${linger} 秒，内核一直活着（没有"起来 30 秒就自杀"这种毛病）`,
+    check(`持续观察 ${linger} 秒，内核始终在运行（没有"启动 30 秒即自行退出"这种缺陷）`,
       diedAt === 0,
-      diedAt ? `PID ${kernel ? kernel.pid : '?'} 在约 ${diedAt} 秒时没了` : '一直活着');
+      diedAt ? `PID ${kernel ? kernel.pid : '?'} 在约 ${diedAt} 秒时已退出` : '始终在运行');
     const resetLines = lastText.split('\n').filter((line) => /连接结束|ECONNRESET|后台 DSH 退出了/.test(line));
     check(`盯着的这段时间连接没断过（${linger} 秒）`, resetLines.length === 0,
       resetLines.length ? `面板日志里有 ${resetLines.length} 处断连：\n        ${resetLines.join('\n        ')}` : '一次都没断');
   }
 
-  // 收摊：只收这次新出现的进程，只收自己拉起来的内核。
+  // 收尾：仅结束本次新出现的进程，仅结束自身启动的内核。
   if (keep) {
     console.log(`\n  --keep：窗口留着，自己关。PID：${newPids.join(', ') || '（没起来）'}`);
   } else {
     for (const pid of newPids) run('taskkill', ['/PID', String(pid), '/T', '/F']);
-    // 只收"我开的那一个隔离窗口"。**一个内核都不杀**：
-    // 你自己的 DSH Desktop 也用它自己的内核，命令行长得跟扩展拉起来的很像，
-    // 靠名字/参数去分辨、然后 taskkill，是有可能误伤你正在用的内核的 ——
-    // 这种事一次都不该发生。扩展本来就会在自己 dispose 时收掉它拉的内核
-    // （test/fallback.js 专门验过），所以这里只需要**报告**有没有剩。
+    // 仅结束本次自检启动的那一个隔离窗口。任何内核均不结束：
+    // 用户自身的 DSH Desktop 也使用其自身的内核，命令行与扩展启动的内核高度相似，
+    // 若按名称或参数区分后调用 taskkill，存在误终止用户正在使用的内核的可能；
+    // 此类情况不应发生。扩展在自身 dispose 时即会结束其启动的内核
+    // （test/fallback.js 已覆盖验证），因此此处只需要报告是否存在残留。
     sleep(3000);
     const stillThere = [...codePids()].filter((pid) => !before.has(pid));
-    check('收摊后没留下窗口', stillThere.length === 0, stillThere.join(', ') || '干净');
+    check('退出后没有留下窗口', stillThere.length === 0, stillThere.join(', ') || '干净');
     const orphans = ourKernels(beforePids);
-    check('收摊后没留下孤儿内核（扩展自己收的）', orphans.length === 0,
+    check('退出后没有留下孤儿内核（扩展自行回收）', orphans.length === 0,
       orphans.length
         ? `${orphans.map((item) => item.pid).join(', ')} 还在（扩展应该自己收掉；这里不替你杀，免得误伤你自己的内核）`
         : '干净');
@@ -590,6 +590,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error('自检自己炸了：', error);
+  console.error('自检自身发生异常：', error);
   process.exit(1);
 });

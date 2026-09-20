@@ -1,15 +1,15 @@
 'use strict';
 
 /**
- * 断线之后，上下文还能不能回来？
+ * 断线之后上下文是否可以恢复。
  *
- * 为什么单独测这个：ACP 有 `session/resume` 和 `session/load`，但内核到底实现到
- * 什么程度只能实测。这决定了面板断线后是「悄悄换成一个没记忆的新会话」
- * （用户会以为它还记着上面的对话，实际上忘了 —— 最坏的一种体验），
- * 还是「真的接回原来那个会话」。
+ * 单独测试该行为的原因：ACP 提供 `session/resume` 与 `session/load`，但内核的
+ * 实现程度只能实测确认。该结果决定面板断线后是「静默替换为一个无记忆的新会话」
+ * （用户会认为该会话仍保留此前的对话，实际已丢失 —— 属于最差的体验），
+ * 还是「确实接回原会话」。
  *
- * 测法：让内核记住一个随机数 → 掐断连接 → 新连接重开一个会话 →
- * 看它记不记得（分别验证 resume / load / 新会话三条路）。
+ * 测法：令内核记住一个随机数 → 断开连接 → 由新连接重新建立会话 →
+ * 检查其是否仍记得（分别验证 resume / load / 新会话三条路径）。
  *
  * 用法：node test/resume.js
  */
@@ -40,7 +40,7 @@ function section(title) {
   console.log(`\n── ${title} ${'─'.repeat(Math.max(0, 52 - title.length))}`);
 }
 
-/** 连上、开一个会话、问一句、收集正文，然后返回。 */
+/** 连接、建立会话、发送一次提问、收集正文，然后返回。 */
 async function ask(client, { sessionId, text, timeoutMs = 120000 }) {
   let answer = '';
   const onUpdate = (id, update) => {
@@ -65,7 +65,7 @@ const log = () => {};
   const door = await ensureDoor({ log });
   const secret = String(1000 + Math.floor(Math.random() * 8999));
 
-  // ── 1. 第一个连接：建会话、让它记住一个数字 ──────────────
+  // ── 1. 第一个连接：建立会话并令其记住一个数字 ──────────────
   section('1. 建会话，让它记住一个数字');
   const first = new DoorClient({ host: HOST, port: PORT, log });
   await first.connect();
@@ -80,7 +80,7 @@ const log = () => {};
   check('它给出了回应', Boolean(remembered.answer), JSON.stringify(remembered));
   console.log(`     回应：${remembered.answer.slice(0, 60)}`);
 
-  // 同一连接内先确认它真的记得（作为对照基线）。
+  // 在同一连接内确认其确实记住了该数字（作为对照基线）。
   const sameConn = await ask(first, {
     sessionId: originalId,
     text: '我刚才让你记住的数字是多少？只回答数字。',
@@ -88,13 +88,13 @@ const log = () => {};
   const baselineOk = sameConn.answer.includes(secret);
   check('同一连接内确实记得（基线）', baselineOk, `回答：${sameConn.answer.slice(0, 80)}`);
 
-  // ── 2. 掐断连接（模拟内核重启/网线掉/面板重载）────────────
+  // ── 2. 断开连接（模拟内核重启/网络中断/面板重载）────────────
   section('2. 掐断连接');
   first.close();
   await new Promise((resolve) => setTimeout(resolve, 800));
   console.log('     连接已关闭');
 
-  // ── 3. 新连接：resume 能不能把上下文接回来 ────────────────
+  // ── 3. 新连接：resume 是否可以恢复上下文 ────────────────
   section('3. 新连接里 session/resume');
   const second = new DoorClient({ host: HOST, port: PORT, log });
   await second.connect();
@@ -119,7 +119,7 @@ const log = () => {};
     check('resume 之后上下文真的还在', recalled, `回答：${after.answer.slice(0, 80)}`);
   }
 
-  // ── 4. 对照组：新开一个会话，它当然不该记得 ──────────────
+  // ── 4. 对照组：新建一个会话，该会话不应记得 ──────────────
   section('4. 对照组：全新的会话');
   const fresh = await second.newSession(SCRATCH);
   const freshAnswer = await ask(second, {
@@ -152,6 +152,6 @@ const log = () => {};
   }
   process.exit(failed === 0 ? 0 : 1);
 })().catch((error) => {
-  console.error('💥 测试崩了：', error.stack || error.message);
+  console.error('💥 测试发生异常：', error.stack || error.message);
   process.exit(1);
 });

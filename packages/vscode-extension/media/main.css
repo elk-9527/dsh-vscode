@@ -1,15 +1,15 @@
 /*
  * DSH Panel 的样式。
  *
- * 原则：**颜色一律取自 VS Code 主题变量**（--vscode-*），一个硬编码色值都不写。
- * 这样你换浅色/深色/高对比度主题时，这个面板会跟着一起变，风格自动统一。
- * 唯一的例外是等宽字体下的字号微调与间距，那些跟主题无关。
+ * 原则：**颜色一律取自 VS Code 主题变量**（--vscode-*），不写任何硬编码色值。
+ * 因此在切换浅色/深色/高对比度主题时，该面板会随主题变化，风格自动统一。
+ * 唯一的例外是等宽字体下的字号微调与间距，这两项与主题无关。
  */
 
 /*
- * 尺度基线（收过一次，别再随手加值）：
- *   间距只用 2/4/8/12/16px；字号只用 1em / --dsh-fs-s / --dsh-fs-xs 三档；
- *   行高只用 1.45（紧凑界面）和 1.55（正文）两档；圆角 --dsh-radius / -s 两档。
+ * 尺度基线（已收敛一次，不再随意增加取值）：
+ *   间距仅用 2/4/8/12/16px；字号仅用 1em / --dsh-fs-s / --dsh-fs-xs 三档；
+ *   行高仅用 1.45（紧凑界面）与 1.55（正文）两档；圆角 --dsh-radius / -s 两档。
  */
 :root {
   --dsh-radius: 6px;
@@ -18,7 +18,7 @@
   --dsh-pad: 8px;
   --dsh-fs-s: 0.9em;
   --dsh-fs-xs: 0.82em;
-  /* 动效统一走这里，方便一处调；下面还有 prefers-reduced-motion 的兜底。 */
+  /* 动效统一使用此处的变量，便于集中调整；下方另有 prefers-reduced-motion 的后备处理。 */
   --dsh-dur: 140ms;
   --dsh-dur-fold: 180ms;
 }
@@ -28,13 +28,13 @@
 }
 
 /*
- * `hidden` 属性必须真的能藏住东西。
+ * `hidden` 属性必须确实能够隐藏元素。
  *
- * 为什么非要写这一条：浏览器默认的 `[hidden] { display: none }` 来自 UA 样式表，
- * 而**作者样式永远赢过 UA 样式** —— 于是只要元素自己带着 `display: flex`，
- * `hidden` 就完全失效。踩过的坑（ui test 里 bare 场景量出来的）：什么都没连上时，
- * 空的模型下拉、空的用量条、还有一个空的黄色「需要你的许可」框全都挂在面板上。
- * 加了 `!important` 才能盖住那些 `display: flex`。
+ * 必需写入该规则的原因：浏览器默认的 `[hidden] { display: none }` 来自 UA 样式表，
+ * 而**作者样式始终优先于 UA 样式** —— 因此只要元素自身带有 `display: flex`，
+ * `hidden` 即完全失效。已出现的现象（ui test 中 bare 场景实测）：未连接任何内容时，
+ * 空的模型下拉、空的用量条，以及一个空的黄色「DSH 需要许可」框全部显示在面板上。
+ * 加入 `!important` 才能覆盖那些 `display: flex`。
  */
 [hidden] {
   display: none !important;
@@ -140,20 +140,20 @@ body {
 }
 
 /*
- * ── 顶栏配置行怎么分宽度（2026-09-19 按用户反馈定的）─────────────
+ * ── 顶栏配置行的宽度分配（2026-09-19 根据用户反馈确定）─────────────
  *
- * 用户报的问题：「文字被挤在一起了，模型的占地有点大，其他两点有点小」。
- * 量出来的原因：三个字段都是 `flex: 1 1 auto`，而**基准宽度取的是内容宽度** ——
- * 模型那个 <select> 的基准是它最长的选项（`DeepSeek-V4-Flash-Vision-Exp` 那种
- * 名字），于是它一个人把行吃满，模式和权限被压到 40~60px，"工作区内修改"直接
- * 被切掉（实测 320px 时权限按钮只有 53px）。
+ * 用户反馈的问题：「文字被挤在一起了，模型的占地有点大，其他两点有点小」。
+ * 实测得到的原因：三个字段都是 `flex: 1 1 auto`，而**基准宽度取的是内容宽度** ——
+ * 模型 <select> 的基准宽度为其最长选项（`DeepSeek-V4-Flash-Vision-Exp` 这类
+ * 名称），因此该项独占整行，模式与权限被压缩到 40~60px，"工作区内修改"直接被
+ * 截断（实测 320px 时权限按钮只有 53px）。
  *
- * 现在按「够用就好」分：`flex-basis: 0` + 比例 4:3:3（模型是大头但不独占），
- * 每个再给一个**下限**（放得下两个汉字 + 标签）。下限之和（96+88+108=292）
- * 在 320px 宽的面板里放得下，连标签和间隔一起也还有余量。
+ * 现按「满足需要即可」分配：`flex-basis: 0` + 比例 4:3:3（模型占比较宽但不独占），
+ * 每项再给定一个**下限**（可容纳两个汉字与标签）。下限之和（96+88+108=292）
+ * 在 320px 宽的面板中可以容纳，连同标签与间隔仍有余量。
  *
- * 再窄（<320px）就 `flex-wrap` 换行 —— 宁可多一行，也不把字挤没：
- * 用量条（`.meter`）排在最后，最窄的时候它自己掉到第二行，正合适。
+ * 更窄（<320px）时使用 `flex-wrap` 换行 —— 允许多出一行，不压缩文字：
+ * 用量条（`.meter`）排在最末，最窄时其自行换到第二行，符合预期。
  */
 #config-row {
   flex-wrap: wrap;
@@ -162,19 +162,19 @@ body {
 
 /*
  * ⚠️ 下面这几条必须写成 `#config-row > #xxx-field`（两个 id）：只写 `#xxx-field`
- * 的话会被上面那条 `.field`/`#config-row > .field` 的简写盖掉（实测踩过：
- * 量出来宽度跟面板宽度完全无关，三个字段各按内容宽度硬挤，窄的时候直接溢出）。
+ * 会被上面那条 `.field`/`#config-row > .field` 的简写覆盖（实测出现过：
+ * 测得宽度与面板宽度完全无关，三个字段各自按内容宽度挤压，变窄时直接溢出）。
  */
 #config-row > .field {
   min-width: 0;
 }
 
 /*
- * 下限是「**看着不挤**」的宽度，不是「勉强放得下」的宽度：
- * 96/88/108 那种刚好塞进 320px 的下限，在用量条也在的时候（四个挤一行）
- * 会把权限按钮压到 73px —— 字被截了，用户报的就是这个（实测）。
- * 所以下限给足（116+96+108=320），**装不下就让用量条自己换行**：
- * 宁可顶栏多一行 12px 的小条，也不把字挤掉。
+ * 下限取「**视觉上不拥挤**」的宽度，而非「勉强能够容纳」的宽度：
+ * 96/88/108 这类恰好放入 320px 的下限，在用量条同时存在时（四项同处一行）
+ * 会将权限按钮压缩到 73px —— 文字被截断，用户反馈的正是该问题（实测）。
+ * 因此下限取值从宽（116+96+108=320），**容纳不下时由用量条自行换行**：
+ * 顶栏多出一行 12px 的条，也不截断文字。
  */
 #config-row > #model-field {
   flex: 7 1 0;
@@ -192,11 +192,11 @@ body {
 }
 
 /*
- * 三个控件本身都要**能被压窄**：<select> 和 <button> 的固有宽度是"最长那条
- * 文字"，不给 `width: 0` 的话，就算外面写了 min-width 也压不下去 —— 换行判断
- * 会按那个固有宽度算，于是 320px 的面板里「权限」被单独挤到第二行（实测）。
- * 给 0 + `flex: 1 1 auto`（见 .select/.access-btn）之后，宽度完全由格子的宽度决定，
- * 太长的模型名就用省略号收尾。
+ * 三个控件本身都要**能够被压窄**：<select> 与 <button> 的固有宽度为"最长那条
+ * 文字"，未设置 `width: 0` 时，即使外层写了 min-width 也无法压窄 —— 换行判断
+ * 会依据该固有宽度计算，因此 320px 的面板中「权限」被单独挤到第二行（实测）。
+ * 设置 0 + `flex: 1 1 auto`（见 .select/.access-btn）之后，宽度完全由格子的宽度决定，
+ * 过长的模型名以省略号收尾。
  */
 #config-row > .field > .select,
 #config-row > #access-field > .access-btn {
@@ -209,9 +209,9 @@ body {
 }
 
 /*
- * 特别窄（<360px，侧边栏拖到很小时）：把「模型 / 模式 / 权限」这三个标签收起来，
- * 省下的 ~80px 全给控件 —— 控件里的值本身就说明了自己是什么
- * （"标准模式"/"工作区内修改"/模型名），比三个字被挤成省略号好读。
+ * 极窄（<360px，侧边栏拖至很小时）：收起「模型 / 模式 / 权限」三个标签，
+ * 省出的 ~80px 全部分配给控件 —— 控件内的取值本身即表明其含义
+ * （"标准模式"/"工作区内修改"/模型名），比三个字被压缩为省略号更易读。
  */
 @media (max-width: 360px) {
   #config-row .field-label {
@@ -235,7 +235,7 @@ body {
   padding: 2px 4px;
   font-family: inherit;
   font-size: var(--dsh-fs-s);
-  /* 模型 id 经常比这一格长：宁可省略号，也别把字切一半还看不出来。 */
+  /* 模型 id 通常长于该格宽度：使用省略号，避免文字被截断且无法察觉。 */
   text-overflow: ellipsis;
 }
 
@@ -263,10 +263,10 @@ body {
 /*
  * ── 权限选择器 ──────────────────────────────────────────
  *
- * 顶栏里那个按钮长得像 .select，但它不是原生 <select>：权限每一项都带一行说明，
- * 而且「完全权限」要过一道确认门 —— 原生 option 两样都做不到。
- * 点开的小卡片用 position: fixed + JS 算坐标（见 main.js），
- * 因为顶栏那一行会随「有没有模型/模式可调」时隐时现，靠 CSS 定位对不准。
+ * 顶栏中的该按钮外观与 .select 相同，但不是原生 <select>：权限每一项都带一行说明，
+ * 且「完全权限」需要经过一次确认步骤 —— 原生 option 无法实现这两项。
+ * 展开的小卡片使用 position: fixed + JS 计算坐标（见 main.js），
+ * 因为顶栏该行会随「是否存在可调的模型/模式」而显隐，使用 CSS 定位无法对准。
  */
 .access-btn {
   flex: 1 1 auto;
@@ -298,7 +298,7 @@ body {
   border-color: var(--vscode-focusBorder);
 }
 
-/* 切不了的时候（旧门 / 内核没装权限预设）：灰掉，但仍然留在那儿说明原因。 */
+/* 无法切换时（旧版 ACP 接入点插件 / 内核未安装权限预设）：置灰，但仍保留在界面上以说明原因。 */
 .access-btn[disabled] {
   color: var(--vscode-disabledForeground, var(--vscode-descriptionForeground));
   cursor: default;
@@ -371,7 +371,7 @@ body {
   font-weight: 600;
 }
 
-/* 当前这一项：勾 + 主题的强调色，不用自定义颜色。 */
+/* 当前选中项：使用勾选标记与主题强调色，不使用自定义颜色。 */
 .access-item.active .access-item-name {
   color: var(--vscode-textLink-foreground);
 }
@@ -388,7 +388,7 @@ body {
   line-height: 1.45;
 }
 
-/* 确认门：跟列表互斥地占同一块地方（不叠着弹两个框）。 */
+/* 确认步骤：与列表互斥地占用同一区域（不叠加显示两个浮层）。 */
 .access-confirm {
   padding: 4px 8px 8px;
 }
@@ -425,7 +425,7 @@ body {
   background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground));
 }
 
-/* 「启用完全权限」是危险动作：用主题按钮色，别让它长得跟「算了」一样。 */
+/* 「启用完全权限」属于危险操作：使用主题按钮色，避免其外观与「取消」按钮相同。 */
 .access-confirm-accept {
   color: var(--vscode-button-foreground);
   background: var(--vscode-button-background);
@@ -512,9 +512,9 @@ body {
   line-height: 1.55;
 }
 
-/* 空态第二行：回答「记忆和会话是哪来的」。
-   用最轻的一档字号和 descriptionForeground 的暗色 —— 它要能被看到，
-   但不该跟第一行抢注意力。 */
+/* 空态第二行：说明「记忆和会话的来源」。
+   使用最轻的一档字号与 descriptionForeground 的暗色 —— 该行需要可见，
+   但不应与第一行争夺注意力。 */
 .empty-note {
   margin: 6px 0 0;
   font-size: var(--dsh-fs-xs);
@@ -670,10 +670,10 @@ body {
 }
 
 /*
- * 工具卡片：默认折叠，点头部展开。
+ * 工具卡片：默认折叠，点击头部展开。
  *
- * 折叠动画用 grid-template-rows 0fr↔1fr 过渡 —— 内容高度未知也能平滑收放，
- * Chromium（VS Code 的 webview 内核）原生支持这个写法，不用去量 scrollHeight。
+ * 折叠动画使用 grid-template-rows 0fr↔1fr 过渡 —— 内容高度未知时也能平滑收放，
+ * Chromium（VS Code 的 webview 内核）原生支持该写法，无需测量 scrollHeight。
  */
 .tool {
   border: 1px solid var(--vscode-panel-border);
@@ -753,12 +753,12 @@ body {
   color: var(--vscode-descriptionForeground);
 }
 
-/* 展开时才画出头顶那条分隔线（收起时格子高度是 0，线会单独漏出来）。 */
+/* 仅在展开时绘制顶部分隔线（收起时格子高度为 0，该线会单独显现）。 */
 .tool.open .tool-body {
   border-top-color: var(--vscode-panel-border);
 }
 
-/* 光标：表示正在往外吐字 */
+/* 光标：表示文本正在输出 */
 
 .caret {
   display: inline-block;
@@ -786,11 +786,11 @@ body {
   word-break: break-word;
 }
 
-/* 错误的人话部分：先一句「发生了什么」，再一句「你能做什么」。
-   内核原文要不要摊开，看人话在不在：
-   - 有人话（.err-title 有内容）时，原文可以收进 .err-raw-fold 的折叠里
-     —— 它常是几十行 JSON，摊开就把对话框变成日志窗口；
-   - 没人话时原文就是唯一信息，必须直接摊开（见 media/main.js 的分支）。 */
+/* 错误的说明文本部分：先一句「发生了什么」，再一句「可执行的操作」。
+   内核原文是否展开，取决于说明文本是否存在：
+   - 有说明文本（.err-title 有内容）时，原文可收进 .err-raw-fold 的折叠中
+     —— 它通常是几十行 JSON，展开会使对话框变成日志窗口；
+   - 无说明文本时原文即唯一信息，必须直接展开（见 media/main.js 的分支）。 */
 .err-title {
   margin: 0;
   font-weight: 500;
@@ -811,7 +811,7 @@ body {
   word-break: break-word;
 }
 
-/* 折叠那行"原始报错（点开）"：要看得出来能点，也要能用键盘点。 */
+/* 折叠行「原始报错（展开）」：需要可识别为可点击，并且支持键盘操作。 */
 .err-raw-fold > summary {
   margin-top: 4px;
   color: var(--vscode-descriptionForeground);
@@ -834,7 +834,7 @@ body {
   font-style: italic;
 }
 
-/* 居中的系统提示（例如「上面那段对话没能接回来」） */
+/* 居中的系统提示（例如「上一段会话未能恢复，此处为新对话。」） */
 .msg-system {
   display: flex;
   justify-content: center;
@@ -853,8 +853,8 @@ body {
 /* ── 历史会话浮层 ───────────────────────────────────── */
 
 /*
- * 盖住整个面板（fixed 全屏）：列表有自己的头和关闭按钮，
- * 打开期间底下那套状态条/输入框都看不见 —— 逻辑最简单，也不会抢焦点。
+ * 覆盖整个面板（fixed 全屏）：列表自带头部与关闭按钮，
+ * 打开期间下方的状态条/输入框均不可见 —— 逻辑最简单，也不会抢占焦点。
  */
 .history {
   position: fixed;
@@ -962,12 +962,12 @@ body {
 }
 
 /*
- * 读历史失败时的那块话。
+ * 读取历史失败时显示的文本块。
  *
- * 刻意**不复用 .history-empty**：那套居中灰字是「这里什么都没有」的语气，
- * 拿它报错会被读成"你没有历史会话"，而这两件事的出路完全不同（一个是没事，
- * 一个是得去修）。错误靠左、带一条警示色边 —— 跟对话里那块 .msg-error 同一个语气，
- * 而且错误句子通常两三行，居中的长句最难读。
+ * 刻意**不复用 .history-empty**：该套居中灰字表达「这里什么都没有」的语义，
+ * 用于报错会被理解为"不存在历史会话"，而这两种情况的处理方式完全不同（一种无需处理，
+ * 一种需要修复）。错误文本靠左排列并带警示色边框 —— 与对话中的 .msg-error 语义一致，
+ * 且错误说明通常为两三行，居中长句的阅读难度最高。
  */
 .history-error {
   margin: 4px 0;
@@ -996,8 +996,8 @@ body {
 /* ── 挂在输入框上面的上下文（当前文件 / 选中的代码）─────── */
 
 /*
- * 这一块是 flex 容器，所以 [hidden] 必须自己再压一道 ——
- * 浏览器默认的 [hidden]{display:none} 打不过 display:flex（踩过：空用量条常显）。
+ * 该块是 flex 容器，因此 [hidden] 必须另行覆盖 ——
+ * 浏览器默认的 [hidden]{display:none} 无法覆盖 display:flex（已出现：空用量条常驻显示）。
  */
 .attachments[hidden] {
   display: none !important;
@@ -1046,7 +1046,7 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  direction: rtl; /* 长路径从尾部截断，留下文件名那段 */
+  direction: rtl; /* 长路径从尾部截断，保留文件名部分 */
   text-align: left;
   font-family: var(--vscode-editor-font-family, monospace);
 }
@@ -1078,7 +1078,7 @@ body {
   outline: 1px solid var(--vscode-focusBorder);
 }
 
-/* 气泡里的附件块：不可摘，跟正文上下留一点距离。 */
+/* 气泡中的附件块：不可移除，与正文之间保留少量上下间距。 */
 .msg-user .bubble .chips {
   margin-bottom: 4px;
   justify-content: flex-end;
@@ -1272,7 +1272,7 @@ body {
   background: var(--vscode-diffEditor-insertedLineBackground);
 }
 
-/* 尊重系统的「减少动态效果」设置 */
+/* 遵循系统的「减少动态效果」设置 */
 @media (prefers-reduced-motion: reduce) {
   * {
     animation-duration: 0.01ms !important;

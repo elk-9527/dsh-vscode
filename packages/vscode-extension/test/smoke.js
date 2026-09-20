@@ -1,19 +1,19 @@
 'use strict';
 
 /**
- * 端到端集成测试：用手写的连接层 + 会话核心，真刀真枪跑一遍 DSH。
+ * 端到端集成测试：使用手写的连接层与会话核心，对 DSH 执行一次完整运行。
  *
- * 为什么要有这个：面板的界面我很难自动点，但**面板下面那一层**（协议、
- * 会话状态机、工具事件合并、中断、模型切换）才是真正会出错的地方，
- * 而这些全都能在命令行里跑。所以这里把它们逐条钉死。
+ * 设立该套件的原因：面板界面难以自动点击，而面板下方的那一层（协议、
+ * 会话状态机、工具事件合并、中断、模型切换）才是容易出错的部分，
+ * 且这些均可在命令行中运行。因此在此逐条固定其行为。
  *
  * 用法：
- *   node test/smoke.js              # 跑一遍
- *   node test/smoke.js --repeat 5   # 连跑 5 遍（找偶发问题）
- *   node test/smoke.js --fast       # 跳过比较慢的中断/长回复用例
+ *   node test/smoke.js              # 运行一遍
+ *   node test/smoke.js --repeat 5   # 连续运行 5 遍（用于发现偶发问题）
+ *   node test/smoke.js --fast       # 跳过较慢的中断与长回复用例
  *
- * 前置：47821 上有一个开了门的 DSH。没有的话测试会自己拉一个
- * （profile=dshdoor，跑完自己收），所以直接 `node test/smoke.js` 就能跑。
+ * 前置条件：47821 上存在一个已开放接入点的 DSH。不存在时测试会自行启动一个
+ * （profile=dshdoor，运行结束后自行回收），因此可直接执行 `node test/smoke.js`。
  */
 
 const fs = require('node:fs');
@@ -67,7 +67,7 @@ function prepareScratch() {
   return file;
 }
 
-/** 等一个条件成立，或者超时。 */
+/** 等待条件成立，或等待超时。 */
 function waitFor(predicate, { totalMs = 15000, intervalMs = 50 } = {}) {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + totalMs;
@@ -84,8 +84,8 @@ async function runOnce(round) {
   const sample = prepareScratch();
   console.log(`\n══ 第 ${round} 轮 ══════════════════════════════════════════════`);
 
-  // ── 1. 端口（由 main 里的 ensureDoor 保证已经开着）────
-  section('1. 门的端口');
+  // ── 1. 端口（由 main 中的 ensureDoor 保证已开放）────
+  section('1. 该插件的端口');
   check(`端口 ${PORT} 可连`, true, '（内核由测试自己按需拉起）');
 
   // ── 2. 握手 ────────────────────────────────────────
@@ -108,7 +108,7 @@ async function runOnce(round) {
     busyOff: false,
     done: null,
     errors: [],
-    /** 这一回合的正文原文（用来查暗号在不在回答里）。 */
+    /** 该回合的正文原文（用于检查标记是否出现在回答中）。 */
     answer: '',
   };
   session.on('text', (payload) => {
@@ -143,7 +143,7 @@ async function runOnce(round) {
     console.log(`     当前模型：${modelOption.currentValue}`);
   }
 
-  // ── 4. 一个真回合（要求用工具）──────────────────────
+  // ── 4. 一个真实回合（要求使用工具）──────────────────
   section('4. 跑一个真回合（要求它读文件）');
   const started = Date.now();
   const turn = await session.send(
@@ -196,7 +196,7 @@ async function runOnce(round) {
       await session.setModel(other.value);
       const now = session.configOptions.find((option) => option.id === 'model').currentValue;
       check('模型确实切过去了', now === other.value, `想要 ${other.value}，实际 ${now}`);
-      // 切回去，别把用户的默认值改了。
+      // 切换回原模型，避免修改用户的默认值。
       await session.setModel(original);
       const back = session.configOptions.find((option) => option.id === 'model').currentValue;
       check('切回原模型', back === original, `想要 ${original}，实际 ${back}`);
@@ -207,13 +207,13 @@ async function runOnce(round) {
     console.log('     （只有一个模型可选，跳过）');
   }
 
-  // ── 7. 内核自己的会话列表（ACP session/list）─────────
-  // 实测语义：session/list 只返回**已经落盘**的会话，而且只有
-  // {sessionId, cwd} 两个字段（没有标题、没有时间）。刚建的空会话不在里面。
-  // 所以这里的断言是「接口形状正确」，而不是「一定能找到刚建的会话」。
+  // ── 7. 内核自身的会话列表（ACP session/list）─────────
+  // 实测语义：session/list 只返回已写入磁盘的会话，且仅包含
+  // {sessionId, cwd} 两个字段（没有标题、没有时间）。刚建立的空会话不在其中。
+  // 因此此处的断言是「接口形状正确」，而不是「必然能找到刚建立的会话」。
   //
-  // 注意别把它和「历史会话」混起来：历史会话走的是门的旁路方法
-  // （dsh-door/sessions/list，第 7.5 节），两者返回的形状**完全不同**。
+  // 该接口不得与「历史会话」混淆：历史会话走的是 ACP 接入点插件（dsh-acp-door）的旁路方法
+  // （dsh-door/sessions/list，第 7.5 节），两者返回的形状完全不同。
   section('7. 内核会话列表（session/list）');
   try {
     const list = await client.listKernelSessions();
@@ -232,47 +232,47 @@ async function runOnce(round) {
     check('session/list 能调通', false, error.message);
   }
 
-  // ── 7.5 历史会话（门的旁路方法，需要门 0.0.8+）───────
-  // 这一节**允许**环境不满足：门是装在用户档里的插件，而那个档由桌面端自己
-  // 管理（实测会把依赖重写回旧版），所以「门太旧」是常态。门旧就让这一节
-  // 明确报「跳过」，不算失败 —— 面板那边有自己读盘的兜底（见 panel.js 8.9），
-  // 那才是用户能用到的路径。以前这里直接断言成功、门一旧整条套件就红，
-  // 而红的原因跟被测代码无关，属于「测试自己错了」。
-  section('7.5 历史会话（dsh-door/sessions/list，需要门 0.0.8+）');
+  // ── 7.5 历史会话（该插件的旁路方法，需要该插件 0.0.8+）───────
+  // 本节允许环境不满足：该插件安装在用户档中，而该档由桌面端自身
+  // 管理（实测会将依赖重写回旧版本），因此「插件版本过低」属于常态。版本过低时
+  // 本节明确报告「跳过」，不计为失败 —— 面板侧有自行读取磁盘的后备路径（见 panel.js 8.9），
+  // 该路径才是用户实际可用的路径。此前此处直接断言成功，插件版本过低时整个套件失败，
+  // 而失败原因与被测代码无关，属于「测试自身错误」。
+  section('7.5 历史会话（dsh-door/sessions/list，需要该插件 0.0.8+）');
   try {
     const history = await client.listHistory();
     const items = history && Array.isArray(history.sessions) ? history.sessions : [];
-    check('门的旁路方法有回应', Boolean(history));
+    check('该插件的旁路方法有回应', Boolean(history));
     check(
       '历史名片形状是 {id, title?, turns}',
       items.length === 0 || items.every((item) => typeof item.id === 'string'),
       items.length ? JSON.stringify(items[0]).slice(0, 160) : '（列表为空）',
     );
-    console.log(`     门报回 ${items.length} 段历史会话，跳过了 ${(history && history.skipped) || 0} 段`);
+    console.log(`     该插件报回 ${items.length} 段历史会话，跳过了 ${(history && history.skipped) || 0} 段`);
   } catch (error) {
     const text = error && error.message ? error.message : String(error);
     if (/-32601|method not found/i.test(text)) {
-      console.log('     ⏭  这一轮连着的门是 0.0.7（没有旁路方法），跳过这一节；');
+      console.log('     ⏭  这一轮连接的该插件是 0.0.7（没有旁路方法），跳过这一节；');
       console.log('        面板自己读盘的那条路在「面板层」套件 8.9 里验。');
     } else {
       check('历史会话能调通', false, text);
     }
   }
 
-  // ── 8. 再跑一个回合（多轮上下文）────────────────────
+  // ── 8. 再运行一个回合（多轮上下文）──────────────────
   section('8. 多轮：它还记得上一轮吗');
   seen.text = 0;
   await session.send('我刚才让你读的那个文件叫什么名字？只回答文件名。');
   check('第二轮有正文', seen.text > 0, `${seen.text} 字`);
 
-  // ── 8.5 把编辑器里的东西带进对话 ─────────────────────
-  // 这一段是整个「编辑器上下文」功能的真凭实据：
-  // 选中的代码是不是真的到了模型眼前（它得念出暗号），
-  // 以及 resource_link 到底管不管用（它得自己去把文件读出来）。
+  // ── 8.5 把编辑器中的内容带入对话 ─────────────────────
+  // 本段是整个「编辑器上下文」功能的实证：
+  // 选中的代码是否确实传到了模型（模型须复述标记），
+  // 以及 resource_link 是否有效（模型须自行读取该文件）。
   if (!FAST) {
     section('8.5 编辑器上下文：选中的代码 + 带进来的文件');
 
-    // (1) 选中的代码：正文直接随消息过去，模型不看文件也该知道暗号。
+    // (1) 选中的代码：正文随消息直接发送，模型无需读取文件即可获知标记。
     const secret = '紫色河马';
     seen.answer = '';
     seen.tools.clear();
@@ -297,10 +297,10 @@ async function runOnce(round) {
       `回答是：${JSON.stringify(seen.answer.slice(0, 120))}`,
     );
 
-    // (2) 带进来的文件：只给一条 resource_link，模型得自己用工具去读。
+    // (2) 附带文件：只提供一条 resource_link，模型须自行调用工具读取。
     const fileSecret = '蓝色长颈鹿';
     const attachedFile = path.join(SCRATCH, 'door-context.md');
-    fs.writeFileSync(attachedFile, `# 门\n\n这个文件里的暗号是：${fileSecret}\n`, 'utf8');
+    fs.writeFileSync(attachedFile, `# 上下文夹具\n\n这个文件里的暗号是：${fileSecret}\n`, 'utf8');
 
     seen.answer = '';
     seen.tools.clear();
@@ -331,7 +331,7 @@ async function runOnce(round) {
 }
 
 (async () => {
-  // 内核没开就自己拉一个；用它自己的内核，跑完负责收摊（不留孤儿进程）。
+  // 内核未启动时自行启动一个；使用自行启动的内核，运行结束后负责回收（不留孤儿进程）。
   let door;
   try {
     door = await ensureDoor({ host: HOST, port: PORT, log });
@@ -345,7 +345,7 @@ async function runOnce(round) {
       await runOnce(round);
     } catch (error) {
       failed += 1;
-      failures.push(`第 ${round} 轮崩了：${error.message}`);
+      failures.push(`第 ${round} 轮发生异常：${error.message}`);
       console.log(`\n💥 第 ${round} 轮异常：${error.stack || error.message}`);
     }
   }

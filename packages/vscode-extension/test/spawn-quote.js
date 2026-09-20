@@ -1,30 +1,30 @@
 'use strict';
 
 /**
- * 「命令路径里有空格」这条路的真进程测试。
+ * 「命令路径中包含空格」这一路径的真实进程测试。
  *
- * ── 为什么单独一个套件 ────────────────────────────────────────────
- * 2026-09-19 修掉的那个 bug 有两半，**两半都只在真进程里才暴露**：
+ * ── 单独设立该套件的原因 ─────────────────────────────────────────
+ * 2026-09-19 修复的缺陷包含两个部分，两部分均只在真实进程中暴露：
  *
- *   1. `splitCommand()` 按空白硬拆，把 `…\DSH Desktop\…\dsh.cmd` 劈成两段；
- *   2. `spawn(cmd.exe, ['/d','/s','/c', '"…"'])` 会把内嵌的引号**再转义一遍**，
- *      于是"用户自己加引号"这条路也是坏的（必须给 windowsVerbatimArguments）。
+ *   1. `splitCommand()` 按空白硬分割，把 `…\DSH Desktop\…\dsh.cmd` 拆成两段；
+ *   2. `spawn(cmd.exe, ['/d','/s','/c', '"…"'])` 会对内嵌引号再次转义，
+ *      因此"由用户自行添加引号"这一路径同样失效（必须设置 windowsVerbatimArguments）。
  *
- * 这两半的共同点是：**拼出来的字符串看起来完全正确**。所以只测
- * `commandLine()` 的返回值是抓不住它们的 —— 必须真的把进程拉起来，
- * 看它有没有跑到。（路径被劈开时 cmd 的原话是
+ * 两部分的共同点是：拼接出的字符串表面上完全正确。因此仅测试
+ * `commandLine()` 的返回值无法覆盖它们 —— 必须真实启动进程，
+ * 确认其是否实际执行。（路径被拆分时 cmd 的原话为
  * `'C:\Users\…\Roaming\DSH' is not recognized as an internal or external command`。）
  *
- * 这也是它存在的理由：本机 dsh 的真路径就带空格
+ * 这也说明该套件的必要性：本机 dsh 的真实路径即包含空格
  * （`…\AppData\Roaming\DSH Desktop\host-commands\…\dsh.cmd`），
- * 所以这不是"某个用户的环境问题"，而是**这台机器上必然会踩**的。
+ * 因此这不属于"某个用户的环境问题"，而是该机器上必然出现的情况。
  *
- * 手法：造一个 .cmd 垫片（内容是把收到的参数写进 out.txt），
- * 用真的 `spawnBackgroundDsh` / `runDshSync` 去跑它，再读 out.txt 对内容。
- * 不依赖 dsh、不依赖内核、不占端口，几秒钟跑完。
+ * 方法：生成一个 .cmd 垫片（内容为把接收到的参数写入 out.txt），
+ * 使用真实的 `spawnBackgroundDsh` / `runDshSync` 执行它，再读取 out.txt 比对内容。
+ * 不依赖 dsh、不依赖内核、不占用端口，数秒内完成。
  *
- * 跑法：node test/spawn-quote.js
- * （非 Windows 上退出码 2 = 环境不满足，这条命令行的坑本来也只存在于 Windows）
+ * 运行方式：node test/spawn-quote.js
+ * （非 Windows 上退出码 2 = 环境不满足，该命令行缺陷仅存在于 Windows）
  */
 
 const fs = require('node:fs');
@@ -70,15 +70,15 @@ if (process.platform !== 'win32') {
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function main() {
-  // 用系统临时目录，不用仓库里的 build/ —— 那个目录会被打包脚本清空，
-  // 而且它不入库。测试的现场就该放在临时目录里，跑完自己删。
+  // 使用系统临时目录，不使用仓库中的 build/ —— 该目录会被打包脚本清空，
+  // 且不纳入版本控制。测试的现场文件应放在临时目录中，运行结束后自行删除。
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-quote-'));
-  const spacedDir = path.join(root, 'probe space');   // 带空格 —— 这是主角
-  const plainDir = path.join(root, 'probe-plain');    // 不带空格 —— 对照组
+  const spacedDir = path.join(root, 'probe space');   // 路径含空格 —— 主要测试对象
+  const plainDir = path.join(root, 'probe-plain');    // 路径不含空格 —— 对照组
   fs.mkdirSync(spacedDir, { recursive: true });
   fs.mkdirSync(plainDir, { recursive: true });
 
-  // 垫片：把收到的所有参数写进自己旁边的 out.txt（%~dp0 = 脚本所在目录）。
+  // 垫片：把接收到的全部参数写入同目录下的 out.txt（%~dp0 = 脚本所在目录）。
   const body = '@echo off\r\necho %* > "%~dp0out.txt"\r\n';
   const spacedCmd = path.join(spacedDir, 'hello.cmd');
   const plainCmd = path.join(plainDir, 'hello.cmd');
@@ -86,14 +86,14 @@ async function main() {
   fs.writeFileSync(plainCmd, body);
   const spacedOut = path.join(spacedDir, 'out.txt');
   const plainOut = path.join(plainDir, 'out.txt');
-  const resetOut = (file) => { try { fs.unlinkSync(file); } catch { /* 本来就没有 */ } };
+  const resetOut = (file) => { try { fs.unlinkSync(file); } catch { /* 文件本就不存在 */ } };
   const outText = (file) => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim() : '');
 
   const log = () => {};
 
   try {
     section('1. 拆命令：不能把带空格的路径劈开');
-    equal('裸的带空格路径 → 整段当程序名', resolveCommand(spacedCmd), [spacedCmd]);
+    equal('直接给出带空格路径 → 整段作为程序名', resolveCommand(spacedCmd), [spacedCmd]);
     equal('带空格的路径 + 自带参数 → 程序名粘回去，参数分开',
       resolveCommand(`${spacedCmd} --profile desktop`), [spacedCmd, '--profile', 'desktop']);
     equal('`node <带空格的脚本>` → 脚本路径粘回一个参数',
@@ -104,8 +104,8 @@ async function main() {
     equal('纯命令名照旧按空白拆', splitCommand('dsh --profile desktop'), ['dsh', '--profile', 'desktop']);
     equal('stripOuterQuotes 只剥最外层', stripOuterQuotes(`"${spacedCmd}"`), spacedCmd);
 
-    // 这一条是「不许多粘」的反面证据：没有任何前缀真的存在于磁盘上时，
-    // 不许把参数粘起来（粘的依据是磁盘上真有那个文件，不是猜）。
+    // 本条是「不得过度拼接」的反向证据：磁盘上不存在任何匹配的前缀时，
+    // 不得把参数拼接起来（拼接的依据是磁盘上确实存在该文件，而非推测）。
     equal('不存在的东西不许乱粘',
       resolveCommand('dsh --profile desktop'), ['dsh', '--profile', 'desktop']);
 
@@ -114,7 +114,7 @@ async function main() {
 
     section('2. 真进程：后台拉起（三种写法都必须跑起来）');
     for (const [label, command] of [
-      ['A. 裸的带空格路径', spacedCmd],
+      ['A. 直接给出带空格路径', spacedCmd],
       ['B. 带空格的路径加引号', `"${spacedCmd}"`],
       ['C. 带空格的路径 + 自带参数', `${spacedCmd} 自带参数`],
     ]) {
@@ -127,7 +127,7 @@ async function main() {
       check(label, text.length > 0, text ? `垫片收到：${text}` : '垫片根本没跑（out.txt 没生成）');
     }
 
-    section('3. 对照组：路径不带空格（原来就是好的，别改坏）');
+    section('3. 对照组：路径不带空格（原本正常，不得改坏）');
     resetOut(plainOut);
     const bgPlain = spawnBackgroundDsh({ command: plainCmd, profile: 'desktop', log });
     await wait(1000);
@@ -136,7 +136,7 @@ async function main() {
     await wait(200);
     check('D. 不带空格的路径', plainText.length > 0, plainText || '垫片没跑');
 
-    section('4. runDshSync（测试装门插件走的就是这条路）');
+    section('4. runDshSync（测试安装该插件走的即为这条路）');
     resetOut(spacedOut);
     try {
       runDshSync({ command: spacedCmd, args: ['sync-arg'], timeoutMs: 15000 });
@@ -175,6 +175,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(`测试自己炸了：${error && error.stack ? error.stack : error}`);
+  console.error(`测试自身发生异常：${error && error.stack ? error.stack : error}`);
   process.exit(1);
 });

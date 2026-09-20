@@ -3,19 +3,19 @@
 /**
  * DSH Panel 的入口。
  *
- * 这里只做三件事：建输出通道、注册侧边栏视图、注册命令。
- * 真正的逻辑在 panel/view.js 和 dsh/session.js 里 —— 那两个文件
- * 能在命令行里单独跑起来测试，方便在没有编辑器的情况下调 bug。
+ * 本文件只承担三件事：创建输出通道、注册侧边栏视图、注册命令。
+ * 主要逻辑位于 panel/view.js 与 dsh/session.js 中 —— 这两个文件
+ * 可以在命令行中单独运行测试，便于在没有编辑器的情况下定位缺陷。
  */
 
 const vscode = require('vscode');
 const { DshPanelView, VIEW_ID } = require('./panel/view');
 const { kernelManager } = require('./panel/kernel-manager');
 /**
- * 建一个带时间戳的输出通道。
+ * 创建一个带时间戳的输出通道。
  *
- * 为什么不只用 console.log：扩展宿主的控制台用户看不到，
- * 出问题时需要一条「用户自己能打开看」的通道。
+ * 不使用 console.log 的原因：扩展宿主的控制台对用户不可见，
+ * 出现问题时需要一条用户可以直接打开的通道。
  *
  * @param {vscode.OutputChannel} channel
  * @returns {(level: string, message: string) => void}
@@ -38,26 +38,26 @@ function activate(context) {
   const view = new DshPanelView({ extensionUri: context.extensionUri, log });
 
   /**
-   * 把「当前编辑器」里的东西挂进面板。
+   * 将当前编辑器中的内容挂载到面板。
    *
-   * 两个命令（带上当前文件 / 带上选中的代码）走的是同一条路，
-   * 区别只在编辑器有没有选区 —— 有选区就带选中的那几行，没有就带整个文件。
+   * 两个命令（带上当前文件 / 带上选中的代码）使用同一条代码路径，
+   * 区别仅在于编辑器是否存在选区：存在选区时附带选中的若干行，否则附带整个文件。
    *
    * @param {'file'|'selection'} wanted
    */
   async function attachFromEditor(wanted) {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
-      vscode.window.showInformationMessage('先打开一个文件。');
+      vscode.window.showInformationMessage('当前没有打开的文件。');
       return;
     }
     const item = DshPanelView.attachmentFromEditor(editor, view.workdir());
     if (!item) {
-      vscode.window.showInformationMessage('这个编辑器拿不到文件路径。');
+      vscode.window.showInformationMessage('当前编辑器无法获取文件路径。');
       return;
     }
     if (wanted === 'selection' && item.kind !== 'selection') {
-      vscode.window.showInformationMessage('先选中一段代码。');
+      vscode.window.showInformationMessage('当前没有选中的代码。');
       return;
     }
     log('info', `带进对话：${item.kind} ${item.name}${item.detail ? `（${item.detail}）` : ''}`);
@@ -67,7 +67,7 @@ function activate(context) {
   context.subscriptions.push(
     channel,
     vscode.window.registerWebviewViewProvider(VIEW_ID, view, {
-      // 切到别的视图时不要把聊天记录丢掉 —— 对聊天面板来说这比省内存重要。
+      // 切换到其他视图时保留聊天记录：对聊天面板而言该需求优先于节省内存。
       webviewOptions: { retainContextWhenHidden: true },
     }),
     vscode.commands.registerCommand('dshPanel.newSession', async () => {
@@ -80,58 +80,58 @@ function activate(context) {
       channel.show(true);
     }),
     /**
-     * 「DSH：停掉后台内核」—— 面板自己拉起来的那个内核是常驻的
-     * （视图关掉后还会留 10 分钟，好让面板重开时接着用）。想立刻收掉、
-     * 或者想确认"到底还有没有我起的进程"，用这条命令。
-     * 它只收**本扩展自己拉起来的**，绝不碰桌面端那个。
+     * 「DSH：停止后台内核」—— 面板自行启动的内核为常驻进程
+     * （视图关闭后仍保留 10 分钟，以便面板重新打开时继续使用）。若需要立即回收，
+     * 或者需要确认是否残留由本扩展启动的进程，可使用这条命令。
+     * 该命令只回收**本扩展自行启动的内核**，不涉及桌面端启动的内核。
      */
     vscode.commands.registerCommand('dshPanel.stopKernel', () => {
-      const stopped = kernelManager(log).disposeAll('用户手动停掉');
-      const text = stopped > 0 ? `已停掉 ${stopped} 个后台 DSH。` : '没有本扩展拉起的后台 DSH。';
+      const stopped = kernelManager(log).disposeAll('用户手动停止');
+      const text = stopped > 0 ? `已停止 ${stopped} 个后台 DSH。` : '没有本扩展启动的后台 DSH。';
       log('info', text);
       vscode.window.showInformationMessage(text);
     }),
     /**
-     * 「DSH：打开面板」—— 把侧边栏面板展开并聚焦。
+     * 「DSH：打开面板」—— 展开侧边栏面板并使其获得焦点。
      *
-     * 为什么必须有这个命令：面板挂在活动栏里，得先发现那个图标才能点开。
-     * 早上真机试的时候，扩展明明激活了，但"面板从来没被打开过"（日志里只有
-     * 启动那一行）—— 找不到入口，就等于这东西不存在。所以补一条命令：
-     * 命令面板里搜 "DSH" 就能进来。
+     * 需要该命令的原因：面板位于活动栏中，必须先找到对应图标才能打开。
+     * 某次真机验证中，扩展已经激活，但面板从未被打开（日志中只有
+     * 启动那一行）—— 缺少入口等同于该功能不存在。因此补充一条命令：
+     * 在命令面板中搜索 "DSH" 即可进入。
      */
     vscode.commands.registerCommand('dshPanel.open', async () => {
       await vscode.commands.executeCommand(`${VIEW_ID}.focus`);
     }),
-    // 编辑器上下文：右键菜单和命令面板都能用。
+    // 编辑器上下文：右键菜单与命令面板均可调用。
     vscode.commands.registerCommand('dshPanel.attachFile', () => attachFromEditor('file')),
     vscode.commands.registerCommand('dshPanel.attachSelection', () => attachFromEditor('selection')),
-    // 改设置后让下次连接用新值；正在进行的会话不动。
+    // 修改设置后，下次连接使用新值；正在进行的会话不受影响。
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('dshPanel')) {
-        log('info', '设置已变更，下次新建/重连时生效');
+        log('info', '设置已变更，将在下次新建或重连时生效');
       }
     }),
     { dispose: () => view.dispose() },
   );
 
   /*
-   * 第一次装上之后给一条提示。
+   * 首次安装后给出一条提示。
    *
-   * 理由同上：装完不重启/不留意，活动栏里多出来的图标很容易被忽略，
-   * 用户看到的就是"装了个没用的东西"。只在**从没打开过面板**时提示一次，
-   * 之后永远不再打扰（记在 globalState 里）。
+   * 理由同上：安装后若不重启编辑器或不加留意，活动栏中新增的图标容易被忽略，
+   * 用户会认为扩展没有实际作用。仅在**从未打开过面板**时提示一次，
+   * 之后不再提示（记录在 globalState 中）。
    */
   const HINT_KEY = 'dshPanel.openHintShown';
   if (!context.globalState.get(HINT_KEY)) {
     context.globalState.update(HINT_KEY, true);
-    log('info', '首次启动：提示用户面板在哪里');
+    log('info', '首次启动：提示用户面板的位置');
     vscode.window
       .showInformationMessage(
-        '面板已就绪：点活动栏的对话图标，或搜「DSH：打开面板」。',
-        '现在就打开',
+        '面板已就绪：点击活动栏的对话图标，或在命令面板搜索「DSH：打开面板」。',
+        '立即打开',
       )
       .then((choice) => {
-        if (choice === '现在就打开') {
+        if (choice === '立即打开') {
           return vscode.commands.executeCommand(`${VIEW_ID}.focus`);
         }
         return undefined;
@@ -139,12 +139,12 @@ function activate(context) {
   }
 
   /*
-   * 自检开关：设了 DSH_PANEL_AUTOFOCUS=1 时，启动后自动把面板打开一次。
+   * 自检开关：设置 DSH_PANEL_AUTOFOCUS=1 时，启动后自动打开面板一次。
    *
-   * 为什么需要它：这个面板平时要点活动栏图标才会出现，而「点一下」这件事
-   * 在无人值守时做不到。有了这个开关，就能在真编辑器里验证「装上了 → 激活了
-   * → 面板真的能展开 → 真的连上了 DSH」整条路，而不是只靠我猜。
-   * 不设这个环境变量时完全没有影响。
+   * 需要该开关的原因：该面板通常需要点击活动栏图标才会显示，而该点击操作
+   * 在无人值守环境中无法完成。使用该开关后，可在真实编辑器中验证「安装完成 → 扩展激活
+   * → 面板可展开 → 成功连接到 DSH」这条完整路径，而不依赖推测。
+   * 未设置该环境变量时没有任何影响。
    */
   if (process.env.DSH_PANEL_AUTOFOCUS === '1') {
     log('info', '自检模式：1.5 秒后自动打开面板（DSH_PANEL_AUTOFOCUS=1）');
@@ -159,16 +159,16 @@ function activate(context) {
 
 function deactivate() {
   /*
-   * 窗口关了：把本扩展拉起来的后台内核全收掉，一个孤儿都不留。
+   * 窗口关闭：回收本扩展启动的全部后台内核，不残留孤儿进程。
    *
-   * 注意区别：**视图销毁不收**（那只是释放引用，10 分钟宽限内重开面板还能
-   * 接着用同一个内核），**窗口关闭才收**。见 src/panel/kernel-manager.js。
+   * 注意区别：**视图销毁时不回收**（该操作只释放引用，10 分钟宽限期内
+   * 重开面板仍可使用同一内核），**窗口关闭时才回收**。见 src/panel/kernel-manager.js。
    */
   try {
     const count = kernelManager().disposeAll('VS Code 窗口关闭');
-    if (count > 0) console.log(`[dsh-panel] 窗口关闭，收掉 ${count} 个后台 DSH 内核`);
+    if (count > 0) console.log(`[dsh-panel] 窗口关闭，回收 ${count} 个后台 DSH 内核`);
   } catch (error) {
-    console.error(`[dsh-panel] 收后台内核出错：${error && error.message ? error.message : error}`);
+    console.error(`[dsh-panel] 回收后台内核出错：${error && error.message ? error.message : error}`);
   }
 }
 

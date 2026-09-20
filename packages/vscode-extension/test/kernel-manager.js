@@ -1,16 +1,16 @@
 /*
- * 后台内核的"谁在用它、什么时候该收掉"（纯逻辑，假进程 / 假计时器）。
+ * 后台内核的"谁在使用、何时回收"（纯逻辑测试，使用假进程 / 假计时器）。
  *
- * 为什么这个套件重要（2026-09-19）：用户报"聊两句就 read ECONNRESET"，
- * 翻日志看到"每个自启内核活 35 秒"。其中一条结构性成因是：
- * 面板视图的 disposer 直接 killTree 掉内核 —— 而视图太容易没了
- * （折叠侧边栏、拖面板、Reload Window、另一个窗口关掉）。
- * 这一套就是焊住新规矩：
+ * 该套件的必要性（2026-09-19）：用户报告"聊两句就 read ECONNRESET"，
+ * 查阅日志发现"每个自启动内核存活 35 秒"。其中一项结构性成因是：
+ * 面板视图的 disposer 直接对该内核执行 killTree —— 而视图很容易被销毁
+ * （折叠侧边栏、拖动面板、Reload Window、关闭另一个窗口）。
+ * 该套件用于固定新规则：
  *
- *   视图销毁 = 释放引用（内核还活着）→ 宽限期内重开面板 = 继续用同一个
- *   → 只有宽限到期 / 窗口关闭 / 用户显式停 才真的收。
+ *   视图销毁 = 释放引用（内核仍在运行）→ 宽限期内重新打开面板 = 继续使用同一个
+ *   → 仅在宽限到期 / 窗口关闭 / 用户显式停止时真正回收。
  *
- * 真进程那半在 test/fallback.js §6（真起一个内核、真销毁视图、真看 pid）。
+ * 真实进程部分见 test/fallback.js §6（真实启动内核、真实销毁视图、真实检查 pid）。
  */
 const { KernelManager } = require('../src/panel/kernel-manager.js');
 
@@ -31,7 +31,7 @@ function section(title) {
   console.log(`\n── ${title} ───────────────────────────────────────`);
 }
 
-/** 假进程：能装成"活着/退出"，并记下 dispose 有没有被调用。 */
+/** 假进程：可模拟"运行/退出"状态，并记录 dispose 是否被调用。 */
 function fakeBackground(pid = 1001) {
   const listeners = new Map();
   const child = {
@@ -53,7 +53,7 @@ function fakeBackground(pid = 1001) {
       for (const handler of listeners.get('exit') || []) handler(0, null);
     },
   };
-  /** 模拟"它自己死了"（不是我们收的）。 */
+  /** 模拟"该进程自行退出"（非由本模块回收）。 */
   background.dieByItself = (code = 1) => {
     child.exitCode = code;
     for (const handler of listeners.get('exit') || []) handler(code, null);
@@ -61,7 +61,7 @@ function fakeBackground(pid = 1001) {
   return background;
 }
 
-/** 假计时器：手动到点，不依赖真实时间。 */
+/** 假计时器：手动触发到期，不依赖真实时间。 */
 function fakeTimers() {
   const timers = new Map();
   let nextId = 1;
@@ -75,7 +75,7 @@ function fakeTimers() {
       const item = timers.get(handle.id);
       if (item) item.canceled = true;
     },
-    /** 让所有还活着的计时器到点（模拟"宽限到期"）。 */
+    /** 使所有仍有效的计时器到期（模拟"宽限到期"）。 */
     fireAll() {
       const items = [...timers.values()].filter((item) => !item.canceled);
       for (const item of items) item.fn();
@@ -131,7 +131,7 @@ section('2. 引用计数：有人用着不收');
   const entry = manager.spawn({ host: '127.0.0.1', port: 47831 });
   manager.acquire(viewA, entry);
   manager.acquire(viewB, entry);
-  manager.acquire(viewA, entry); // 同一个使用者重复 acquire 只算一次
+  manager.acquire(viewA, entry); // 同一使用者重复 acquire 仅计数一次
   manager.release(viewA);
   check('还有人在用 → 不收，也不排计时', spawns[0].background.disposed === 0 && manager.size() === 1);
   manager.release(viewB);
@@ -149,13 +149,13 @@ section('3. 宽限期内重开面板 → 继续用同一个内核');
   manager.acquire(viewA, entry);
   manager.release(viewA);
   check('释放后排上了"要收它"的计时', timers.pending() === 1, String(timers.pending()));
-  // 用户把面板重新打开了：
+  // 用户重新打开面板：
   const reused = manager.spawn({ host: '127.0.0.1', port: 47831 });
   manager.acquire(viewB, reused);
   check('重开面板拿到的是同一个内核（没有第二次 spawn）',
     reused === entry && spawns.length === 1);
   check('原本要收它的计时被取消', timers.pending() === 0, String(timers.pending()));
-  check('到点了也没杀掉（因为有人在用）', timers.fireAll() === 0 && spawns[0].background.disposed === 0);
+  check('到点了也未终止（因为仍在使用）', timers.fireAll() === 0 && spawns[0].background.disposed === 0);
 }
 
 section('4. 宽限到期 / 窗口关闭 / 用户显式停 → 真收');
@@ -215,7 +215,7 @@ section('7. 宽限时长来自设置');
 section('8. 不碰别人起的那个内核');
 {
   const { manager } = makeManager();
-  // 桌面端那个内核（47821）我们从来没起过，也就永远不会被收。
+  // 桌面端的那个内核（47821）从未由本模块启动，因此永远不会被回收。
   const stranger = { name: '另一个视图' };
   manager.acquire(stranger, undefined);
   manager.release(stranger);

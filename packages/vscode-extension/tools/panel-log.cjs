@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 /*
- * 把面板自己的日志（VS Code 的「输出 → DSH Panel」）翻出来看一眼。
+ * 读取并查看面板自身的日志（VS Code 的「输出 → DSH Panel」）。
  *
- * 为什么单独做一个工具：这个项目里已经吃过两次"面板说的原因跟真因无关"的亏 ——
- * 因为内核的原话被我们扔了。现在内核的 stdout/stderr 会原样转进这条日志，
- * 所以**出问题时的第一现场就是这个文件**，而它埋在 VS Code 的日志目录深处
+ * 单独实现该工具的原因：本项目已出现两次"面板报告的原因与真实原因无关"的情况 ——
+ * 其原因在于内核的原始输出此前被丢弃。当前内核的 stdout/stderr 会原样写入这条日志，
+ * 因此**故障发生时的首要信息来源即为该文件**，而该文件位于 VS Code 的日志目录深处
  * （`%APPDATA%\Code\logs\<时间戳>\window*\exthost\output_logging_*\N-DSH Panel.log`）。
  *
  * 用法：
- *   node tools/panel-log.cjs                # 最新那条，看最后 60 行
- *   node tools/panel-log.cjs --all          # 最新那条，整份
- *   node tools/panel-log.cjs --grep 内核     # 只看匹配的行（可多次给）
+ *   node tools/panel-log.cjs                # 最新的一份，查看最后 60 行
+ *   node tools/panel-log.cjs --all          # 最新的一份，完整输出
+ *   node tools/panel-log.cjs --grep 内核     # 仅查看匹配的行（可多次指定）
  *   node tools/panel-log.cjs --list         # 列出所有窗口的面板日志
  */
 const fs = require('node:fs');
@@ -30,7 +30,7 @@ for (let i = 0; i < args.length; i += 1) {
   if (args[i] === '--grep' && args[i + 1]) greps.push(new RegExp(args[i + 1], 'i'));
 }
 
-/** VS Code 的日志根目录（稳定版/预览版都看一眼）。 */
+/** VS Code 的日志根目录（稳定版与预览版均检查）。 */
 function logRoots() {
   const roaming = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
   return [

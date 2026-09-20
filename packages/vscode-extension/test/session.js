@@ -1,15 +1,15 @@
 'use strict';
 
 /**
- * DshSession（src/dsh/session.js）的边界测试 —— 用一个假的门客户端。
+ * DshSession（src/dsh/session.js）的边界测试 —— 使用一个假的 ACP 接入点插件（dsh-acp-door）客户端。
  *
- * 为什么需要这一层：session.js 现在只在「真 DSH」套件里被测，那层很值钱但很慢，
- * 而且**测不到边界** —— 内核不会为你回一个缺字段的 configOptions、也不会在
- * 用量帧里只给一半的数字。这些"少见但会出错的"分支，只能拿假客户端焊住。
+ * 设立该层的原因：session.js 此前仅在「真 DSH」套件中被测，该套件价值高但耗时较长，
+ * 且无法覆盖边界情况 —— 内核不会返回缺少字段的 configOptions，也不会在
+ * 用量帧中只提供一半数值。这些少见但会出错的分支只能使用假客户端固定。
  *
- * 这里测的都是这一夜真实踩过或差点踩到的坑，不是为凑数写的。
+ * 此处覆盖的均为实际出现过或接近出现的问题，并非为填充数量而编写。
  *
- * 跑法：node test/session.js
+ * 运行方式：node test/session.js
  */
 
 const path = require('node:path');
@@ -34,11 +34,11 @@ function section(title) {
 }
 
 /**
- * 假的门客户端：只实现 session.js 用到的那几件事（都是 EventEmitter）。
+ * 假的该插件客户端：仅实现 session.js 使用到的若干能力（均为 EventEmitter）。
  *
  * @param {object} options
  * @param {object} options.newSessionReply session/new 的回复。
- * @param {Function} [options.setConfigReply] 收到 setConfigOption 时回什么 / 做什么。
+ * @param {Function} [options.setConfigReply] 收到 setConfigOption 时返回什么 / 执行什么。
  */
 function fakeClient({ newSessionReply, setConfigReply } = {}) {
   const client = new EventEmitter();
@@ -79,10 +79,10 @@ const B = '["opencode-go","deepseek-v4.1"]';
 async function main() {
   console.log('DSH Panel · 会话层边界（假客户端）');
 
-  // ── 1. 切模型：以内核回的为准 ────────────────────────────
+  // ── 1. 切模型：以内核返回值为准 ────────────────────────────
   section('1. 切模型时信内核，不信自己');
   {
-    // 内核把请求归一化成了别的值（真实可能：同名不同服务商、被降级）。
+    // 内核把请求归一化为其他值（实际可能：同名不同服务商、被降级）。
     const client = fakeClient({
       newSessionReply: { sessionId: 's-1', configOptions: [modelOption(A)] },
       setConfigReply: () => ({ configOptions: [modelOption(A)] }),
@@ -96,7 +96,7 @@ async function main() {
       session.configOptions.length === 1 && session.configOptions[0].id === 'model');
   }
   {
-    // 老内核不回 configOptions 时，退回自己改本地那份（否则下拉框会卡住）。
+    // 旧版内核不返回 configOptions 时，退回修改本地副本（否则下拉框会卡住）。
     const client = fakeClient({
       newSessionReply: { sessionId: 's-1', configOptions: [modelOption(A)] },
       setConfigReply: () => ({}),
@@ -108,7 +108,7 @@ async function main() {
     check('内核没回配置时退回本地记请求值', now === B, `记成了 ${now}`);
   }
   {
-    // 内核压根没给 model 这一项：不许炸，也不许假装切了。
+    // 内核未提供 model 项：不得抛出异常，也不得记录为已切换。
     const client = fakeClient({
       newSessionReply: { sessionId: 's-1', configOptions: [] },
       setConfigReply: () => ({ configOptions: [] }),
@@ -125,7 +125,7 @@ async function main() {
     check('也确实没去调内核切一个不存在的项', client.calls.setConfigOption.length === 1);
   }
   {
-    // 没有会话就切模型：要明确报错，不能静默。
+    // 无会话时切换模型：须明确报错，不得静默。
     const session = new DshSession({ client: fakeClient({}), log: () => {} });
     let message = '';
     try {
@@ -136,7 +136,7 @@ async function main() {
     check('还没有会话时切模型会明确报错', message.includes('还没有会话'), message);
   }
 
-  // ── 2. 启动时按配置把模型调过去 ──────────────────────────
+  // ── 2. 启动时按配置切换模型 ──────────────────────────
   section('2. 启动时套用配置里的模型');
   {
     const client = fakeClient({
@@ -151,7 +151,7 @@ async function main() {
       client.calls.setConfigOption[0].value === B, client.calls.setConfigOption[0].value);
   }
   {
-    // 已经是这个模型：不该白跑一趟（每次切都可能要重启 agent）。
+    // 已经是该模型：不应重复切换（每次切换都可能需要重启 agent）。
     const client = fakeClient({
       newSessionReply: { sessionId: 's-1', configOptions: [modelOption(B)] },
     });
@@ -160,7 +160,7 @@ async function main() {
     check('已经是这个模型就不重复切', client.calls.setConfigOption.length === 0);
   }
   {
-    // 配置里点名了一个内核没有的模型：不许切，别把会话搞坏。
+    // 配置指定了内核不存在的模型：不得切换，避免破坏会话。
     const client = fakeClient({
       newSessionReply: { sessionId: 's-1', configOptions: [modelOption(A)] },
     });
@@ -169,7 +169,7 @@ async function main() {
     check('配置里的模型不在清单里时不动手', client.calls.setConfigOption.length === 0);
   }
 
-  // ── 3. 用量帧：只给一半也要能用 ──────────────────────────
+  // ── 3. 用量帧：只提供一半数值时也须可用 ──────────────────
   section('3. 上下文用量（帧里只有一半数字时）');
   {
     const client = fakeClient({ newSessionReply: { sessionId: 's-1', configOptions: [] } });
@@ -182,22 +182,22 @@ async function main() {
     check('第一次就给出完整数字', seen.length === 1 && seen[0].used === 1000 && seen[0].size === 200000,
       JSON.stringify(seen));
 
-    // 内核有时候只报 used（size 不变）。
+    // 内核有时只上报 used（size 不变）。
     client.emit('update', 's-1', { sessionUpdate: 'usage_update', used: 1500 });
     check('只报 used 时 size 沿用上一次', seen.length === 2 && seen[1].used === 1500 && seen[1].size === 200000,
       JSON.stringify(seen[1]));
 
-    // 只报 size（换模型导致窗口变了）。
+    // 只上报 size（切换模型导致窗口变化）。
     client.emit('update', 's-1', { sessionUpdate: 'usage_update', size: 128000 });
     check('只报 size 时 used 沿用上一次', seen[2].used === 1500 && seen[2].size === 128000,
       JSON.stringify(seen[2]));
 
-    // 两个都没有：这帧没用，不该广播（否则界面会闪一下 0）。
+    // 两者均无：该帧无效，不应广播（否则界面会短暂显示 0）。
     const before = seen.length;
     client.emit('update', 's-1', { sessionUpdate: 'usage_update' });
     check('一个数字都没有的用量帧被忽略', seen.length === before, `多广播了 ${seen.length - before} 次`);
 
-    // 别的会话的帧：必须无视（否则多开一个面板就串了）。
+    // 其他会话的帧：必须忽略（否则打开多个面板会产生串扰）。
     client.emit('update', 's-OTHER', { sessionUpdate: 'usage_update', used: 9, size: 9 });
     check('别的会话的用量帧被忽略', seen.length === before);
   }
@@ -219,7 +219,7 @@ async function main() {
     check('助手消息里累加成了完整文本', session.messages.get('m1').text === '甲乙',
       session.messages.get('m1').text);
 
-    // 内核会重复发同样的工具帧：必须幂等合并，不能堆出两张卡片。
+    // 内核会重复发送相同的工具帧：必须幂等合并，不得生成两张卡片。
     const tools = [];
     session.on('tool', (payload) => tools.push(payload.tool));
     client.emit('update', 's-1', { sessionUpdate: 'tool_call', toolCallId: 't1', title: '读文件', kind: 'read', status: 'pending' });
@@ -229,7 +229,7 @@ async function main() {
     check('标题没被后一帧的空值抹掉', session.tools.get('t1').title === '读文件');
     check('正文被填上了', Array.isArray(session.tools.get('t1').content));
 
-    // 空增量不该广播（会让界面白重排一次）。
+    // 空增量不应广播（会导致界面无效果地重排一次）。
     const before = texts.length;
     client.emit('update', 's-1', { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '' } });
     check('空增量不广播', texts.length === before);
@@ -250,7 +250,7 @@ async function main() {
   }
 
   // ── 6. 断线 ─────────────────────────────────────────────
-  section('6. 门断开时');
+  section('6. 该插件断开时');
   {
     const client = fakeClient({ newSessionReply: { sessionId: 's-1', configOptions: [] } });
     const session = new DshSession({ client, log: () => {} });
@@ -273,6 +273,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error('测试自己炸了：', error);
+  console.error('测试自身发生异常：', error);
   process.exit(1);
 });

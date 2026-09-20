@@ -3,10 +3,10 @@
 /**
  * Markdown 渲染器的单元测试。
  *
- * 它是整个界面里唯一「把模型输出变成 HTML」的地方，所以两件事必须钉死：
- *   1. **注入安全** —— 模型说什么都不能变成可执行的 HTML；
- *   2. **真实性能** —— 大段文本渲染不能卡（在 Node 里量才准，
- *      无头浏览器的虚拟时钟会让耗时恒为 0）。
+ * 该模块是界面中唯一把模型输出转换为 HTML 的位置，因此需要固定两项行为：
+ *   1. 注入安全 —— 模型输出不得转换为可执行的 HTML；
+ *   2. 真实性能 —— 大段文本渲染不得阻塞（仅在 Node 中测量才准确，
+ *      无头浏览器的虚拟时钟会使耗时恒为 0）。
  *
  * 用法：node test/markdown.js
  */
@@ -69,7 +69,7 @@ check(
 check('CRLF 换行也能处理', renderMarkdown('第一行\r\n第二行').includes('<br>'));
 check('多段之间分开', (renderMarkdown('第一段\n\n第二段').match(/<p>/g) || []).length === 2);
 
-// ── 2. 注入安全（最重要的一组）────────────────────────────
+// ── 2. 注入安全（优先级最高的一组）────────────────────────
 
 section('2. 注入安全');
 
@@ -89,8 +89,8 @@ const dataLink = renderMarkdown('[点我](data:text/html,<script>alert(1)</scrip
 check('data: 链接不被当成链接', !dataLink.includes('<a '), dataLink);
 
 const attrInjection = renderMarkdown('[x](https://a.com"onmouseover="alert(1))');
-// 注意正确的判据：引号必须被转义成 &quot;（浏览器解码后仍是属性**内部**的字符），
-// 真正危险的是出现**未转义的** `"` 把属性提前闭合。所以查的是裸引号序列。
+// 正确判据：引号必须转义为 &quot;（浏览器解码后仍是属性内部的字符），
+// 危险情形是出现未转义的 `"` 导致属性提前闭合。因此检查的是未转义的引号序列。
 check(
   'URL 里的引号无法逃出属性',
   attrInjection.includes('&quot;') && !/"\s*onmouseover\s*=/.test(attrInjection),
@@ -106,7 +106,7 @@ check('行内代码里的 HTML 被转义', !inlineCode.includes('<b>') && inline
 const langInjection = renderMarkdown('```js" onload="alert(1)\ncode\n```');
 check(
   '代码块语言名无法逃出属性',
-  // 判据统一：不许出现**裸引号**的 on* 处理器赋值；&quot; 是安全的转义形式。
+  // 判据统一：不得出现带未转义引号的 on* 处理器赋值；&quot; 是安全的转义形式。
   !/\son\w+\s*=\s*"/.test(langInjection),
   langInjection,
 );
@@ -116,7 +116,7 @@ check('转义函数处理 & < > "', escapeHtml('&<>"') === '&amp;&lt;&gt;&quot;'
 const sneaky = renderMarkdown('正常文字 <a href="javascript:x">链接</a> 后面');
 check('混在正文里的标签只剩文字', !sneaky.includes('<a href'), sneaky);
 
-// ── 3. 真实性能（在 Node 里量才准）──────────────────────
+// ── 3. 真实性能（仅在 Node 中测量才准确）──────────────────
 
 section('3. 性能');
 
@@ -133,7 +133,7 @@ function makeDoc(sections) {
 }
 
 function timeIt(text, rounds) {
-  // 先热身，避免把 JIT 编译时间算进去。
+  // 先执行预热，避免计入 JIT 编译时间。
   for (let i = 0; i < 3; i += 1) renderMarkdown(text);
   const samples = [];
   for (let i = 0; i < rounds; i += 1) {
@@ -156,7 +156,7 @@ console.log(`     规模比 ${(large.length / small.length).toFixed(1)}×，耗�
 
 check('渲染 10KB 在 20ms 以内', smallMs < 20, `${smallMs.toFixed(2)}ms`);
 check('渲染 100KB 在 200ms 以内', largeMs < 200, `${largeMs.toFixed(2)}ms`);
-// 耗时应该大致随规模线性增长。倍数明显超过规模倍数，说明写法里有平方级的坑。
+// 耗时应当大致随规模线性增长。倍数明显超过规模倍数说明实现中存在平方级复杂度问题。
 const scale = large.length / small.length;
 const ratio = largeMs / Math.max(smallMs, 0.001);
 check(
@@ -165,17 +165,17 @@ check(
   `规模 ${scale.toFixed(1)}×，耗时 ${ratio.toFixed(1)}×`,
 );
 
-// ── 4. 病态输入不能卡死（子进程 + 小内存上限 + 超时守卫）────
+// ── 4. 病态输入不得导致阻塞（子进程 + 较小内存上限 + 超时守卫）────
 
 section('4. 病态输入（防死循环）');
 
 /*
- * 背景：这里踩过一个大坑 —— 输入里如果有「以 ``` 开头但不是合法围栏」的行
- * （模型吐出残缺代码块时很常见），渲染器既不当围栏处理、又不当段落接受，
- * 索引原地不动，于是无限循环、内存吃光。在 webview 里就是面板被冻死。
+ * 背景：此处曾出现严重缺陷 —— 输入中若存在「以 ``` 开头但不构成合法围栏」的行
+ * （模型输出残缺代码块时较为常见），渲染器既不按围栏处理、也不按段落接受，
+ * 索引不再前进，导致无限循环并耗尽内存；在 webview 中表现为面板无响应。
  *
- * 所以这组测试必须放在**子进程**里跑，并给一个很小的堆上限和超时：
- * 真卡住时子进程会自己撞死，而不是把测试进程和整台机器拖下水。
+ * 因此该组测试必须在子进程中运行，并设置较小的堆上限与超时：
+ * 实际阻塞时子进程自行终止，不会影响测试进程与整台机器。
  */
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
@@ -198,7 +198,7 @@ const PATHOLOGICAL = [
 const child = spawnSync(
   process.execPath,
   [
-    // 小堆上限：真死循环会很快 OOM 自杀，而不是把机器内存吃光。
+    // 较小的堆上限：实际死循环会迅速因 OOM 终止，而不会耗尽机器内存。
     '--max-old-space-size=192',
     '-e',
     `
@@ -222,18 +222,18 @@ check(
     : `退出码 ${child.status}，stdout=${(child.stdout || '').trim()}，stderr=${(child.stderr || '').trim().split('\n')[0]}`,
 );
 
-// 病态输入也不能把内容吃掉 —— 用户得能看见模型到底吐了什么。
+// 病态输入的内容也不得丢失 —— 用户需要看到模型实际输出的内容。
 const weird = renderMarkdown('```js" onload="alert(1)\ncode\n```');
 check('病态输入的内容没有丢', weird.includes('code') && weird.includes('alert(1)'), weird);
 
-// ── 5. 回归锁 ───────────────────────────────────────────
+// ── 5. 回归基准 ─────────────────────────────────────────
 
 section('5. 回归锁（改坏了这里会立刻发现）');
 
 const sample = renderMarkdown('## 标题\n\n段落带 `code`。\n\n- 一\n- 二\n');
 check(
   '已知输入的输出保持稳定',
-  // 注意 `##` 映射到 h3：h1 留给页面自己的标题，所以整体往下一级。
+  // 说明：`##` 映射到 h3，h1 保留给页面自身的标题，因此整体下调一级。
   sample === '<h3>标题</h3><p>段落带 <code>code</code>。</p><ul><li>一</li><li>二</li></ul>',
   JSON.stringify(sample),
 );

@@ -1,23 +1,23 @@
 'use strict';
-// 装进 VS Code 的那份扩展，跟仓库源码是不是逐字节一致？
-// （有差异就意味着用户跑的其实是旧代码 —— 这个项目出过这种事。）
+// 检查装入 VS Code 的扩展与仓库源码是否逐字节一致。
+// （存在差异即表示用户实际运行的是旧代码 —— 本项目曾出现过该情况。）
 //
-// 为什么需要它：改完源码必须「重新打包 → 重新安装」两步都做到，而
-// "装了"和"装的是这一版"是两件事。用户报"你改的东西没生效"时，先跑这个。
+// 设置该工具的原因：修改源码后必须完成「重新打包 → 重新安装」两个步骤，而
+// "已安装"与"安装的是当前版本"是两件事。用户报告"修改未生效"时，优先运行本工具。
 //
-// 用法：node tools/check-installed.cjs   （在 packages/vscode-extension 下跑）
+// 用法：node tools/check-installed.cjs   （在 packages/vscode-extension 目录下运行）
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 
-// 这个脚本就住在扩展里，所以 ".." 就是扩展根目录。
+// 本脚本位于扩展目录内，因此 ".." 即扩展根目录。
 const SRC = path.resolve(__dirname, '..');
-// 装进去的是哪几样：问 tools/ship-list.js（只有那一份清单，别再抄一遍）。
+// 装入的文件清单：由 tools/ship-list.js 提供（仅此一份清单，不再重复维护）。
 const { shipFiles } = require('./ship-list');
 
 const manifest = JSON.parse(fs.readFileSync(path.join(SRC, 'package.json'), 'utf8'));
-// 安装目录名 = `<publisher>.<name>-<version>`（VS Code 的命名法）。publisher 从 0.1.3 起
-// 是市场用的那个 ID，所以这里跟着清单算，别再写死 `local.`；大小写也按实际目录兜一下。
+// 安装目录名 = `<publisher>.<name>-<version>`（VS Code 的命名规则）。publisher 自 0.1.3 起
+// 为市场使用的 ID，因此此处依据清单计算，不再写死 `local.`；大小写亦按实际目录做兼容处理。
 const EXTENSIONS_DIR = path.join(os.homedir(), '.vscode', 'extensions');
 const EXT_DIR_NAME = `${manifest.publisher}.${manifest.name}-${manifest.version}`;
 const DST = (() => {
@@ -49,7 +49,7 @@ for (const rel of files) {
   if (rel === 'package.json') {
     const x = JSON.parse(fs.readFileSync(a, 'utf8'));
     const y = JSON.parse(fs.readFileSync(b, 'utf8'));
-    delete y.__metadata; // VS Code 自己塞的安装信息
+    delete y.__metadata; // VS Code 自行写入的安装信息
     if (JSON.stringify(x) === JSON.stringify(y)) {
       console.log('  ℹ package.json 只多了 VS Code 自己塞的 __metadata（正常）');
       continue;

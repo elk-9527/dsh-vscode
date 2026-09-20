@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /*
- * 生成市场用的扩展图标 media/icon.png（128×128，VS Code 市场的要求）。
+ * 生成市场使用的扩展图标 media/icon.png（128×128，VS Code 市场的要求）。
  *
- * 为什么要这么绕：仓库里唯一的图形资源是 media/dsh.svg，而它是**活动栏图标** ——
- * 24×24、单色、用 currentColor 上色（跟着主题走）。市场图标必须是**自带颜色**的
- * 位图：市场页面不在 VS Code 里，没有主题变量可继承，灰色描边放上去等于看不见。
+ * 采用该实现方式的原因：仓库中唯一的图形资源是 media/dsh.svg，而该文件是**活动栏图标** ——
+ * 24×24、单色、以 currentColor 着色（随主题变化）。市场图标必须为**自带颜色**的
+ * 位图：市场页面不在 VS Code 内，没有可继承的主题变量，灰色描边在页面上不可见。
  *
- * 所以这里把同一个图形放到一块品牌色底上，用**已经装好的无头 Chrome** 渲染成
- * PNG（跟 tools/shots.js 一个路子，不额外引入图形库、也不联网）。
+ * 因此此处将同一图形置于品牌色底上，使用**本机已安装的无头 Chrome** 渲染为
+ * PNG（与 tools/shots.js 采用同一方式，不额外引入图形库，也不联网）。
  *
  * 用法：node tools/make-icon.cjs
  */
@@ -19,7 +19,7 @@ const ROOT = path.join(__dirname, '..');
 const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const OUT = path.join(ROOT, 'media', 'icon.png');
 const STAGE = path.join(ROOT, 'build', 'icon');
-/** 底色的选择：VS Code 深色主题里那个主按钮蓝，放市场上既显眼又不扎眼。 */
+/** 底色的选择：VS Code 深色主题中的主按钮蓝，在市场页面上具有足够辨识度且不造成视觉干扰。 */
 const BG = '#0e639c';
 
 if (!fs.existsSync(CHROME)) {
@@ -27,7 +27,7 @@ if (!fs.existsSync(CHROME)) {
   process.exit(1);
 }
 
-// 活动栏那个图形（24×24 的 viewBox），原样嵌进来，只换颜色和大小。
+// 活动栏图形（24×24 的 viewBox），原样嵌入，仅替换颜色与尺寸。
 const GLYPH = fs
   .readFileSync(path.join(ROOT, 'media', 'dsh.svg'), 'utf8')
   .replace(/<!--[\s\S]*?-->/g, '')
@@ -74,7 +74,7 @@ if (result.status !== 0 || !fs.existsSync(OUT)) {
   process.exit(1);
 }
 
-// 尺寸必须真的是 128×128：市场会拒绝别的尺寸，而且这事肉眼看不出来。
+// 尺寸必须确为 128×128：市场会拒绝其它尺寸，且该问题无法通过肉眼观察发现。
 const png = fs.readFileSync(OUT);
 const width = png.readUInt32BE(16);
 const height = png.readUInt32BE(20);

@@ -1,31 +1,31 @@
 'use strict';
 
 /**
- * 历史会话的本地读取：列 `$DSH_HOME/sessions` 下的会话、重建一段会话的回放。
+ * 历史会话的本地读取：列出 `$DSH_HOME/sessions` 下的会话、重建一段会话的回放。
  *
- * ── 为什么面板自己要有一份 ────────────────────────────────────────
- * 门（`dsh-acp-door`）从 0.0.8 起用 `dsh-door/sessions/list|get` 两个旁路方法
- * 对外提供这份数据，面板优先走它。但那是有版本的：**门是装在用户档里的插件，
- * 而 user 的档由 DSH 桌面端自己管理** —— 实测（2026-09-19 00:05）桌面端重启时
- * 把档里的依赖重写回了旧版 tgz，于是「门太旧、没有旁路方法」，历史会话在
- * **最常用的那种模式（接着桌面端那一个内核）下直接不可用**。要求用户为了看
- * 历史去改自己的生产档、再重启一次，是把扩展自己的依赖问题转嫁给用户。
+ * ── 面板侧需要独立实现的原因 ──────────────────────────────────────
+ * ACP 接入点插件（`dsh-acp-door`）自 0.0.8 起通过 `dsh-door/sessions/list|get` 两个旁路方法
+ * 对外提供该数据，面板优先使用这两个方法。但该能力有版本要求：**该插件安装在用户档中，
+ * 而用户的档由 DSH 桌面端自身管理** —— 实测（2026-09-19 00:05）桌面端重启时
+ * 会将档中的依赖重写回旧版 tgz，于是出现「插件版本过低、不提供旁路方法」的情形，
+ * 历史会话在**最常用的模式（连接桌面端那一个内核）下直接不可用**。要求用户为查看
+ * 历史而修改自己的生产档并再次重启，属于将扩展自身的依赖问题转由用户承担。
  *
- * 面板本来就和内核跑在**同一台机器**上（默认连回环地址），会话文件就在本地
- * 磁盘上，所以它完全可以自己读 —— 不依赖门的版本、不碰用户的档、不用重启。
- * 只有在连**别的机器上的门**（`dshPanel.host` 改成非回环）时，本地读才是错的，
- * 那种情况必须走门的旁路方法（见 `src/panel/view.js` 里的选择逻辑）。
+ * 面板与内核运行在**同一台机器**上（默认连接回环地址），会话文件位于本地
+ * 磁盘，因此面板可以自行读取 —— 不依赖该插件版本、不修改用户的档、不需要重启。
+ * 仅在连接**其他机器上的接入点**（将 `dshPanel.host` 改为非回环地址）时，本地读取才不适用，
+ * 该情形需要经由该插件的旁路方法（见 `src/panel/view.js` 中的选择逻辑）。
  *
- * ── 与门那份的关系 ──────────────────────────────────────────────
- * 逻辑与 `packages/dsh-door/lib/sessions.js` **逐字对应**（门那份是 ESM，
- * 扩展零依赖、只能是 CommonJS，所以不能直接 require）。两份不许各改各的：
- * `test/sessions-parity.js` 会把两份实现喂同一批会话文件、比对输出必须一致，
- * 改了一边忘了另一边，那条测试会先炸。
+ * ── 与该插件实现的对应关系 ──────────────────────────────────────
+ * 逻辑与 `packages/dsh-door/lib/sessions.js` **逐字对应**（该实现为 ESM，
+ * 而扩展保持零依赖、只能使用 CommonJS，因此无法直接 require）。两份实现不得各自修改：
+ * `test/sessions-parity.js` 会将两份实现传入同一批会话文件并比对输出，要求完全一致，
+ * 修改其中一份而遗漏另一份时该测试会先失败。
  *
  * ── 文件格式（v3，实测逆向，非官方文档）─────────────────────────
- * `session.v3.jsonl.zstd` 是**多帧 zstd 拼接**：每帧一批 JSONL 事件，
- * 帧以魔数 `28 B5 2F FD` 开头。Node 的一次性 `zstdDecompressSync` 只解第一帧，
- * 必须按魔数切帧逐帧解压（实测 3944 帧零失败）。关键事件：
+ * `session.v3.jsonl.zstd` 为**多帧 zstd 拼接**：每帧包含一批 JSONL 事件，
+ * 帧以魔数 `28 B5 2F FD` 开头。Node 的一次性 `zstdDecompressSync` 仅解压第一帧，
+ * 需要按魔数切帧并逐帧解压（实测 3944 帧零失败）。关键事件：
  *
  *   {type:'session', id, createdAt, cwd, agentPreset}          首帧首行（会话头）
  *   {type:'session/title', data:{title, source:{kind}}}        内核生成的标题
@@ -36,8 +36,8 @@
  *   {type:'tool/result', data:{message:{source:{callId}, content:[{type:'tool-result', content:[...]}]}}}
  *   {type:'turn/start', data:{turn}} / {type:'turn/end', ...}
  *
- * 所有函数都是**只读**的（readdir/stat/readFile），绝不写、绝不删 ——
- * 会话记录是用户的资产。
+ * 所有函数均为**只读**（readdir/stat/readFile），不执行写入与删除操作 ——
+ * 会话记录属于用户的资产。
  *
  * @module dsh-panel/sessions
  */
@@ -47,22 +47,22 @@ const path = require('node:path');
 const os = require('node:os');
 const zlib = require('node:zlib');
 
-/** 会话主文件的固定名字。 */
+/** 会话主文件的固定文件名。 */
 const SESSION_FILE = 'session.v3.jsonl.zstd';
 
 /** zstd 帧魔数（little-endian 的 0xFD2FB528）。 */
 const ZSTD_MAGIC = [0x28, 0xb5, 0x2f, 0xfd];
 
-/** 列表默认最多回多少条（按修改时间从新到旧截断）。 */
+/** 列表默认返回的最大条数（按修改时间由新到旧截断）。 */
 const DEFAULT_LIST_LIMIT = 100;
 
-/** 单个会话文件超过这么大（字节）就跳过内容解读，只报名片（防呆，实测最大 ~7MB）。 */
+/** 单个会话文件超过该大小（字节）时跳过内容解读，仅返回名片（保护性限制，实测最大约 7MB）。 */
 const MAX_DECODE_BYTES = 64 * 1024 * 1024;
 
 /**
  * `$DSH_HOME` 的会话目录。
  *
- * 与内核同一套判定：环境变量 `DSH_HOME` 优先，否则 `~/.dsh`。
+ * 与内核采用同一套判定：环境变量 `DSH_HOME` 优先，否则为 `~/.dsh`。
  * @param {object} [options]
  * @param {object} [options.env] 默认 process.env（测试可注入）。
  * @param {string} [options.homedir] 默认 os.homedir()（测试可注入）。
@@ -72,23 +72,23 @@ function resolveSessionsRoot({ env = process.env, homedir = os.homedir() } = {})
   return path.join(configured || path.join(homedir, '.dsh'), 'sessions');
 }
 
-/** 当前 Node 有没有 zstd 解压（没有就报人话，绝不因此崩掉）。 */
+/** 判断当前 Node 是否提供 zstd 解压（不提供时给出通用提示，不因此崩溃）。 */
 function hasZstdSupport() {
   return typeof zlib.zstdDecompressSync === 'function';
 }
 
 /**
- * 解一个会话文件：按魔数切帧、逐帧解压、逐行解析。
+ * 解析一个会话文件：按魔数切帧、逐帧解压、逐行解析。
  *
- * 坏帧跳过不致命（尾部半截帧是内核写一半被杀的样子，前面的内容照样有效）。
+ * 跳过坏帧不会导致失败（尾部的不完整帧是内核写入过程中被终止的结果，其之前的内容仍然有效）。
  *
  * @param {string} file 会话文件路径。
  * @returns {{events: object[], frames: number, error?: string}}
  */
 function decodeSessionFile(file) {
   if (!hasZstdSupport()) {
-    // 给用户看的（会话卡片上那行）：说清"这台机器读不了"，别甩 Node/zstd 这些词。
-    // 「本机 Node 没有 zstd」这个事实进日志（调用方 log 那条路）。
+    // 面向用户的文案（会话卡片上那一行）：说明当前机器无法读取该文件，不出现 Node/zstd 等术语。
+    // 「本机 Node 没有 zstd」这一事实写入日志（由调用方经 log 记录）。
     return { events: [], frames: 0, error: '读不了这个会话文件（这台机器的运行环境不支持这种压缩）' };
   }
   let buf;
@@ -124,7 +124,7 @@ function decodeSessionFile(file) {
       const value = JSON.parse(trimmed);
       if (value && typeof value === 'object') events.push(value);
     } catch {
-      // 半行坏 JSON 跳过 —— 逐帧边界上可能有一行被截断。
+      // 跳过不完整的 JSON 行 —— 帧边界处可能存在被截断的一行。
     }
   }
   return {
@@ -134,7 +134,7 @@ function decodeSessionFile(file) {
   };
 }
 
-/** 把消息 content 数组里的 text 块拼成一段文本。 */
+/** 将消息 content 数组中的 text 块拼接为一段文本。 */
 function textOf(content) {
   if (!Array.isArray(content)) return '';
   return content
@@ -143,7 +143,7 @@ function textOf(content) {
     .join('');
 }
 
-/** 拼 reasoning 块（思考过程）。 */
+/** 拼接 reasoning 块（思考过程）。 */
 function reasoningOf(content) {
   if (!Array.isArray(content)) return '';
   return content
@@ -153,9 +153,9 @@ function reasoningOf(content) {
 }
 
 /**
- * 一份会话的「名片」：标题、目录、回合数等列表要用的信息。
+ * 会话的「名片」：标题、目录、回合数等列表所需的信息。
  *
- * @param {object[]} events 解出的事件流。
+ * @param {object[]} events 解析出的事件流。
  * @param {object} meta {file, mtime, size}
  */
 function summarizeSession(events, meta = {}) {
@@ -182,7 +182,7 @@ function summarizeSession(events, meta = {}) {
         break;
       case 'user/message': {
         const kind = event.data && event.data.source ? event.data.source.kind : undefined;
-        if (kind !== 'user') break; // 插件塞进来的系统噪音不算用户说的话
+        if (kind !== 'user') break; // 由插件写入的系统信息不计入用户输入
         userMessages += 1;
         if (!firstUserText) {
           firstUserText = textOf(event.data && event.data.content).replace(/\s+/g, ' ').slice(0, 80);
@@ -199,12 +199,12 @@ function summarizeSession(events, meta = {}) {
   const card = {
     id,
     title,
-    /** 标题缺失时的兜底：用户的第一句话。 */
+    /** 标题缺失时的后备值：用户的第一句话。 */
     fallbackTitle: firstUserText,
     cwd,
     preset,
     createdAt,
-    /** 会话里最后一个事件的时间（比目录 mtime 更贴近「最后说话时刻」）。 */
+    /** 会话中最后一个事件的时间（比目录 mtime 更接近「最后一次交互时刻」）。 */
     lastTime: lastTime || createdAt,
     turns,
     userMessages,
@@ -218,8 +218,8 @@ function summarizeSession(events, meta = {}) {
 /**
  * 列出历史会话（只读）。
  *
- * 先按目录修改时间从新到旧排，**只解码截断后的前 limit 个** ——
- * 解 zstd 是这套里最贵的一步，老会话排在后面就不值得为它花时间。
+ * 先按目录修改时间由新到旧排序，**仅解码截断后的前 limit 个** ——
+ * zstd 解压是本流程中开销最大的一步，排序靠后的旧会话不值得为其消耗时间。
  *
  * @param {string} root `$DSH_HOME/sessions`。
  * @param {object} [options]
@@ -252,7 +252,7 @@ function listSessions(root, { limit = DEFAULT_LIST_LIMIT } = {}) {
       try {
         st = fs.statSync(file);
       } catch {
-        continue; // 没有 session.v3.jsonl.zstd 的目录不是会话
+        continue; // 不含 session.v3.jsonl.zstd 的目录不是会话
       }
       found.push({ file, mtime: st.mtimeMs, size: st.size, dirName: entry.name });
     }
@@ -265,8 +265,8 @@ function listSessions(root, { limit = DEFAULT_LIST_LIMIT } = {}) {
     const card = summarizeSession(events, { file: item.file, mtime: item.mtime, size: item.size });
     if (!card.id) card.id = item.dirName;
     if (error) card.decodeError = error;
-    // 给列表的字段收干净：file 是绝对路径，客户端不需要（也知道），
-    // 留着只是多余信息面。这里去掉，只留 id 等名片字段。
+    // 精简返回给列表的字段：file 为绝对路径，客户端不需要该字段（客户端已掌握该路径），
+    // 保留只会扩大信息面。此处将其删除，仅保留 id 等名片字段。
     delete card.file;
     sessions.push(card);
   }
@@ -275,19 +275,19 @@ function listSessions(root, { limit = DEFAULT_LIST_LIMIT } = {}) {
 }
 
 /**
- * 按 id 取一段会话：名片 + 回放。
+ * 按 id 读取一段会话：名片 + 回放。
  *
- * 安全：id 只允许字母、数字、点、下划线、连字符 —— 它要拼进文件路径，
- * 这一条把路径穿越（`..`、分隔符）整个堵死。
+ * 安全性：id 仅允许字母、数字、点、下划线、连字符 —— 该值会拼入文件路径，
+ * 该限制可完全阻断路径穿越（`..`、路径分隔符）。
  *
- * 先按目录名找（最常见：目录名就是会话 id 或带 `session-` 前缀），
- * 找不到再按文件头里的 id 扫一遍兜底。
+ * 先按目录名查找（最常见的情形：目录名即会话 id 或带有 `session-` 前缀），
+ * 未找到时再按文件头中的 id 扫描一遍作为后备。
  *
  * @param {string} root `$DSH_HOME/sessions`。
  * @param {string} id 会话 id。
  * @param {object} [options] 透传给 {@link sessionTranscript}。
  * @returns {{card: object, entries: object[], truncated: boolean}}
- * @throws {Error} 找不到或 id 不合法。
+ * @throws {Error} 未找到或 id 不合法。
  */
 function getSession(root, id, options = {}) {
   const wanted = String(id || '');
@@ -324,7 +324,7 @@ function getSession(root, id, options = {}) {
     return { card, entries, truncated };
   };
   if (byDir) return pick(byDir);
-  // 兜底：目录名对不上，就按头部 id 找。
+  // 后备：目录名不匹配时，按文件头中的 id 查找。
   for (const file of candidates) {
     const { events } = decodeSessionFile(file);
     const head = events.find((event) => event.type === 'session');
@@ -334,16 +334,16 @@ function getSession(root, id, options = {}) {
 }
 
 /**
- * 重建一段会话的回放：用户说了什么、它答了什么、动过哪些工具。
+ * 重建一段会话的回放：用户输入、模型回复、涉及的工具调用。
  *
- * 顺序按事件 seq 走。工具卡在**收到结果**时落位（call 与 result 天然成对，
- * 只收到 call 没收到 result 的（中断）不渲染 —— 回放里一张没有结果的卡
- * 只会让用户困惑）。
+ * 顺序按事件 seq 执行。工具卡片在**收到结果**时生成（call 与 result 成对出现，
+ * 仅收到 call 而未收到 result 的情形（中断）不参与渲染 —— 回放中一张没有结果的
+ * 卡片会使用户无法判断该调用的结果）。
  *
  * @param {object[]} events
  * @param {object} [options]
- * @param {number} [options.maxEntries] 最多回放多少条（防止把几 MB 的转写塞给界面）。
- * @param {number} [options.maxChars] 单条文本最大长度，超了截断并注明。
+ * @param {number} [options.maxEntries] 最多回放多少条（避免将数 MB 的转写内容传给界面）。
+ * @param {number} [options.maxChars] 单条文本的最大长度，超出时截断并注明。
  * @returns {{entries: object[], truncated: boolean}}
  */
 function sessionTranscript(events, { maxEntries = 2000, maxChars = 50000 } = {}) {
@@ -392,7 +392,7 @@ function sessionTranscript(events, { maxEntries = 2000, maxChars = 50000 } = {})
             try {
               args = JSON.parse(args);
             } catch {
-              // arguments 不是合法 JSON 就原样给字符串，界面能显示就行
+              // arguments 不是合法 JSON 时原样保留字符串，界面可直接显示
             }
           }
           calls.set(data.callId, { name: data.name || 'tool', args });
@@ -404,7 +404,7 @@ function sessionTranscript(events, { maxEntries = 2000, maxChars = 50000 } = {})
           ? event.data.message.source.callId
           : undefined;
         const call = typeof callId === 'string' ? calls.get(callId) : undefined;
-        if (!call) break; // 没有对应 call 的结果不渲染
+        if (!call) break; // 没有对应 call 的结果不参与渲染
         const blocks = (event.data.message && event.data.message.content) || [];
         const output = clip(
           blocks

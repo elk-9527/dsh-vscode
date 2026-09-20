@@ -3,10 +3,10 @@
 /**
  * 编辑器上下文拼块（src/dsh/blocks.js）的纯函数测试。
  *
- * 这块逻辑的价值全在"发给模型的到底是什么" —— 拼错了不会报错，
- * 只会让模型看不到上下文、或者被围栏搞乱。所以要逐字断。
+ * 该逻辑的关键在于"发送给模型的实际内容" —— 拼接错误不会报错，
+ * 只会导致模型无法获得上下文，或被围栏破坏结构。因此需要逐字断言。
  *
- * 跑法：node test/blocks.js
+ * 运行方式：node test/blocks.js
  */
 
 const path = require('node:path');
@@ -64,7 +64,7 @@ section('2. 当前文件走 resource_link（让 DSH 自己读，不塞正文）'
   check('第一块是 resource_link', blocks[0].type === 'resource_link');
   check('name 用相对路径', blocks[0].name === 'src/panel/view.js');
   check('uri 原样带过去', blocks[0].uri === file.uri);
-  check('没有把文件内容塞进去（resource_link 里没有 text 字段）', blocks[0].text === undefined);
+  check('没有把文件内容写进去（resource_link 里没有 text 字段）', blocks[0].text === undefined);
   check('用户的话在最后', blocks[1].type === 'text' && blocks[1].text === '这个文件是干嘛的');
   check('绝不出现内核明确拒绝的 resource 类型', !JSON.stringify(blocks).includes('"resource"'));
 }
@@ -90,7 +90,7 @@ section('3. 选中的代码：正文直接给，另外附一条链接');
   check('还是以用户的话结尾', blocks[2].text === '这行是干嘛的');
 }
 
-// ── 4. 围栏要能扛住代码里本来就有反引号 ──────────────────
+// ── 4. 代码本身包含反引号时，围栏须加长 ──────────────────
 section('4. 代码里本来就有反引号时，围栏必须加长');
 {
   check('普通内容用三个反引号', fenceFor('const a = 1;') === '```');
@@ -108,12 +108,12 @@ section('4. 代码里本来就有反引号时，围栏必须加长');
   const text = blocks[0].text;
   const fence = fenceFor(tricky.text);
   check('用的是加长后的围栏', text.includes(fence), fence);
-  // 关键：围栏出现次数必须是偶数（开一次、闭一次），否则内容会被截断。
+  // 关键：围栏出现次数必须为偶数（开始一次、结束一次），否则内容会被截断。
   const count = text.split(fence).length - 1;
   check('围栏成对出现（内容没被提前闭合）', count === 2, `出现 ${count} 次`);
 }
 
-// ── 5. 语言名不合法时不写语言 ───────────────────────────
+// ── 5. 语言名不合法时不写入语言标记 ─────────────────────
 section('5. 语言名可疑时宁可不写');
 {
   for (const bad of ['', 'javascript\n```', 'x'.repeat(40), '中文语言', 'js;rm -rf']) {
@@ -137,14 +137,14 @@ section('6. 只有上下文、一个字都没打');
 {
   const sel = { kind: 'selection', name: 'a.js', uri: 'file:///a.js', text: 'x', language: 'js' };
   const blocks = buildPromptBlocks('', [sel]);
-  check('照样有内容块（不会发出空 prompt）', blocks.length === 3, JSON.stringify(blocks));
-  check('补了一句人话，不是一个空字符串', blocks[2].text.trim().length > 0, JSON.stringify(blocks[2].text));
+  check('同样有内容块（不会发出空 prompt）', blocks.length === 3, JSON.stringify(blocks));
+  check('补了一句自然语言，不是空字符串', blocks[2].text.trim().length > 0, JSON.stringify(blocks[2].text));
   const file = { kind: 'file', name: 'a.js', uri: 'file:///a.js' };
   check('只有文件链接时也一样', buildPromptBlocks('   ', [file]).length === 2);
 }
 
 // ── 7. 多个附件保持顺序 ─────────────────────────────────
-section('7. 带了好几个：顺序要稳定');
+section('7. 带了多个附件：顺序要稳定');
 {
   const items = [
     { kind: 'file', name: 'a.js', uri: 'file:///a.js' },
@@ -158,11 +158,11 @@ section('7. 带了好几个：顺序要稳定');
   check('用户的话永远在最后一块', blocks[blocks.length - 1].type === 'text' && blocks[blocks.length - 1].text === '一起看看');
 }
 
-// ── 8. 形状不对的附件不能把消息搞坏 ─────────────────────
-section('8. 形状不对的附件：跳过，不许把消息搞坏');
+// ── 8. 形状不合法的附件不得破坏消息 ─────────────────────
+section('8. 形状不对的附件：跳过，不得破坏消息结构');
 {
   const weird = [
-    { kind: 'file' }, // 没有 uri、没有 name：无从下手，跳过
+    { kind: 'file' }, // 没有 uri、没有 name：无法处理，跳过
     { kind: 'selection', text: '   ' }, // 只有空白：跳过
     'not an object',
     42,
@@ -172,8 +172,8 @@ section('8. 形状不对的附件：跳过，不许把消息搞坏');
   check('这些怪东西都被跳过了，只剩用户的话', blocks.length === 1, JSON.stringify(blocks));
   check('只剩的那块是用户的话', blocks[0].text === '还在吗');
 
-  // 但"有正文、只是不知道在哪"的选区要带上 —— 正文才是用户真正想给的东西，
-  // 位置只是锦上添花（写不出位置就写「未知位置」）。
+  // 但"包含正文、仅缺少位置"的选区需要保留 —— 正文是用户实际提供的内容，
+  // 位置属于附加信息（无法确定位置时记为「未知位置」）。
   const partial = buildPromptBlocks('看这个', [{ kind: 'selection', text: 'ok', language: 'js' }]);
   check('没有 uri 的选区仍然把正文带上', blocks.length === 1 && partial[0].text.includes('ok'), JSON.stringify(partial));
   check('位置写不出来时如实写「未知位置」', partial[0].text.includes('未知位置'), JSON.stringify(partial[0].text));

@@ -1,39 +1,39 @@
 'use strict';
 /*
- * 后台 DSH 内核的"谁在用它、什么时候该收掉"。
+ * 后台 DSH 内核的"使用方与回收时机"。
  *
- * 为什么要把这件事从面板视图里拿出来（2026-09-19）：
- * 原来 `extension.js` 给 VS Code 的 disposer 直接调 `view.dispose()`，
- * 而 `view.dispose()` 会 **killTree 掉后台内核**。于是"视图没了"就等于
- * "内核死了" —— 可视图太容易没了：折叠侧边栏、把面板拖到另一个位置、
- * Reset View Locations、Reload Window、另一个窗口关掉……每一次都变成
- * 「杀内核 → 重连 → 重挂上下文」。用户报的"聊两句就断"、
- * 以及窗口日志里"每个自启内核都活 35 秒"那种节奏，这是最像的成因之一。
+ * 将该项职责从面板视图中分离的原因（2026-09-19）：
+ * 原实现中 `extension.js` 提供给 VS Code 的 disposer 直接调用 `view.dispose()`，
+ * 而 `view.dispose()` 会 **killTree 终止后台内核**。因此"视图销毁"等同于
+ * "内核终止" —— 而视图的销毁条件很常见：折叠侧边栏、把面板拖到另一个位置、
+ * Reset View Locations、Reload Window、另一个窗口关闭……每一次都变成
+ * 「终止内核 → 重连 → 重新挂载上下文」。用户报告的"对话进行数次后即断开"、
+ * 以及窗口日志中"每个自启内核存活约 35 秒"这种规律，是最接近的成因之一。
  *
- * 现在的规矩：
+ * 现行规则：
  * - 内核属于**扩展**，不属于某个视图。视图只是它的一个使用者。
- * - 视图销毁 = 释放引用；**引用归零后还有一段宽限**（默认 10 分钟），
- *   这期间重新打开面板会**继续用同一个内核**（不用重启、不用 resume）。
- * - 只有三种情况真的收掉它：宽限到期、窗口关闭（扩展 deactivate）、
- *   用户显式执行「DSH：停掉后台内核」。
- * - 只收**本扩展自己拉起来的**那些（表里登记的），绝不碰桌面端那个内核。
+ * - 视图销毁 = 释放引用；**引用归零后仍保留一段宽限期**（默认 10 分钟），
+ *   该期间重新打开面板会**继续使用同一个内核**（不需要重启、不需要 resume）。
+ * - 仅三种情况实际回收内核：宽限期到期、窗口关闭（扩展 deactivate）、
+ *   用户显式执行「DSH：停止后台内核」。
+ * - 仅回收**本扩展启动的内核**（表中登记者），不操作桌面端的内核。
  */
 
-/** 一个内核从"没人用"到"被收掉"之间的默认宽限。 */
+/** 内核从"无使用方"到"被回收"之间的默认宽限期。 */
 const DEFAULT_IDLE_MS = 10 * 60 * 1000;
 
 class KernelManager {
   /**
    * @param {object} options
    * @param {(level: string, message: string) => void} [options.log]
-   * @param {Function} [options.spawn] 起进程的函数（默认真实现，测试可注入）
-   * @param {number} [options.idleMs] 没人用之后的宽限毫秒数；0 = 立刻收（测试用）
+   * @param {Function} [options.spawn] 启动进程的函数（默认为真实实现，测试可注入）
+   * @param {number} [options.idleMs] 无使用方之后的宽限期毫秒数；0 = 立即回收（测试用）
    * @param {Function} [options.setTimer] 计时器（测试可注入）
    * @param {Function} [options.clearTimer]
    */
   constructor({ log = () => {}, spawn, idleMs = DEFAULT_IDLE_MS, setTimer, clearTimer } = {}) {
     this.log = log;
-    // 延迟取，避免测试里循环 require。
+    // 延迟获取，避免测试中出现循环 require。
     this.spawnImpl = spawn || require('../door/locate.js').spawnBackgroundDsh;
     this.idleMs = idleMs;
     this.setTimer = setTimer || setTimeout;
@@ -47,15 +47,15 @@ class KernelManager {
   }
 
   /**
-   * 改"没人用之后还能活多久"（来自设置 dshPanel.kernelIdleMinutes）。
-   * 0 = 面板一关就收。改这个不影响已经登记着的内核，只影响下一轮 release。
+   * 修改"无使用方之后的存活时长"（来自配置项 dshPanel.kernelIdleMinutes）。
+   * 0 = 面板关闭时立即回收。修改该值不影响已登记的内核，只影响下一轮 release。
    */
   setIdleMs(ms) {
     if (Number.isFinite(ms) && ms >= 0) this.idleMs = ms;
     return this.idleMs;
   }
 
-  /** 登记项里的进程是不是还活着。 */
+  /** 登记项中的进程是否仍在运行。 */
   #alive(entry) {
     const child = entry && entry.background && entry.background.child;
     if (!child) return false;
@@ -63,33 +63,33 @@ class KernelManager {
   }
 
   /**
-   * 端口上那个"我们自己起的、还活着"的内核（没有就返回 undefined）。
+   * 查询端口上"由本扩展启动且仍在运行"的内核（不存在时返回 undefined）。
    *
-   * 这是**跨视图复用**的关键：面板重新打开时先问这一句，能复用就复用，
-   * 不要动不动又拉一个新的。
+   * 这是**跨视图复用**的关键：面板重新打开时先查询该项，能够复用时即复用，
+   * 不应频繁启动新的进程。
    */
   live(host, port) {
     const key = this.key(host, port);
     const entry = this.entries.get(key);
     if (!entry) return undefined;
     if (this.#alive(entry)) return entry;
-    // 死透了：摘掉，别让下一次复用一个尸体。
+    // 进程已终止：从表中移除，避免下一次复用到已终止的内核。
     this.entries.delete(key);
     if (entry.timer) this.clearTimer(entry.timer);
     return undefined;
   }
 
   /**
-   * 起一个新的并登记。参数与 `spawnBackgroundDsh` 一致，另加 host/port
-   * （host 用来登记身份，port 会原样传下去 —— 门要按它开，
+   * 启动一个新的内核并登记。参数与 `spawnBackgroundDsh` 一致，另加 host/port
+   * （host 用于登记标识，port 原样传递下去 —— 接入点按该端口监听，
    * 见 dsh-door/lib/port.js）。
    *
-   * @returns {object} 登记项；`entry.background` 就是原来的那个句柄。
+   * @returns {object} 登记项；`entry.background` 即原有的进程句柄。
    */
   spawn({ host, port, ...rest }) {
     const existing = this.live(host, port);
     if (existing) {
-      this.log('info', `端口 ${this.key(host, port)} 上已经有本扩展起的后台 DSH，直接用它`);
+      this.log('info', `端口 ${this.key(host, port)} 上已存在本扩展启动的后台 DSH，直接使用该进程`);
       return existing;
     }
     const key = this.key(host, port);
@@ -100,13 +100,13 @@ class KernelManager {
       consumers: new Set(),
       timer: null,
       background: undefined,
-      // 记着是哪条命令、哪个档起起来的：重开面板复用它时要在日志/对话流里说清。
+      // 记录使用的命令与配置集：重新打开面板复用该内核时需要在日志或对话流中说明。
       command: rest.command,
       profile: rest.profile,
     };
     entry.background = this.spawnImpl({ ...rest, port });
     this.entries.set(key, entry);
-    // 它自己死了（不是我们收的）→ 立刻从表里摘掉，免得下次复用到尸体。
+    // 进程自行终止（非本模块回收）→ 立即从表中移除，避免下一次复用到已终止的内核。
     if (entry.background && entry.background.child && entry.background.child.on) {
       entry.background.child.on('exit', () => {
         if (this.entries.get(key) === entry) {
@@ -119,8 +119,8 @@ class KernelManager {
   }
 
   /**
-   * 某个使用者（一个面板视图）开始用这个内核。
-   * 同一个使用者重复调用只算一次；会顺手取消"宽限到期"的计时。
+   * 某个使用者（一个面板视图）开始使用该内核。
+   * 同一个使用者重复调用只计一次；同时取消"宽限期到期"的计时器。
    */
   acquire(consumer, entry) {
     if (!entry) return entry;
@@ -128,60 +128,60 @@ class KernelManager {
     if (entry.timer) {
       this.clearTimer(entry.timer);
       entry.timer = null;
-      this.log('info', '面板又用上这个后台 DSH 了，原本要收它的计时取消');
+      this.log('info', '面板再次使用该后台 DSH，原定的回收计时取消');
     }
     return entry;
   }
 
   /**
-   * 某个使用者不再用它（视图销毁、面板关闭）。
-   * 引用归零 **不立刻杀** —— 按 idleMs 宽限，期间重开面板还能接着用。
+   * 某个使用者不再使用该内核（视图销毁、面板关闭）。
+   * 引用归零时**不立即终止** —— 按 idleMs 保留宽限期，该期间重新打开面板仍可继续使用。
    */
   release(consumer) {
     for (const [key, entry] of this.entries) {
       if (!entry.consumers.delete(consumer)) continue;
       if (entry.consumers.size > 0) continue;
       if (this.idleMs <= 0) {
-        this.stop(key, '没有面板用它了');
+        this.stop(key, '已无面板使用该内核');
         continue;
       }
       const minutes = Math.max(1, Math.round(this.idleMs / 60000));
-      this.log('info', `没有面板用这个后台 DSH 了，${minutes} 分钟后收掉（这期间重新打开面板会继续用它）`);
-      entry.timer = this.setTimer(() => this.stop(key, '闲置到期'), this.idleMs);
-      // 别让这个计时器把 Node 事件循环钉住（扩展宿主退出时不该被它拖住）。
+      this.log('info', `已无面板使用该后台 DSH，${minutes} 分钟后回收（该期间重新打开面板会继续使用该内核）`);
+      entry.timer = this.setTimer(() => this.stop(key, '宽限期到期'), this.idleMs);
+      // 不应使该计时器占用 Node 事件循环（扩展宿主退出时不应因其延迟）。
       if (entry.timer && typeof entry.timer.unref === 'function') entry.timer.unref();
     }
   }
 
-  /** 真的收掉一个（宽限到期 / 窗口关闭 / 用户点了停）。 */
+  /** 实际回收一个内核（宽限期到期 / 窗口关闭 / 用户执行停止命令）。 */
   stop(key, reason) {
     const entry = this.entries.get(key);
     if (!entry) return false;
     this.entries.delete(key);
     if (entry.timer) this.clearTimer(entry.timer);
     if (!this.#alive(entry)) {
-      // 已经自己退了：不用再杀，也别在日志里吓人。
-      this.log('info', `后台 DSH（${key}）已经不在了（${reason}）`);
+      // 已自行退出：不需要再次终止，日志中也不应输出警示性内容。
+      this.log('info', `后台 DSH（${key}）已不存在（${reason}）`);
       return true;
     }
-    this.log('info', `停掉后台 DSH（${key}，${reason}）`);
+    this.log('info', `停止后台 DSH（${key}，${reason}）`);
     entry.background.dispose();
     return true;
   }
 
-  /** 窗口关了：把本扩展起过的全收掉（不留孤儿）。 */
+  /** 窗口关闭：回收本扩展启动的全部内核（不遗留孤儿进程）。 */
   disposeAll(reason = '窗口关闭') {
     const keys = [...this.entries.keys()];
     for (const key of keys) this.stop(key, reason);
     return keys.length;
   }
 
-  /** 当前登记着几个（测试/诊断用）。 */
+  /** 当前登记的内核数量（测试或诊断用）。 */
   size() {
     return this.entries.size;
   }
 
-  /** 那个内核的 pid（诊断用）。 */
+  /** 该内核的 pid（诊断用）。 */
   pidOf(host, port) {
     const entry = this.live(host, port);
     const child = entry && entry.background && entry.background.child;
@@ -190,18 +190,18 @@ class KernelManager {
 }
 
 /*
- * 扩展宿主里只需要一个：内核是进程级资源，跟"哪个视图在用它"无关。
- * 日志用第一个进来的那个（同一个扩展只有一个输出通道，路由到哪都一样）。
+ * 扩展宿主中只需要一个实例：内核是进程级资源，与"哪个视图在使用它"无关。
+ * 日志使用最先传入的那个（同一个扩展只有一个输出通道，路由目标没有区别）。
  */
 let singleton = null;
 
-/** 拿到（或第一次创建）全局的那个 manager。 */
+/** 获取（或首次创建）全局的 manager 实例。 */
 function kernelManager(log) {
   if (!singleton) singleton = new KernelManager({ log });
   return singleton;
 }
 
-/** 测试用：换个干净的 manager。 */
+/** 测试用：替换为新的 manager 实例。 */
 function resetKernelManager(options) {
   if (singleton) singleton.disposeAll('测试重置');
   singleton = new KernelManager(options);

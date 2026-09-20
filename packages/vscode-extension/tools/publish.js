@@ -1,30 +1,30 @@
 #!/usr/bin/env node
 /*
- * 把扩展发到 VS Code 市场（或先打一个市场包看看里面有什么）。
+ * 将扩展发布到 VS Code 市场（或先构建市场包并查看其中的内容）。
  *
- * 为什么不直接在 package.json 里写 `vsce publish`：这个仓库有两个坑，
- * 一脚踩下去都是"看起来发了、其实是错的"。
+ * 不在 package.json 中直接写入 `vsce publish` 的原因：本仓库存在两处隐患，
+ * 触发后均表现为"看似发布成功、实际结果错误"。
  *
- *   1. **publisher 和 repository 里还留着占位符**（`TODO-your-publisher-id`、
- *      `TODO-owner/TODO-repo`）。带着占位符发布，轻则 403，重则发到一个不是你的
- *      publisher 名下、或者市场页面上的链接全指向别人的仓库。所以这里先自检，
- *      **不给 `--force` 就不发**。
- *   2. 这个扩展一直是自制的 tools/build-vsix.js 在打包（白名单：src/media/README/
- *      package.json）。市场的包要用官方 `vsce`，黑名单在 .vscodeignore 里。两条路
- *      必须打得进同一批文件，否则"本地装的是对的、市场用户装的是缺的"。
- *      所以这里打完包会**把包里的文件列出来**，让你一眼比对。
+ *   1. **publisher 与 repository 字段中仍保留占位符**（`TODO-your-publisher-id`、
+ *      `TODO-owner/TODO-repo`）。携带占位符发布，轻则返回 403，重则发布到他人的
+ *      publisher 名下、或者市场页面上的链接全部指向他人仓库。因此此处先执行自检，
+ *      **未提供 `--force` 时不执行发布**。
+ *   2. 本扩展一直由自制的 tools/build-vsix.js 打包（白名单：src/media/README/
+ *      package.json）。市场包使用官方 `vsce`，黑名单位于 .vscodeignore 中。两条
+ *      路径必须包含同一批文件，否则会出现"本地安装的版本正确、市场用户安装的版本
+ *      缺少文件"的情况。因此此处打包后会**把包内的文件列出来**，供直接比对。
  *
- * 凭据：绝不读取、绝不打印。`vsce` 自己认环境变量 `VSCE_PAT`（或 `vsce login`）。
- * 这个脚本只负责"它不在就明确告诉你"。
+ * 凭据：不读取、不打印。`vsce` 自身识别环境变量 `VSCE_PAT`（或 `vsce login`）。
+ * 本脚本仅负责在凭据缺失时明确提示。
  *
  * 用法：
- *   node tools/publish.js                  # 彩排：自检 + 打市场包 + 列出包内文件 + 与自产打包比对
- *   node tools/publish.js --yes            # 真发布（需要 VSCE_PAT；版本号用 package.json 里那个）
- *   node tools/publish.js --yes --patch    # 先 +0.0.1 再发（也支持 --minor / --major / --version 1.2.3）
+ *   node tools/publish.js                  # 试运行：自检 + 打市场包 + 列出包内文件 + 与自产打包比对
+ *   node tools/publish.js --yes            # 正式发布（需要 VSCE_PAT；版本号取自 package.json）
+ *   node tools/publish.js --yes --patch    # 先递增 +0.0.1 再发布（同时支持 --minor / --major / --version 1.2.3）
  *
- * 每次更新都要**换一个新版本号**：市场不接受重发同一个版本号（连只改 README 也算一次更新）。
- * 带版本参数的写法会走 `npm version` —— 它会自己提交一笔"版本号"提交并打 tag，
- * 所以**工作区必须是干净的**（这个脚本会先替你检查，脏了就直接告诉你，不让它发到一半才炸）。
+ * 每次更新均须**使用新的版本号**：市场不接受重复发布同一个版本号（仅修改 README 亦计为一次更新）。
+ * 携带版本参数的调用会经由 `npm version` —— 该命令会自行创建一笔"版本号"提交并打 tag，
+ * 因此**工作区必须保持干净**（本脚本会先行检查，若工作区有未提交改动则直接提示，避免发布过程中断）。
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -33,7 +33,7 @@ const { spawnSync } = require('node:child_process');
 const ROOT = path.join(__dirname, '..');
 const args = process.argv.slice(2);
 const go = args.includes('--yes') || args.includes('--force');
-/** 版本参数：patch / minor / major / x.y.z；不写就按 package.json 里现有的版本号发。 */
+/** 版本参数：patch / minor / major / x.y.z；未提供时按 package.json 中的现有版本号发布。 */
 const bumpArg = (() => {
   for (const flag of ['patch', 'minor', 'major']) if (args.includes(`--${flag}`)) return flag;
   const at = args.indexOf('--version');
@@ -63,7 +63,7 @@ check(
 check(fs.existsSync(path.join(ROOT, 'LICENSE')), '有 LICENSE 文件', 'LICENSE');
 check(fs.existsSync(path.join(ROOT, 'CHANGELOG.md')), '有 CHANGELOG.md', 'CHANGELOG.md');
 check(fs.existsSync(path.join(ROOT, '.vscodeignore')), '有 .vscodeignore（市场包不带测试/截图）', '.vscodeignore');
-// README 断链检查：市场页面会把这些相对路径改写成仓库 raw 地址，写错了就是一片破图。
+// README 断链检查：市场页面会将这些相对路径改写为仓库 raw 地址，路径错误时图片无法显示。
 const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
 const images = [...readme.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)].map((m) => m[1]);
 const missing = images.filter((src) => !/^https?:/.test(src) && !fs.existsSync(path.join(ROOT, src)));
@@ -90,7 +90,7 @@ function vsce(extra) {
   return r.status === 0;
 }
 
-/** `vsce ls` 打出来的文件清单（市场包最终会带哪些文件）。 */
+/** `vsce ls` 输出的文件清单（市场包最终包含哪些文件）。 */
 function vsceFiles() {
   const r = spawnSync('npx', ['--yes', '@vscode/vsce', 'ls', '--no-dependencies'], {
     cwd: ROOT,
@@ -101,15 +101,15 @@ function vsceFiles() {
   return r.stdout
     .split(/\r?\n/)
     .map((line) => line.trim())
-    // vsce 只印文件路径（一行一个），但偶尔混进 "DONE Packaged: ..." 这类状态行 ——
-    // 带空格的、以及明显是状态行的都排掉。注意**不能**按"有没有扩展名"过滤：
-    // LICENSE 就没有扩展名，早期版本就是这么把它误判成漂移的。
+    // vsce 仅输出文件路径（一行一个），但偶尔混入 "DONE Packaged: ..." 这类状态行 ——
+    // 含空格的条目、以及明显是状态行的条目一律排除。注意**不可**按"是否包含扩展名"过滤：
+    // LICENSE 没有扩展名，早期版本正是因此将其误判为漂移。
     .filter((line) => line && !/\s/.test(line) && !/^(DONE|WARNING|ERROR|Packaged)/i.test(line))
     .map((line) => line.split('\\').join('/'))
     .sort();
 }
 
-/** 自产打包（build-vsix.js）与市场打包（vsce）必须是同一批文件，否则本地装的是对的、用户装的是缺的。 */
+/** 自产打包（build-vsix.js）与市场打包（vsce）必须包含同一批文件，否则会出现本地安装版本正确、用户安装版本缺少文件的情况。 */
 function compareWithShipList() {
   const { shipFiles } = require('./ship-list');
   const mine = shipFiles(ROOT);
@@ -127,7 +127,7 @@ function compareWithShipList() {
   return true;
 }
 
-// 彩排：打一个包，并把里面的文件列出来（跟 build-vsix.js 的结果比对）。
+// 试运行：构建一个包，并把其中的文件列出来（与 build-vsix.js 的结果比对）。
 if (!go) {
   console.log('\n  ── 彩排：打市场包（不发布） ─────────────────────────────');
   const out = path.join(ROOT, 'build', `${pkg.name}-${pkg.version}.vsix`);
@@ -150,8 +150,8 @@ if (!process.env.VSCE_PAT) {
   process.exit(1);
 }
 
-// 带版本参数时会走 `npm version`：它会自己提交一笔版本提交 + 打 tag。工作区脏的话
-// 那一步会失败，但那时候 vsce 可能已经把包打好了 —— 与其发到一半炸，不如现在就说清。
+// 携带版本参数时会经由 `npm version`：该命令会自行创建一笔版本提交并打 tag。工作区存在
+// 未提交改动时该步骤会失败，而此时 vsce 可能已完成打包 —— 与其在发布中途失败，应当现在说明。
 if (bumpArg) {
   const dirty = spawnSync('git', ['status', '--porcelain'], { cwd: ROOT, encoding: 'utf8' });
   if (dirty.status === 0 && dirty.stdout.trim()) {
@@ -166,9 +166,9 @@ if (bumpArg) {
 
 console.log('\n  ── 真发布 ───────────────────────────────────────────────');
 if (!vsce(['publish', ...(bumpArg ? [bumpArg] : []), '--no-dependencies'])) process.exit(1);
-// 带版本参数时 package.json 已经被 npm version 改过了，重新读一次才拿得到对的版本号。
+// 携带版本参数时 package.json 已被 npm version 修改，重新读取一次才能获得正确的版本号。
 const nowVersion = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
 console.log('\n  ✅ 发出去了。市场页面通常几分钟内可见：https://marketplace.visualstudio.com/items?itemName=' + `${pkg.publisher}.${pkg.name}`);
 console.log('     （VS Code 里的用户会在下次检查更新时自动升到这一版。）');
-console.log(`     别忘了本地那份也跟上：node tools/build-vsix.js 然后 code --install-extension build\\${pkg.name}-${nowVersion}.vsix`);
+console.log(`     本地那一份也需要同步更新：node tools/build-vsix.js 然后 code --install-extension build\\${pkg.name}-${nowVersion}.vsix`);
 console.log('     还有：git push（版本提交与 tag 是 vsce 帮你打的），以及刷新备份。');

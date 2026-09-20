@@ -1,11 +1,11 @@
 'use strict';
-// 47821 上那个门到底是谁开的？桌面端自己的内核，还是测试留下的孤儿？
+// 判定 47821 端口上的 ACP 接入点插件（`dsh-acp-door`）由谁启动：桌面端自身的内核，或测试遗留的孤儿进程。
 //
-// 为什么需要它：面板有两条路 —— 「接入正在跑的门」和「自己拉一个内核」。
-// 排查"为什么没连上""是不是多起了一个内核"时，先看这个端口归谁。
+// 设置该工具的原因：面板有两种连接方式 —— 「接入已在运行的该插件」与「自行启动一个内核」。
+// 排查"未连接成功""是否多启动了一个内核"时，优先确认该端口的归属。
 //
 // 用法：node tools/who-owns-door.cjs
-// 只读：只查进程和端口，不杀任何东西。
+// 只读：仅查询进程与端口，不终止任何进程。
 const { execFileSync } = require('node:child_process');
 
 const PORT = Number(process.env.DSH_PANEL_PORT || 47821);
@@ -23,8 +23,8 @@ const listeners = ps(
   .filter(Boolean);
 
 if (listeners.length === 0) {
-  console.log(`${PORT} 上没有人在监听（门没开）。`);
-  console.log('面板这时会走"兜底"：自己拉起一个后台内核。');
+  console.log(`${PORT} 上没有进程在监听（该插件未启动）。`);
+  console.log('面板这时会走后备路径：自行启动一个后台内核。');
   process.exit(0);
 }
 
@@ -33,7 +33,7 @@ for (const pid of listeners) {
     `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; ` +
       `"PID=$($p.ProcessId)"; "NAME=$($p.Name)"; "CMD=$($p.CommandLine)"; "PPID=$($p.ParentProcessId)"`,
   );
-  // 往上追四层祖先，看是不是 DSH Desktop.exe 拉起来的。
+  // 向上追溯四层祖先进程，判断是否由 DSH Desktop.exe 启动。
   const ppid = (/PPID=(\d+)/.exec(info) || [])[1];
   let chain = [];
   let cur = ppid;

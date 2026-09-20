@@ -1,15 +1,15 @@
 'use strict';
-// 面板那条「自己读盘」的路，在真机上到底看到了什么？
+// 查看面板自行读取磁盘的路径在实际机器上的读取结果。
 //
-// 为什么需要它：历史会话默认由面板自己读 $DSH_HOME/sessions（门太旧时也走这条）。
-// 用户说"历史是空的"或"少了"时，用它区分三种情况：
-//   ① 磁盘上就没有 ② 有但解码失败 ③ 有、能读，只是超过了列表上限（DEFAULT_LIST_LIMIT）
+// 设置该工具的原因：历史会话默认由面板自行读取 $DSH_HOME/sessions（ACP 接入点插件（`dsh-acp-door`）版本过低时亦走该路径）。
+// 用户报告"历史为空"或"历史条数减少"时，用其区分三种情况：
+//   ① 磁盘上不存在 ② 存在但解码失败 ③ 存在且可读，仅超出列表上限（DEFAULT_LIST_LIMIT）
 //
 // 用法：node tools/check-local-history.cjs
-// 只读：只读会话文件，不写、不删。
+// 只读：仅读取会话文件，不写入、不删除。
 const fs = require('node:fs');
 const path = require('node:path');
-// 面板真正在用的那份实现（不是在测试里重写一遍）—— 这样看到的才是面板看到的。
+// 面板实际使用的实现（而非在测试中重新实现一遍）—— 以此确保输出与面板所见一致。
 const s = require('../src/dsh/sessions.js');
 
 const root = s.resolveSessionsRoot();
@@ -44,7 +44,7 @@ for (const c of out.sessions.slice(0, 5)) {
   );
 }
 
-// 抽一段探一下回放重建（这步最容易在坏帧上炸）。
+// 抽取一段验证回放重建（该步骤最容易在损坏的帧上出错）。
 const first = out.sessions[0];
 if (first) {
   const one = s.getSession(root, first.id);

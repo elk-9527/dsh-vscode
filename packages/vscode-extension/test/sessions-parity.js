@@ -1,18 +1,19 @@
 'use strict';
 
 /**
- * 两份「历史会话读取」实现的**一致性测试**。
+ * 两份「历史会话读取」实现的一致性测试。
  *
- * 为什么需要它：这份读取逻辑现在有两份实现 —— 门的 `packages/dsh-door/lib/sessions.js`
- * （ESM，给门的旁路方法用）和面板的 `packages/vscode-extension/src/dsh/sessions.js`
- * （CommonJS，给「门太旧 / 门在别的机器上」时自己读盘用）。扩展必须零依赖、
- * 只能是 CJS，没法直接 require 门那份 ESM，所以只能各留一份。
+ * 设立该测试的原因：该读取逻辑存在两份实现 —— ACP 接入点插件（dsh-acp-door）的
+ * `packages/dsh-door/lib/sessions.js`（ESM，供该插件的旁路方法使用）和面板的
+ * `packages/vscode-extension/src/dsh/sessions.js`（CommonJS，供「插件版本过低 /
+ * 插件位于其他机器上」时自行读取磁盘使用）。扩展必须零依赖、只能使用 CJS，
+ * 无法直接 require 该插件的 ESM 版本，因此只能各保留一份。
  *
- * 两份各改各的，就是两个会慢慢跑偏的真相 —— 所以这里把**同一批会话文件**
- * 喂给两份实现，逐项比对输出必须完全一致。谁改了一边忘了另一边，这条先炸。
+ * 两份实现分别修改会导致行为逐渐偏离 —— 因此此处把同一批会话文件
+ * 输入两份实现，逐项比对输出必须完全一致。仅修改其中一边时，该断言首先失败。
  *
- * 跑法：node test/sessions-parity.js
- * （当前 Node 没有 zstd 时退出码 2 = 环境不满足，不算失败）
+ * 运行方式：node test/sessions-parity.js
+ * （当前 Node 缺少 zstd 支持时退出码 2 = 环境不满足，不计为失败）
  */
 
 const fs = require('node:fs');
@@ -46,10 +47,10 @@ function equal(label, actual, expected) {
   check(label, same, same ? undefined : `实际 ${JSON.stringify(actual)}，期望 ${JSON.stringify(expected)}`);
 }
 
-/** 两份实现（下面统一用这个对象里的函数）。 */
+/** 两份实现（下文统一使用该对象中的函数）。 */
 let DOOR;
 
-/** 造一个多帧会话文件：每批事件压成一帧再拼接，模拟内核的写法。 */
+/** 生成一个多帧会话文件：把每批事件压缩为一帧再拼接，模拟内核的写入方式。 */
 function writeSession(root, group, dirName, batches) {
   const dir = path.join(root, group, dirName);
   fs.mkdirSync(dir, { recursive: true });
@@ -63,7 +64,7 @@ function writeSession(root, group, dirName, batches) {
 
 const base = 1760000000000;
 
-/** 一段内容完整的假会话：标题、插件噪音、思考、工具调用+结果、坏帧都有。 */
+/** 一段内容完整的假会话：包含标题、插件噪音、思考内容、工具调用与结果、坏帧。 */
 function sampleBatches(id) {
   return [
     [
@@ -119,7 +120,7 @@ function sampleBatches(id) {
   ];
 }
 
-/** 只有一次工具调用、没有结果（中断），回放里不该出现那张卡。 */
+/** 仅有一次工具调用、没有结果（中断），回放中不应出现该卡片。 */
 function danglingToolBatches(id) {
   return [
     [
@@ -173,9 +174,9 @@ async function main() {
     section('2. 造会话文件；两份解码结果必须逐字节一致');
     writeSession(root, 'D--demo 目录', 'session-aaa111', sampleBatches('session-aaa111'));
     writeSession(root, 'D--demo 目录', 'session-bbb222', danglingToolBatches('session-bbb222'));
-    // 目录名和头部 id 对不上：走「按头部 id 兜底找」那条路。
+    // 目录名与头部 id 不一致：走「按头部 id 后备查找」路径。
     writeSession(root, 'other', 'weird-dir-name', sampleBatches('session-ccc333'));
-    // 一个不是会话的目录（没有 session.v3.jsonl.zstd），必须被跳过。
+    // 一个非会话目录（不含 session.v3.jsonl.zstd），必须被跳过。
     fs.mkdirSync(path.join(root, 'D--demo 目录', 'not-a-session'), { recursive: true });
 
     const fileA = path.join(root, 'D--demo 目录', 'session-aaa111', 'session.v3.jsonl.zstd');
@@ -231,14 +232,14 @@ async function main() {
     section('5. getSession（含 id 合法性）');
     equal('按目录名取：一致', EXT.getSession(root, 'session-aaa111'), DOOR.getSession(root, 'session-aaa111'));
     equal('按目录名取（不带前缀）：一致', EXT.getSession(root, 'aaa111'), DOOR.getSession(root, 'aaa111'));
-    equal('按头部 id 兜底取：一致', EXT.getSession(root, 'session-ccc333'), DOOR.getSession(root, 'session-ccc333'));
+    equal('按头部 id 后备取：一致', EXT.getSession(root, 'session-ccc333'), DOOR.getSession(root, 'session-ccc333'));
     for (const bad of ['', '../../etc/passwd', 'a/b', 'a\\b', 'x'.repeat(200), 'no-such-session-zzz']) {
       let extError = '';
       let doorError = '';
       try { EXT.getSession(root, bad); } catch (error) { extError = error.message; }
       try { DOOR.getSession(root, bad); } catch (error) { doorError = error.message; }
       check(`非法/不存在的 id 都抛错，且说法一致：${JSON.stringify(bad.slice(0, 20))}`,
-        Boolean(extError) && extError === doorError, `扩展「${extError}」门「${doorError}」`);
+        Boolean(extError) && extError === doorError, `扩展「${extError}」、该插件「${doorError}」`);
     }
 
     section('6. 坏帧不致命（尾部半截帧）');
@@ -246,7 +247,7 @@ async function main() {
     try {
       const full = Buffer.concat(sampleBatches('session-trunc1').map((b) =>
         zlib.zstdCompressSync(b.map((e) => JSON.stringify(e)).join('\n') + '\n')));
-      // 尾巴上再接半帧（内核写到一半被杀的样子）。
+      // 尾部再追加半帧（模拟内核写入过程中被终止）。
       const half = zlib.zstdCompressSync('{"type":"turn/start"}\n').subarray(0, 12);
       const dir = path.join(truncatedRoot, 'g', 'session-trunc1');
       fs.mkdirSync(dir, { recursive: true });
@@ -255,7 +256,7 @@ async function main() {
       const b = DOOR.decodeSessionFile(path.join(dir, 'session.v3.jsonl.zstd'));
       equal('坏帧两边的处理一致（帧数）', a.frames, b.frames);
       equal('坏帧两边的处理一致（error 文案）', a.error, b.error);
-      equal('坏帧前面的内容照样解出来', a.events.length, b.events.length);
+      equal('坏帧之前的内容同样可解出', a.events.length, b.events.length);
       check('确实有一帧是坏的', Boolean(a.error) || a.frames > 3, `error=${a.error} frames=${a.frames}`);
     } finally {
       fs.rmSync(truncatedRoot, { recursive: true, force: true });
@@ -274,6 +275,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(`测试自己炸了：${error && error.stack ? error.stack : error}`);
+  console.error(`测试自身发生异常：${error && error.stack ? error.stack : error}`);
   process.exit(1);
 });

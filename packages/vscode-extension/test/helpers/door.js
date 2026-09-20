@@ -1,11 +1,11 @@
 'use strict';
 
 /**
- * 测试用的「门」保障：没开就自己拉起一个后台 DSH，开着的就直接用。
+ * 测试用的 ACP 接入点插件（dsh-acp-door）保障：未运行时自行启动后台 DSH，已运行时直接使用。
  *
- * 为什么需要：面板层测试和端到端测试都要有一个 DSH 在 47821 上开门，
- * 以前得先手动起内核、跑完可能还留着。现在测试自己负责起、也负责收，
- * 于是「一条命令从头跑到尾」成立，也不会留下孤儿进程。
+ * 设立该模块的原因：面板层测试与端到端测试都要求 47821 上存在一个已开放接入点的 DSH，
+ * 此前需要手动启动内核，运行结束后可能仍有残留。现在由测试自行启动并负责回收，
+ * 因此「一条命令完成全部流程」成立，也不会留下孤儿进程。
  */
 
 const fs = require('node:fs');
@@ -17,12 +17,12 @@ const HOST = process.env.DSH_PANEL_HOST || '127.0.0.1';
 const PORT = Number(process.env.DSH_PANEL_PORT || 47821);
 const PROFILE = process.env.DSH_PANEL_PROFILE || 'dshdoor';
 
-/** 门插件在仓库里的源码目录。 */
+/** 该插件在仓库中的源码目录。 */
 const DOOR_SRC = path.resolve(__dirname, '..', '..', '..', 'dsh-door');
-/** 测试档的名字。**只允许改这一个档** —— 见 syncDoor 的说明。 */
+/** 测试档的名称。仅允许修改这一个档 —— 见 syncDoor 的说明。 */
 const TEST_PROFILE = 'dshdoor';
 
-/** 装进某个档之后它在哪。 */
+/** 安装到某个档之后的所在路径。 */
 function installedDoorPath(profile) {
   return path.join(
     process.env.DSH_HOME || path.join(require('node:os').homedir(), '.dsh'),
@@ -33,14 +33,14 @@ function installedDoorPath(profile) {
   );
 }
 
-/** 测试档里那份门在哪（下面这些检查都对着它）。 */
+/** 测试档中该插件的所在路径（下文各项检查均针对该路径）。 */
 const DOOR_INSTALLED = installedDoorPath(TEST_PROFILE);
 
 function doorIsUp(host = HOST, port = PORT) {
   return probePort(host, port, 800);
 }
 
-/** 列出这个包该有的文件（跟着 package.json 的 files 走，别自己另立一份）。 */
+/** 列出该包应包含的文件（依据 package.json 的 files 字段，不另行维护一份）。 */
 function doorFiles() {
   const pkg = JSON.parse(fs.readFileSync(path.join(DOOR_SRC, 'package.json'), 'utf8'));
   const entries = Array.isArray(pkg.files) ? pkg.files : ['lib', 'package.json'];
@@ -61,11 +61,11 @@ function doorFiles() {
 }
 
 /**
- * 装的那份门跟源码一致吗？不一致就列出哪些文件不一样。
+ * 核对已安装的该插件是否与源码一致；不一致时列出不同的文件。
  *
- * 为什么非要查这个：`file:` 依赖是**拷贝**（不是符号链接），而且 pnpm 会命中
- * 缓存 —— 源码改了它可能压根不重装（实测：改了门，测试还在测旧代码，全绿，
- * 却什么都没验到）。这种「静默测错东西」是测试里最坏的一种。
+ * 需要检查该内容的原因：`file:` 依赖是拷贝（而非符号链接），且 pnpm 会命中
+ * 缓存 —— 修改源码后可能不会重新安装（实测：修改了该插件，测试仍在测试旧代码，
+ * 全部通过，却未验证任何内容）。这种静默测试错误对象的情况是测试中最严重的一类。
  *
  * @returns {string[]} 不一致的文件名（空数组 = 一致）。
  */
@@ -86,35 +86,35 @@ function doorDrift() {
 }
 
 /**
- * 确保**测试档**里装的那份门跟源码一致（不一致就重新装一次）。
+ * 确保测试档中安装的该插件与源码一致（不一致时重新安装一次）。
  *
- * 走 remove + add 而不是直接拷：那是用户真会走的安装路径，装出来的东西才
- * 跟生产一致。之所以要先 remove，是因为 pnpm 的缓存/硬链接会让「add」变成
- * 空操作（实测：内容变了它还报 added 0）。
+ * 采用 remove + add 而不直接拷贝：这是用户实际会执行的安装路径，安装结果才
+ * 与生产环境一致。需要先执行 remove 的原因是 pnpm 的缓存与硬链接会使「add」变为
+ * 空操作（实测：内容已变化，仍报告 added 0）。
  *
- * 实测还发现**光靠 remove + add 也不够**：改过 `package.json` 的版本号之后，
- * remove + add 装回来的可能还是旧版本（pnpm 复用缓存）。所以最后有一道兜底：
- * 真要还是不一致，就按文件直接同步过去。
+ * 实测还发现仅依靠 remove + add 并不充分：修改 `package.json` 的版本号之后，
+ * remove + add 装回的仍可能是旧版本（pnpm 复用缓存）。因此最后设置一道后备措施：
+ * 若仍不一致，则按文件直接同步。
  *
- * ⚠️ 这个函数**只动测试档**（dshdoor），别的档一律不碰。
- * 教训（真踩过）：早先它拿 `profile` 参数去装、却对着写死的 dshdoor 路径做比对，
- * 于是 `DSH_PANEL_PROFILE=desktop` 跑测试时，它把**用户生产档**的依赖从
- * `file:…tgz` 换成了源码目录 —— 换了形态、还比不出结果。现在：
- *   - 目标档不是测试档 → 只**检查**、只**报告**，不修改，并明确说清该怎么装。
+ * ⚠️ 该函数仅操作测试档（dshdoor），其他档一律不修改。
+ * 经验（实际出现）：早期实现使用 `profile` 参数安装，却按写死的 dshdoor 路径比对，
+ * 因此在以 `DSH_PANEL_PROFILE=desktop` 运行测试时，把用户生产档的依赖从
+ * `file:…tgz` 改为源码目录 —— 改变了形态，且无法比对结果。当前行为：
+ *   - 目标档不是测试档 → 只检查、只报告，不修改，并明确说明应如何安装。
  *
  * @returns {{synced: boolean, drift: string[], copied: string[], skipped?: boolean}}
  */
 function syncDoor({ log = () => {}, command = process.env.DSH_PANEL_DSH || 'dsh' } = {}) {
   const drift = doorDrift();
   if (drift.length === 0) {
-    log('info', '门插件跟源码一致，不用重装');
+    log('info', '该插件与源码一致，无需重新安装');
     return { synced: false, drift, copied: [] };
   }
-  log('info', `门插件跟源码不一致（${drift.join('、')}），重新装一次`);
+  log('info', `该插件与源码不一致（${drift.join('、')}），重新安装一次`);
   try {
     runDshSync({ command, args: ['plugin', '--profile', TEST_PROFILE, 'remove', 'dsh-acp-door'] });
   } catch {
-    // 本来就没装过 —— 无所谓，接着 add。
+    // 此前未安装 —— 不影响后续，继续执行 add。
   }
   try {
     runDshSync({
@@ -122,16 +122,16 @@ function syncDoor({ log = () => {}, command = process.env.DSH_PANEL_DSH || 'dsh'
       args: ['plugin', '--profile', TEST_PROFILE, 'add', `file:${DOOR_SRC.replace(/\\/g, '/')}`],
     });
   } catch (error) {
-    // pnpm 可能被自己的安全策略拦住（实测：换依赖超过确认阈值时报
-    // SAFE_DELETE_BULK_CONFIRM_REQUIRED，非交互环境下没有「确认」这一步）。
-    // 依赖本来就在档里装着（版本没变），按文件同步 lib 就够了 —— 往下走兜底。
+    // pnpm 可能被自身安全策略阻止（实测：变更依赖超过确认阈值时报告
+    // SAFE_DELETE_BULK_CONFIRM_REQUIRED，非交互环境下不存在「确认」步骤）。
+    // 依赖已安装在档中（版本未变），按文件同步 lib 即可 —— 继续执行后备流程。
     log('info', `pnpm 装不上（${String(error && error.message ? error.message : error).split('\n')[0].slice(0, 120)}），按文件直接同步`);
   }
 
   let left = doorDrift();
   if (left.length === 0) return { synced: true, drift, copied: [] };
 
-  // 兜底：pnpm 缓存不肯换（实测改版本号之后就是这样），直接按文件同步。
+  // 后备：pnpm 缓存不更新（实测修改版本号之后即为此情况），直接按文件同步。
   log('info', `pnpm 装回来的还是旧的（${left.join('、')}），按文件直接同步过去`);
   const copied = [];
   for (const rel of doorFiles()) {
@@ -145,16 +145,16 @@ function syncDoor({ log = () => {}, command = process.env.DSH_PANEL_DSH || 'dsh'
   }
   left = doorDrift();
   if (left.length > 0) {
-    throw new Error(`门同步之后还是不一致：${left.join('、')}（源码 ${DOOR_SRC}，装的 ${DOOR_INSTALLED}）`);
+    throw new Error(`该插件同步之后还是不一致：${left.join('、')}（源码 ${DOOR_SRC}，装的 ${DOOR_INSTALLED}）`);
   }
   return { synced: true, drift, copied };
 }
 
 /**
- * 检查某个档里装的门跟源码一致吗，**只读**。
+ * 检查某个档中安装的该插件是否与源码一致，只读操作。
  *
- * 给「换档跑生产路径验证」用的：那种时候绝不能顺手改用户的档，
- * 只该如实报告「你这个档装的门是哪个版本、跟当前源码一不一样」。
+ * 供「切换档以验证生产路径」使用：此时不得修改用户的档，
+ * 只需如实报告「该档安装的插件版本以及是否与当前源码一致」。
  *
  * @param {string} profile
  * @returns {{installed: boolean, version?: string, drift: string[], path: string}}
@@ -181,34 +181,34 @@ function inspectDoor(profile = PROFILE) {
 }
 
 /**
- * 确保门是开的。
+ * 确保该插件已开放接入点。
  *
  * @returns {Promise<{started: boolean, stop: () => void}>}
- *   `started` 说明这个内核是本次测试拉起来的（测试结束时要收摊）；
- *   如果是本来就在跑的，`stop()` 是空操作 —— **绝不杀别人的内核**。
+ *   `started` 表示该内核由本次测试启动（测试结束时需要回收）；
+ *   若内核本就在运行，`stop()` 为空操作 —— 不得终止其他进程启动的内核。
  */
 async function ensureDoor({ host = HOST, port = PORT, profile = PROFILE, log = () => {}, extraArgs = [] } = {}) {
   if (await doorIsUp(host, port)) {
-    log('info', `门已经在 ${host}:${port} 上，直接用它`);
+    log('info', `该插件已在 ${host}:${port} 上，直接使用`);
     return { started: false, stop() {} };
   }
 
-  log('info', `门没开，自己拉起一个后台 DSH（profile=${profile}）`);
+  log('info', `该插件未监听，自行启动一个后台 DSH（profile=${profile}）`);
   const kernel = spawnBackgroundDsh({
     command: process.env.DSH_PANEL_DSH || 'dsh',
     profile,
     log,
     extraArgs,
-    // 把要用的端口一起给它：门**优先读环境变量**（DSH_ACP_DOOR_PORT），
-    // 所以「我说钉在哪个端口」就真的在哪个端口，不用再去糊一份 --patch。
-    // 不给的话门就按档里配的来（默认 47821）—— 那正是 47821 这个默认值能用、
-    // 而随便挑个空闲端口就等不到门的原因（踩过：等了 120 秒才发现是这）。
+    // 同时传入需要使用的端口：该插件优先读取环境变量（DSH_ACP_DOOR_PORT），
+    // 因此指定端口即生效，无需再生成一份 --patch。
+    // 不传入时该插件按档中配置执行（默认 47821）—— 这正是 47821 这个默认值可用、
+    // 而任意空闲端口上等待不到该插件的原因（实际出现：等待 120 秒后才发现该问题）。
     port,
   });
   const ok = await waitForPort(host, port, { totalMs: 120000 });
   if (!ok) {
     kernel.dispose();
-    throw new Error(`后台 DSH 起来了但 ${host}:${port} 一直没开门（profile=${profile}）`);
+    throw new Error(`后台 DSH 已启动，但 ${host}:${port} 始终未建立监听（profile=${profile}）`);
   }
   return {
     started: true,

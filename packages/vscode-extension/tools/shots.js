@@ -1,25 +1,25 @@
 'use strict';
 
 /**
- * 把预览页面拍成图片，好让「界面长什么样」这件事是能被看见的。
+ * 将预览页面截取为图片，使界面的实际呈现可被直接查看。
  *
- * 为什么需要：这一夜我一直在用断言描述界面（多少项检查、对比度多少比多少），
- * 但那证明不了"看起来对不对" —— 间距挤不挤、文字会不会被截断、卡片歪没歪，
- * 这些只能用眼睛看。拍图之后，改动的效果也能前后对比。
+ * 需要该工具的原因：此前一直以断言描述界面（检查项数量、对比度比值），
+ * 但断言无法证明"呈现是否正确" —— 间距是否过密、文字是否被截断、卡片是否对齐，
+ * 这些只能通过观察图像判断。截取图片后，改动效果亦可进行前后对比。
  *
- * 用的是跟界面测试**同一套** HTML / CSS / 主题变量（tools/preview.js 生成），
- * 所以看到的就是 VS Code 里那个东西的样子，不是另一份"预览版"。
+ * 使用与界面测试**同一套** HTML / CSS / 主题变量（由 tools/preview.js 生成），
+ * 因此所见的即为 VS Code 中的实际呈现，并非另一份"预览版"。
  *
  * 用法：
- *   node tools/shots.js              # 拍全部场景 × 两个主题
- *   node tools/shots.js chat         # 只拍某个场景
- *   node tools/shots.js chat light   # 只拍某个场景的某个主题
+ *   node tools/shots.js              # 截取全部场景 × 两个主题
+ *   node tools/shots.js chat         # 仅截取某个场景
+ *   node tools/shots.js chat light   # 仅截取某个场景的某个主题
  *
  * 输出：shots/<场景>-<主题>.png
  *
- * 为什么不放 build/ 下面：`node tools/build-vsix.js` 会把整个 build/ 清掉
- * （那是它的临时区），拍好的图会跟着没了 —— 头一次就这么丢的。所以放在
- * 一个不会被任何脚本清掉的地方，并且在 .gitignore 里（图不进版本库）。
+ * 不放入 build/ 目录的原因：`node tools/build-vsix.js` 会清空整个 build/
+ * （该目录为其临时区），已截取的图片会被一并删除 —— 首次使用时即因此丢失。因此存放于
+ * 不会被任何脚本清理的位置，并在 .gitignore 中列出（图片不纳入版本库）。
  */
 
 const fs = require('node:fs');
@@ -66,7 +66,7 @@ function main() {
           '--no-default-browser-check',
           '--force-device-scale-factor=2',
           '--window-size=420,900',
-          // 让回放脚本把场景演完再截（跟界面测试同一个等待窗口）。
+          // 使回放脚本执行完场景后再截图（与界面测试使用同一个等待窗口）。
           '--virtual-time-budget=3000',
           `--screenshot=${png}`,
           `--user-data-dir=${path.join(ROOT, 'build', 'chrome-shots')}`,
