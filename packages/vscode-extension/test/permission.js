@@ -114,16 +114,32 @@ section('5. 垃圾输入不炸（webview 与内核之间什么都可能来）');
   check('BUILTIN 覆盖 custom（内核会把它作为展示项附加在末尾）', Boolean(BUILTIN.custom));
 }
 
-section('6. 「切不了」的三种说法各不一样');
+section('6. 「切不了」的三种说法各不一样，而且**都不许露内部词**');
 {
   const oldDoor = explainPermissionFailure({ code: -32601, message: '门不支持 dsh-door/permission/get（门版本太旧或方法名不对）' });
   const noService = explainPermissionFailure({ code: -32601, message: '这个内核里没有权限预设服务（@deepseek-ai/dsh-permission-presets 没挂），所以这里切不了权限' });
   const other = explainPermissionFailure({ code: -32000, message: '这个内核里没有会话 abc' });
-  check('旧门 → 劝升级门（状态是 old-door）', oldDoor.state === 'old-door');
-  check('旧门的话里点名了版本要求（0.0.12）', /0\.0\.12/.test(oldDoor.detail));
-  check('没装权限服务 → 明说这个内核没有（状态 no-service）', noService.state === 'no-service');
-  check('没装服务时不说「升级门」（那是另一回事）', !/0\.0\.12/.test(noService.detail));
-  check('其它错误照实转述原文', other.state === 'error' && other.detail === '这个内核里没有会话 abc');
+  check('旧门 → 状态是 old-door', oldDoor.state === 'old-door');
+  check('没装权限服务 → 状态是 no-service', noService.state === 'no-service');
+  check('别的错误 → 状态是 error', other.state === 'error');
+  check('三种说法的正文互不相同（不能糊成一句）',
+    new Set([oldDoor.text, noService.text, other.text]).size === 3);
+  /*
+   * 这一条是用户 2026-09-19 提意见换来的：原来旧门那句写的是
+   * 「切不了权限（内核里的门太旧）」+「要门 dsh-acp-door 0.0.12+」——
+   * 用户原话：「『门』都出来了，别人能知道是什么意思？」。
+   * 所以现在**所有对外文案**过一遍黑名单：内部组件名、包名、版本号、
+   * 「档」、设置项全名，一个都不许有。
+   */
+  const JARGON = /门|dsh-acp-door|dsh-base|dsh-door|@deepseek-ai|0\.0\.\d+|档|profile|settings\.yaml|dshPanel\.|host:|:\d{4,5}|zstd|Node /;
+  for (const [name, shaped] of [['old-door', oldDoor], ['no-service', noService], ['error', other]]) {
+    const all = `${shaped.text} ${shaped.detail || ''}`;
+    check(`${name} 的文案里没有内部词（门/包名/版本号/档/设置项）`, !JARGON.test(all), all);
+  }
+  check('旧门的说法指向"换一台 / 升级"这条出路',
+    /升级|最新版|桌面端/.test(oldDoor.detail || ''), oldDoor.detail);
+  check('没带权限设置的说法指向桌面端（换内核也没用）',
+    /桌面端/.test(noService.detail || ''), noService.detail);
   check('什么信息都没有也不炸', explainPermissionFailure().state === 'error' &&
     explainPermissionFailure(undefined).text.length > 0);
 }

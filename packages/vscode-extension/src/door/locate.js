@@ -527,35 +527,39 @@ function runDshSync({ command, args = [], timeoutMs = 120000 }) {
  *
  * @returns {{kind: string, reason: string, advice: string}} kind 为 'unknown' 时
  *   reason/advice 可能为空，调用方自己兜底。
+ *
+ * ⚠️ reason/advice 会**原样出现在错误卡片上（给用户看）**，所以只说人话：
+ * 不出现「门」「档名」「包名」「设置项全名」。档名/命令/包名那些细节在紧随其后的
+ * 原文（`human.raw` 的 tail）里，一个字不少，但那是折叠区的事。
  */
 function explainKernelFailure({ profile, stderr }) {
   const text = String(stderr || '');
   if (/managed exclusively by the Electron application/i.test(text)) {
     return {
       kind: 'app-managed-profile',
-      reason: `档「${profile}」只能由桌面端启动`,
-      advice: '把 dshPanel.fallbackProfile 换成 vscode-panel，或先打开桌面端。',
+      reason: '这套配置只能由桌面端启动',
+      advice: '先打开桌面端，或在设置里换一套配置。',
     };
   }
   if (/unknown option/i.test(text)) {
     return {
       kind: 'wrong-app-flags',
-      reason: `档「${profile}」不接受面板的启动参数`,
-      advice: '换成带 @deepseek-ai/dsh-web-app 的档（它才接受 --no-open/--host/--port）。',
+      reason: '这套配置不接受面板的启动参数',
+      advice: '在设置里换一套配置试试。',
     };
   }
   if (/ENOENT|not recognized|not found|不是内部或外部命令|系统找不到/i.test(text)) {
     return {
       kind: 'missing-command',
-      reason: '找不到 dsh 命令',
-      advice: '把 dshPanel.dshCommand 填成完整路径，或确认 dsh 在 PATH 里。',
+      reason: '找不到 DSH 的启动命令',
+      advice: '在设置里把 DSH 的位置填成完整路径。',
     };
   }
   if (/EADDRINUSE|address already in use|address in use/i.test(text)) {
     return {
       kind: 'port-in-use',
-      reason: '门要用的端口被占着',
-      advice: '关掉占用它的进程，或改 dshPanel.port（门插件里也要改）。',
+      reason: '要用的端口被别的程序占着',
+      advice: '关掉占用它的程序，或在设置里换个端口。',
     };
   }
   return { kind: 'unknown', reason: '', advice: '' };

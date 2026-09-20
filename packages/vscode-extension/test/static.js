@@ -530,8 +530,16 @@ check(
     stderr: 'error: profile "desktop" is managed exclusively by the Electron application',
   });
   check('退出原因：认得出「这个档被桌面端独占」', managed.kind === 'app-managed-profile', managed.kind);
-  check('退出原因：说清是哪个档、并指向 fallbackProfile',
-    managed.reason.includes('desktop') && /fallbackProfile/.test(managed.advice), managed.advice);
+  /*
+   * 2026-09-20 改：这句是**给用户看的**（错误卡片的"怎么办"），所以不再点名
+   * fallbackProfile 这种设置项全名，也不提"档"。要求变成：说人话 + 指出出路。
+   * 档名/设置项在紧随其后的原文段里（human.raw 的 tail），一个字不少。
+   */
+  check('退出原因：说人话（不出现档名 / 设置项全名）',
+    !/desktop|fallbackProfile|档/.test(`${managed.reason} ${managed.advice}`),
+    `${managed.reason}／${managed.advice}`);
+  check('退出原因：指出出路（先开桌面端，或换一套配置）',
+    /桌面端/.test(managed.advice) && /设置|配置/.test(managed.advice), managed.advice);
   check('退出原因：认得出「不接受面板的启动参数」',
     explainKernelFailure({ profile: 'vscode', stderr: "error: unknown option '--no-open'" }).kind === 'wrong-app-flags');
   check('退出原因：认得出「端口被占」',
@@ -577,7 +585,7 @@ check(
   check('内核退出：一个字没说的时候，明说「不是它自己崩的」',
     /一个字都没说就退了/.test(locate));
   check('断线：能分清「自己拉的内核死了」和「连的是别人的内核」',
-    /disconnectText\(/.test(view) && /内核自己退出了（code=/.test(view) &&
+    /disconnectText\(/.test(view) && /DSH 自己退出了（code=/.test(view) &&
       /那是别处的 DSH/.test(view));
   check('断线：告诉用户去哪儿看完整输出', /输出 → DSH Panel/.test(view));
 
@@ -627,8 +635,18 @@ check(
     /DSH_ACP_DOOR_PORT/.test(doorPort) && /resolveDoorPort/.test(doorIndex));
   check('端口归谁：门里的判定顺序是 环境变量 > 档配置 > 默认',
     /env\.DSH_ACP_DOOR_PORT[\s\S]{0,200}config\.port[\s\S]{0,120}DEFAULT_PORT/.test(doorPort));
-  check('端口归谁：旧版门（不认环境变量）时也接得上 —— 两个端口都盯',
-    /waitForFallbackDoor\([\s\S]{0,200}\[cfg\.selfStartPort, cfg\.port\]/.test(viewSource));
+  /*
+   * 2026-09-20 改：这条从"写死盯着两个端口"变成"盯着 fallbackPorts 给的清单"——
+   * 因为多了一个**只盯自己那个口**的例外（接上的那台换不了权限、改用自己启动的
+   * 那台时；两个都盯会把设置里那个口上现成的旧门当成"新内核开好了"，又接回同一台）。
+   * 两种清单都得在，而且默认那份必须还是两个口。
+   */
+  check('端口归谁：旧版门（不认环境变量）时也接得上 —— 默认两个端口都盯',
+    /fallbackPorts\(cfg\)\s*\{[\s\S]{0,200}return \[cfg\.selfStartPort, cfg\.port\]/.test(viewSource) &&
+      /waitForFallbackDoor\([\s\S]{0,220}this\.fallbackPorts\(cfg\)/.test(viewSource));
+  check('端口归谁：换内核那条路只盯自己的口（不然会换回同一台）',
+    /ownPortOnly[\s\S]{0,120}return \[cfg\.selfStartPort\]/.test(viewSource) &&
+      /this\.ownPortOnly = true/.test(viewSource));
 
   const soak = path.join(ROOT, 'tools', 'soak.cjs');
   check('有个"连着干活十几分钟"的耐力测试（起得来但活不长这类毛病就靠它）',

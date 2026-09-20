@@ -268,11 +268,11 @@ const SCENARIOS = {
     return {
       steps: [
         { message: { type: 'status', state: 'connecting', detail: '正在启动…' } },
-        { message: { type: 'notice', text: '正在启动内核…' } },
+        { message: { type: 'notice', text: '正在启动 DSH…' } },
         { message: { type: 'status', state: 'ready', detail: '就绪' } },
         { message: configMessage },
         { message: presetsMessage },
-        { message: { type: 'notice', text: '沿用已启动的内核。' } },
+        { message: { type: 'notice', text: '接着用已经开着的 DSH。' } },
         { message: { type: 'notice', text: '已按「标准模式」重开。' } },
         {
           message: {

@@ -135,38 +135,40 @@ function currentLabel(currentValue, options) {
 }
 
 /**
- * 选不了的时候（旧门 / 内核没挂权限服务 / 拿不到会话）该怎么跟用户说。
+ * 选不了的时候（连的 DSH 版本旧 / 那个 DSH 没带权限服务 / 拿不到会话）该怎么跟用户说。
  *
- * 三种情形的话必须不一样：**门太旧**要告诉他升级门；**内核没有权限服务**
- * 是那个档的问题（桌面端在同样的内核里也不会显示这个选择器）；
- * **其它错误**照实转述（比如会话找不到），别吞。
+ * ⚠️ **对外一律说人话**（用户 2026-09-19 第二次提意见的原话：「『门』都出来了，
+ * 别人能知道是什么意思？」）：不出现「门」「dsh-acp-door」「0.0.12」「档」这些内部词，
+ * 也不出现设置项名。三种情形的话仍然要**不一样**（测试盯着），但区别体现在
+ * 「这个 DSH 旧」「这个 DSH 没带这个功能」这种用户看得懂的说法上。
+ * 版本号、包名、旁路方法名这些只在日志里（见 panel/view.js 那行 log）。
  *
  * @param {object} input
  * @param {number} [input.code] JSON-RPC 错误码（-32601 = 方法不存在）。
- * @param {string} [input.message] 门/内核的原话。
+ * @param {string} [input.message] 内核/连接层的原话（只用于判断，不直接给用户看）。
  * @returns {{state: 'old-door'|'no-service'|'error'|'no-session', text: string, detail?: string}}
  */
 function explainPermissionFailure({ code, message } = {}) {
   const raw = typeof message === 'string' ? message : '';
   if (code === -32601 || /门不支持|Method not found|不认识权限方法/i.test(raw)) {
-    // 旧门和新门「服务缺席」都回 -32601，靠原话区分（新门那句里带「没有权限预设服务」）。
+    // 两种「服务缺席」都回 -32601，靠原话区分（新门那句里带「没有权限预设服务」）。
     if (/没有权限预设服务|permission-presets/i.test(raw)) {
       return {
         state: 'no-service',
-        text: '这个内核没装权限预设，切不了',
-        detail: '换一个装了 dsh-base 的档',
+        text: '这个 DSH 没带权限设置，这里换不了',
+        detail: '可以在桌面端自己的界面上换',
       };
     }
     return {
       state: 'old-door',
-      text: '切不了权限（内核里的门太旧）',
-      detail: '要门 dsh-acp-door 0.0.12+',
+      text: '这个 DSH 版本旧，这里换不了权限',
+      detail: '在桌面端自己的界面上换，或把 DSH 升到最新版',
     };
   }
   return {
     state: 'error',
     text: '读不到当前权限',
-    detail: raw || undefined,
+    detail: '点「重新连接」再试一次；详细原因在日志里',
   };
 }
 

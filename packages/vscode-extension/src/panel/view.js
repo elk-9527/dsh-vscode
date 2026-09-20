@@ -102,6 +102,31 @@ class DshPanelView {
      */
     this.resumeTarget = undefined;
     /**
+     * 接上现成的那台 DSH 之后，发现它换不了权限 → 改用面板自己启动的那台。
+     *
+     * 为什么（2026-09-19 后半夜用户报「改了之后我切换不了权限了」）：
+     * 面板默认先连 `dshPanel.port`（47821）上现成的那台 —— 桌面端开着时那就是
+     * **桌面端的内核**，而桌面档里的连接组件是 0.0.7（那个档由桌面端自己管，
+     * 面板改不动），它没有权限方法，于是选择器只能是「切不了」。
+     * 用户看到的后果是「权限切不了」，不是「谁的门旧」—— 所以这里不让用户
+     * 自己判断：**换不了权限就换一台能换的**（自己启动的那台连接组件是新的）。
+     *
+     * 两个闸门，别乱开：`ownKernelOnly` 只在这条路里置位（置位后不再回头看
+     * 47821，免得来回弹）；`switchedKernel` 保证一台面板只换一次。
+     */
+    this.ownKernelOnly = false;
+    this.switchedKernel = false;
+    /**
+     * 自启时只盯自己那个端口（不把设置里那个口上现成的旧门当成果）。
+     * 只在「接上的那台换不了权限 → 改用自己启动的那台」这条路上置位。
+     */
+    this.ownPortOnly = false;
+    /**
+     * 连接流程正在决定「要不要换一台能换权限的」时，先别说那句「换不了权限」。
+     * 决定完由 connectInternal 调 explainPermissionOnce 补上（没换才补）。
+     */
+    this.quietPermissionNotice = false;
+    /**
      * 下一段新对话要用哪个 agent preset（用户在面板里选的，或设置里的默认值）。
      *
      * 为什么是「下一段」而不是「当前这段」：内核不允许会话开始之后再换预设
@@ -387,14 +412,14 @@ class DshPanelView {
       const door = await this.waitForFallbackDoor(
         reusable.background && reusable.background.child,
         cfg.host,
-        [cfg.selfStartPort, cfg.port],
+        this.fallbackPorts(cfg),
         15000,
       );
       if (door.ok) {
         this.background = reusable.background;
         this.kernels.acquire(this, reusable);
         this.log('info', `面板自己那个内核还在（${cfg.host}:${door.port}），接着用它，不重启`);
-        this.post({ type: 'notice', text: '沿用已启动的内核。' });
+        this.post({ type: 'notice', text: '接着用已经开着的 DSH。' });
         return { ok: true, command: reusable.command, profile: reusable.profile, port: door.port };
       }
       this.log('warn', '本扩展起的那个内核还活着，但它的门一直没开 —— 收掉它，重起一个');
@@ -403,7 +428,7 @@ class DshPanelView {
 
     const profiles = this.profilesFor(cfg);
     // 对话流里只留一句最短的；用哪个档、等多久，都在日志里（用户不看那些）。
-    this.post({ type: 'notice', text: '正在启动内核…' });
+    this.post({ type: 'notice', text: '正在启动 DSH…' });
     this.log('info', `端口上没有门，按设置自己拉起一个 DSH 内核（档：${profiles[0]}，门钉在 ${cfg.host}:${cfg.selfStartPort}）`);
 
     const candidates = this.candidatesFor(cfg);
@@ -411,8 +436,8 @@ class DshPanelView {
       return {
         ok: false,
         human: {
-          title: '找不到 dsh 命令，没法自己启动内核。',
-          advice: '把 dshPanel.dshCommand 填成完整路径，或先打开桌面端让面板连它。',
+          title: '找不到 DSH，没法自己启动。',
+          advice: '在设置里指定 DSH 的安装位置，或先打开桌面端。',
           raw:
             '不知道怎么启动 DSH：设置 dshPanel.dshCommand 是空的，' +
             '默认安装位置（~/.dsh/profiles/node_modules/@deepseek-ai/dsh/lib/bin.js）也没找到。',
@@ -456,7 +481,7 @@ class DshPanelView {
       const outcome = await this.waitForFallbackDoor(
         background.child,
         cfg.host,
-        [cfg.selfStartPort, cfg.port],
+        this.fallbackPorts(cfg),
         hasMore ? 30000 : 120000,
       );
       if (outcome.ok) {
@@ -493,7 +518,7 @@ class DshPanelView {
     return {
       ok: false,
       human: {
-        title: '没能启动 DSH 内核',
+        title: '没能启动 DSH',
         advice: fallbackAdvice(kinds),
         raw:
           `启动 DSH 内核没成功（试了 ${plans.length} 种起法）：\n` +
@@ -520,6 +545,23 @@ class DshPanelView {
    * `timeoutMs` 只是为了让测试能在几秒内跑到"等超时"那条分支 ——
    * 生产路径不传它，就是两分钟。
    */
+  /**
+   * 面板自己启动内核时，盯着哪几个端口等门开。
+   *
+   * 默认盯着两个：**自己的口**（`selfStartPort`，新版连接组件认环境变量、
+   * 会开在这儿）和设置里那个口（`dshPanel.port`）—— 旧版组件不认环境变量，
+   * 只会开在档里配的那个口上，两个都盯才不至于干等两分钟。
+   *
+   * 例外：`ownPortOnly`（"接上的那台换不了权限，改用自己启动的那台"那条路）。
+   * 那时**只盯自己的口** —— 否则设置里那个口上现成的旧门会被当成"新内核开好了"，
+   * 于是又接回同一台，换了个寂寞（2026-09-20 真窗口自检抓到的就是这个：
+   * 日志里 `这个档里的门没认端口设置，开在了 47821`，接的还是桌面端那台）。
+   */
+  fallbackPorts(cfg) {
+    if (this.ownPortOnly) return [cfg.selfStartPort];
+    return [cfg.selfStartPort, cfg.port];
+  }
+
   async waitForFallbackDoor(child, host, port, timeoutMs = 120000) {
     let exit = null;
     const onExit = (code, signal) => {
@@ -574,7 +616,7 @@ class DshPanelView {
      */
     let target = cfg.port;
     let reachable = false;
-    if (await probePort(cfg.host, cfg.port)) {
+    if (!this.ownKernelOnly && (await probePort(cfg.host, cfg.port))) {
       reachable = true;
       this.log('info', `端口 ${cfg.host}:${cfg.port} 上有现成的门，接上去（不自启内核）`);
     } else if (await probePort(cfg.host, cfg.selfStartPort)) {
@@ -591,7 +633,7 @@ class DshPanelView {
         `面板自己的端口 ${cfg.host}:${cfg.selfStartPort} 上已经有门了，接上去` +
           (mine ? '（是本扩展起的那个内核，接着用，不重启）' : '（不是本扩展起的，我不负责收它）'),
       );
-      this.post({ type: 'notice', text: '沿用已启动的内核。' });
+      this.post({ type: 'notice', text: '接着用已经开着的 DSH。' });
     } else if (cfg.autoStart) {
       const spawned = await this.spawnFallback(cfg);
       if (!spawned.ok) {
@@ -604,7 +646,7 @@ class DshPanelView {
     }
 
     if (!reachable) {
-      this.postError(`连不上 ${cfg.host}:${cfg.port}（没门，自动启动已关）。`);
+      this.postError('连不上 DSH（自动启动已关）。');
       this.post({ type: 'status', state: 'error', detail: '未连接' });
       return undefined;
     }
@@ -617,7 +659,7 @@ class DshPanelView {
     } catch (error) {
       client.close();
       const text = error && error.message ? error.message : String(error);
-      this.postError(`握手失败：${text}`);
+      this.postError(`连不上 DSH：${text}`);
       this.post({ type: 'status', state: 'error', detail: '未连接' });
       return undefined;
     }
@@ -656,10 +698,29 @@ class DshPanelView {
       });
     } catch (error) {
       const text = error && error.message ? error.message : String(error);
-      this.postError(`建会话失败：${text}`);
+      this.postError(`开新对话失败：${text}`);
       this.post({ type: 'status', state: 'error', detail: '未连接' });
       return undefined;
     }
+
+    /*
+     * 会话一定下来，**在这一条流程里等一次权限读取**，而不是只靠 session 事件
+     * 异步触发。为什么：接上的那台换不了权限时（桌面端那个内核就是），
+     * 面板要改用自己启动的那台 —— 这个决定必须发生在"这次连接交差之前"，
+     * 否则会出现两条连接流程并行（老的刚说"就绪"，新的又在建会话）。
+     *
+     * 读的这段时间把「换不了权限」那句解释按住（quietPermissionNotice）：
+     * 能换内核就直接换，用户不必先读一句"为什么换不了"，再读一句"我换了一台"。
+     */
+    this.quietPermissionNotice = true;
+    try {
+      await this.refreshPermission();
+    } finally {
+      this.quietPermissionNotice = false;
+    }
+    if (await this.maybeUseOwnKernel(this.permissionUnavailable)) return undefined;
+    // 换不了（或不值得换）：这才轮到说那句人话。
+    this.explainPermissionOnce();
 
     this.post({ type: 'status', state: 'ready', detail: '就绪' });
     return session;
@@ -736,7 +797,7 @@ class DshPanelView {
       const lastLine = tail ? tail.split(/\r?\n/).filter((line) => line.trim()).pop() : '';
       const why = lastLine ? `它最后说：${lastLine}` : '它没说话就退了（多半是被外面杀的）';
       return (
-        `内核自己退出了（code=${child.exitCode}）。${why}\n` +
+        `DSH 自己退出了（code=${child.exitCode}）。${why}\n` +
         '直接发消息即可；完整输出见「输出 → DSH Panel」。'
       );
     }
@@ -846,7 +907,7 @@ class DshPanelView {
     }
 
     if (!localRoot) {
-      throw new Error('门在别的机器上，面板读不了它的历史');
+      throw new Error('那台 DSH 在别的机器上，面板读不到它的历史');
     }
     if (!localSessions.hasZstdSupport()) {
       throw new Error('本机 Node 不支持 zstd，解不了会话文件');
@@ -895,7 +956,9 @@ class DshPanelView {
   historyErrorText(error) {
     const text = this.errText(error);
     if (isMissingMethod(error, text)) {
-      return '门太旧（要 dsh-acp-door 0.0.8+），读不了那台机器上的历史。';
+      // 连别的机器上的 DSH 时才会走到这儿：那台 DSH 的版本旧，读不了它的历史。
+      // 对用户只说这一件事（版本号、包名在日志里）。
+      return '那台 DSH 版本旧，读不了它上面的历史。';
     }
     return `读历史失败：${text}`;
   }
@@ -1031,7 +1094,7 @@ class DshPanelView {
       });
       this.post({ type: 'status', state: 'ready', detail: '就绪' });
     } catch (error) {
-      this.postError(`新建会话失败：${this.errText(error)}`);
+      this.postError(`开新对话失败：${this.errText(error)}`);
       this.post({ type: 'status', state: 'error', detail: '未连接' });
     }
   }
@@ -1095,16 +1158,80 @@ class DshPanelView {
       // 顶栏那个按钮只写「切不了」三个字（那一格很窄，写全就被切一半），
       // 说清楚为什么得靠这里。
       // 每种原因只说一次：接的是桌面端那个内核时，每次建会话都会走到这儿。
-      if (this.permissionNotice !== shaped.state) {
-        this.permissionNotice = shaped.state;
-        // 两行都短：第一行是结论，第二行是"缺什么"。版本号、包全名这些
-        // 细节在悬停提示和日志里（提示里不复述 —— 用户嫌长）。
-        this.post({
-          type: 'notice',
-          text: `${shaped.text}${shaped.detail ? `\n${shaped.detail}` : ''}`,
-        });
-      }
+      //
+      // ⚠️ 两种情况下这里**先不说**，由连接流程决定说哪句：
+      // ① `quietPermissionNotice`（连接流程正在读这次权限，可能要换内核 ——
+      //    换了就别再解释"为什么换不了"了）；
+      // ② 已经说过的同一种原因（去重在 explainPermissionOnce 里）。
+      if (!this.quietPermissionNotice) this.explainPermissionOnce();
     }
+  }
+
+  /**
+   * 把「这里换不了权限」那句人话播出去 —— **每种原因只说一次**。
+   *
+   * 为什么单独拎出来：连接流程要先把「要不要换一台能换权限的」决定完，
+   * 才轮到说这句话；而权限读取本身可能被触发两次（建会话的事件 + 连接流程
+   * 那次显式等待），两处都得走同一个去重标记。
+   */
+  explainPermissionOnce() {
+    const shaped = this.permissionUnavailable;
+    if (!shaped) return;
+    if (this.permissionNotice === shaped.state) return;
+    this.permissionNotice = shaped.state;
+    // 两行都短，而且**都说人话**：不出现「门」「dsh-acp-door」「0.0.12」「档」
+    // 这类内部词（用户 2026-09-19 的原话：「『门』都出来了，别人能知道
+    // 是什么意思？」）。版本号、包名只看日志。
+    this.post({
+      type: 'notice',
+      text: `${shaped.text}${shaped.detail ? `\n${shaped.detail}` : ''}`,
+    });
+  }
+
+  /**
+   * 权限换不了的时候，值不值得改用面板自己启动的那台 DSH。
+   *
+   * 判据（`shouldSwitchToOwnKernel`，纯函数、好测）：
+   * - 只有 `old-door`（**连接组件旧**）这一种换内核能解决 —— 自己启动的那台用的
+   *   是本扩展配套的新组件。`no-service`（那个 DSH 压根没带权限设置）换谁都没用，
+   *   照实说清楚；`error` 同理。
+   * - 必须**正接在现成的那台上**（`dshPanel.port`）。已经在自己那台上了还换，
+   *   就是原地打转（自己那台也不行 = 本机环境的问题，说实话比乱换有用）。
+   * - 用户关掉了自动启动（`dshPanel.autoStart = false`）就不换：那是他明说过
+   *   「别在背后拉进程」，尊重它，只解释为什么切不了。
+   * - 一台面板只换一次（`switchedKernel`）。
+   *
+   * 换完是**新会话**：旧会话还在盘上（历史里能翻到），不是把它丢了。
+   */
+  async maybeUseOwnKernel(shaped) {
+    const cfg = this.config();
+    const decided = shouldSwitchToOwnKernel({
+      state: shaped && shaped.state,
+      targetPort: this.targetPort,
+      cfgPort: cfg.port,
+      autoStart: cfg.autoStart,
+      switched: this.switchedKernel,
+    });
+    if (!decided) return false;
+    this.switchedKernel = true;
+    this.ownKernelOnly = true;
+    /*
+     * 还有一个更要紧的：**只认自己那个口**。设置里那个口上现成的旧门还在响，
+     * 自启的等待要是把它当成"新内核开好了"，就会又接回同一台（换了等于没换）——
+     * 真窗口自检里抓到的就是这个。
+     */
+    this.ownPortOnly = true;
+    this.log(
+      'info',
+      `接上的 ${cfg.host}:${cfg.port} 换不了权限（${shaped.state}），` +
+        `改用面板自己启动的（${cfg.host}:${cfg.selfStartPort}，档：自启档）`,
+    );
+    this.post({ type: 'notice', text: '这台 DSH 版本旧，改用面板自己启动的。' });
+    // 只断连接，不杀任何内核（teardown 不碰进程）。
+    this.teardown();
+    this.resumeTarget = undefined;
+    await this.connectInternal();
+    return true;
   }
 
   /** 把一份权限载荷发给界面（统一在这儿加中文标签）。 */
@@ -1240,16 +1367,47 @@ function fallbackFailureText({ command, profile, host, port, exitedEarly, stderr
 
   if (exitedEarly) {
     if (said) {
-      return `内核一启动就退出了：${said.reason}。${said.advice}${tail}`;
+      return `没能启动 DSH：它一启动就退出了（${said.reason}）。${said.advice}${tail}`;
     }
-    return `内核一启动就退出了：多半是 dsh 不在 PATH，或 dshCommand 指错了。${tail}`;
+    return `没能启动 DSH：它一启动就退出了 —— 多半是找不到 DSH，或者设置里的命令写错了。${tail}`;
   }
   return (
-    `内核起来了，但 ${host}:${port} 上没开门。两种可能：这个档里没装门插件` +
-    `（dsh plugin --profile ${profile} list 里应当有 dsh-acp-door），` +
+    `DSH 是起来了，但没连上它（${host}:${port} 上没有应答）。两种可能：这套配置里` +
+    `没装连接组件（dsh plugin --profile ${profile} list 里应当有 dsh-acp-door），` +
     '或者它里面的 port 要跟着 dshPanel.selfStartPort 改。' +
     tail
   );
+}
+
+/**
+ * 权限换不了时，该不该改用面板自己启动的那台 DSH（纯函数，好测）。
+ *
+ * 只在**这一种**情形下换：接在现成的那台上（不是自己那台）、对方只是**连接
+ * 组件旧**（`old-door`，自己启动的那台用的是配套的新组件）、用户没关自动启动、
+ * 而且这台面板还没换过。
+ *
+ * 不换的情形同样有理由：
+ * - `no-service`：那台 DSH 压根没带权限设置 —— 换自己启动的也一样，说了实话
+ *   比乱换有用；
+ * - `error`：读不到不等于不支持（网络抖一下、会话没了），先别动结构；
+ * - 已经在自己那台上：换了就是原地打转；
+ * - `autoStart === false`：用户明确说过别在背后拉进程；
+ * - `switched`：一台面板只换一次，不允许来回弹。
+ *
+ * @param {object} input
+ * @param {string} [input.state] `explainPermissionFailure` 的 state。
+ * @param {number|string|undefined} input.targetPort 现在连的是哪个端口。
+ * @param {number|string} input.cfgPort `dshPanel.port`（现成的那台在这个口上）。
+ * @param {boolean} input.autoStart 用户有没有允许自启内核。
+ * @param {boolean} input.switched 这台面板之前换过没有。
+ * @returns {boolean}
+ */
+function shouldSwitchToOwnKernel({ state, targetPort, cfgPort, autoStart, switched } = {}) {
+  if (state !== 'old-door') return false;
+  if (switched) return false;
+  if (!autoStart) return false;
+  if (targetPort === undefined || cfgPort === undefined) return false;
+  return String(targetPort) === String(cfgPort);
 }
 
 /**
@@ -1257,18 +1415,21 @@ function fallbackFailureText({ command, profile, host, port, exitedEarly, stderr
  *
  * 原来这里是写死的一句"把 dshCommand 填成完整命令" —— 而当失败原因是
  * "这个档命令行起不来"（2026-09-19 那次）时，那句话把人往错的方向带。
+ *
+ * ⚠️ 这几句是**给用户看的**（错误卡片的"怎么办"那一行）：不许出现「门」
+ * 「档名」「设置项全名」这类内部词。
  */
 function fallbackAdvice(kinds) {
   if (kinds.has('app-managed-profile')) {
-    return 'desktop 档只能由桌面端启动，换 fallbackProfile。';
+    return '这套配置只能由桌面端启动：先打开桌面端，或在设置里换一套配置。';
   }
   if (kinds.has('wrong-app-flags')) {
-    return '这个档不接受启动参数，换一个网页档。';
+    return '这套配置起不来：在设置里换一套配置试试。';
   }
   if (kinds.has('port-in-use')) {
-    return '端口被占着：关掉占用它的进程，或改 dshPanel.port（门插件里也要改）。';
+    return '有别的程序占着那个端口：关掉它，或在设置里换个端口。';
   }
-  return '填好 dshPanel.dshCommand，或先打开桌面端。';
+  return '先打开桌面端，或在设置里指定 DSH 的安装位置。';
 }
 
 module.exports = {
@@ -1276,6 +1437,7 @@ module.exports = {
   VIEW_ID,
   fallbackFailureText,
   fallbackAdvice,
+  shouldSwitchToOwnKernel,
   isLoopbackHost,
   isMissingMethod,
 };

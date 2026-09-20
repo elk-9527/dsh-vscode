@@ -218,8 +218,8 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
     JSON.stringify(statuses.map((s) => s.detail)),
   );
   check(
-    '「正在启动内核」这件事说在对话流里',
-    notices.some((text) => /正在启动内核/.test(text)),
+    '「正在启动 DSH」这件事说在对话流里',
+    notices.some((text) => /正在启动 DSH/.test(text)),
     JSON.stringify(notices),
   );
   // 用户对这条路径上的文案专门提过意见（原话是嫌"没有现成的内核，正在启动一个

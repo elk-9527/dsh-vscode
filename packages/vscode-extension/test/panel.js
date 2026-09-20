@@ -321,12 +321,18 @@ function typesOf(items) {
       Boolean(errorStatus) && errorStatus.detail === '未连接',
       errorStatus ? JSON.stringify(errorStatus.detail) : '没有错误状态');
     // 长诊断必须进对话流 —— 用户是在对话框里读东西的，不是在顶栏。
+    // 原文段里要有**那个坏命令本身**（不然用户不知道是哪一个命令坏了），
+    // 但"怎么办"那句必须是给人看的话（不出现 PATH / 设置项全名这些词）。
     const errMsg = all.find((item) => item.type === 'error');
     check('诊断进了对话流，且说清了是哪个命令、该怎么办',
       Boolean(errMsg) &&
         String(errMsg.message).includes(configValues.dshCommand) &&
-        /PATH|dshCommand/.test(`${errMsg.message} ${(errMsg.human && errMsg.human.advice) || ''}`),
+        /找不到 DSH|设置/.test(`${errMsg.message} ${(errMsg.human && errMsg.human.advice) || ''}`),
       JSON.stringify(errMsg || all.slice(-3)));
+    check('"怎么办"那句不说内部词（不提 PATH / 设置项全名）',
+      Boolean(errMsg) &&
+        !/PATH|dshCommand/.test((errMsg.human && errMsg.human.advice) || ''),
+      (errMsg && errMsg.human && errMsg.human.advice) || '（没有 human）');
     check('而且给的是结构化错误（有标题，界面才好排版）',
       Boolean(errMsg && errMsg.human && errMsg.human.title),
       JSON.stringify(errMsg && errMsg.human));
@@ -370,10 +376,18 @@ function typesOf(items) {
       command: 'dsh', profile: 'desktop', host: '127.0.0.1', port: 47821, exitedEarly: false,
     });
     check('两句话不一样（否则等于没区分）', boot !== noDoor);
-    check('"命令错"那句提到 PATH 与 dshCommand', /PATH/.test(boot) && /dshCommand/.test(boot), boot);
-    check('"门没开"那句提到门插件与端口',
+    check('"命令错"那句记得说清是什么命令（原文段里）',
+      /找不到 DSH/.test(boot) && /dshCommand|设置里/.test(boot), boot);
+    check('"没连上"那句（原文段）提到连接组件与端口',
       /dsh-acp-door/.test(noDoor) && /plugin --profile desktop list/.test(noDoor) && /port/.test(noDoor),
       noDoor);
+    /*
+     * 人话那半句（原文段开头这句）**不许出现「门」** —— 用户 2026-09-19 的意见：
+     * 「『门』都出来了，别人能知道是什么意思？」。技术细节留在原文段里没问题
+     * （那是折叠区、给排障看的），但结论句必须说人话。
+     */
+    check('"没连上"那句的结论是人话（不出现「门」）',
+      !/没开门|门没开|门插件/.test(noDoor.split('\n')[0]), noDoor.split('\n')[0]);
 
     // (3b) 内核自己说了原因时：照实转述 + 附上原话，**不许**再断言是 PATH 的问题。
     //      2026-09-19 那次「面板起不来」，内核明明说了
@@ -388,7 +402,8 @@ function typesOf(items) {
     });
     check('失败说明带上了内核的原话', managedText.includes('managed exclusively'), managedText);
     check('失败说明不再断言是 PATH 的问题（那次就是这么带偏的）', !/PATH/.test(managedText), managedText);
-    check('失败说明指向正确的出路（改 fallbackProfile）', /fallbackProfile/.test(managedText), managedText);
+    check('失败说明指向正确的出路（先开桌面端 / 换一套配置）',
+      /桌面端/.test(managedText) && /设置|配置/.test(managedText), managedText);
 
     const unknownText = fallbackFailureText({
       command: 'dsh', profile: 'x', host: '127.0.0.1', port: 47821, exitedEarly: true,
@@ -428,7 +443,7 @@ function typesOf(items) {
         text: 'Internal error: turn failed: 401: {"error":{"message":"Incorrect API key provided"}}',
         kind: 'auth',
         title: /密钥|权限/,
-        advice: /settings\.yaml/,
+        advice: /密钥|设置/,
       },
       {
         name: '连不上内核',
@@ -449,9 +464,16 @@ function typesOf(items) {
         text: 'spawn dsh ENOENT',
         kind: 'command',
         title: /命令/,
-        advice: /PATH|dshCommand/,
+        advice: /设置|路径|安装位置/,
       },
     ];
+
+    /*
+     * 同一批文案再过一遍**内部词黑名单**（2026-09-20 加）：这些 title/advice
+     * 是直接印在错误卡片上的，所以不许出现「门」「档」「设置项全名」——
+     * 用户原话是「『门』都出来了，别人能知道是什么意思？」。
+     */
+    const JARGON = /门|档|dshPanel\.|settings\.yaml|fallbackProfile|dsh-acp-door/;
 
     for (const item of cases) {
       const human = describeError(item.text);
@@ -459,6 +481,8 @@ function typesOf(items) {
       check(`${item.name} → 说清了发生了什么`, item.title.test(human.title), human.title);
       check(`${item.name} → 说清了你能做什么`, item.advice.test(human.advice), human.advice);
       check(`${item.name} → 原文一个字都没少`, human.raw === item.text);
+      check(`${item.name} → 卡片上没有内部词（门 / 档 / 设置项全名）`,
+        !JARGON.test(`${human.title} ${human.advice}`), `${human.title}／${human.advice}`);
     }
 
     // 认不出来的错误：也必须有一句人话开头，而且原文照旧留着 ——
@@ -526,15 +550,18 @@ function typesOf(items) {
   {
     /*
      * 这个套件默认连 47821 —— 桌面端开着的时候那就是**桌面端的内核**，
-     * 而桌面档里的门是 0.0.7（桌面端独占那个档，命令行改不动它）。
+     * 而桌面档里的连接组件是 0.0.7（那个档由桌面端自己管，命令行改不动它），
      * 所以这一段会分两条路走，两条都是真断言：
      *
-     *   - 门是新的时候（本档自己起的 vscode-panel / dshdoor）→ 验完整链路；
-     *   - 门是旧的时候（连着桌面端）→ 验**降级**：一句人话说明为什么切不了，
-     *     面板其它功能一个不少。这条同样重要：它是本机最常见的配置。
+     *   - 连的那台支持权限方法（自己起的 vscode-panel / dshdoor）→ 验完整链路；
+     *   - 连的那台不支持（桌面端那个）→ 验**降级**：一句人话说明为什么切不了。
      *
-     * 「切一次真能切过去」那条路在 test/permission-live.js 里用**自己起的
-     * 内核**（门跟源码同步过）验，不依赖 47821 上是谁。
+     * ⚠️ 本套件的配置里 `autoStart` 是 **false**（第 30 行）：那种情况下面板
+     * 只解释、不擅自在背后拉进程 —— 「换一台能换权限的」那条路要 autoStart 打开
+     * 才走（生产默认是打开的），它的判据在下一节用纯函数验，真拉起内核那条路
+     * 在 test/fallback.js 与 test/permission-live.js 里验。
+     *
+     * 「切一次真能切过去」在 test/permission-live.js 里用**自己起的内核**验。
      */
     const beforePermission = view.messages.length;
     await panel.onWebviewMessage({ type: 'refreshPermission' });
@@ -551,18 +578,24 @@ function typesOf(items) {
 
     if (permissionState && permissionState.unavailable) {
       const info = permissionState.unavailable;
-      check('门太旧 / 内核没装时，界面拿到的是一句人话（不是英文异常）',
+      check('连的那台换不了时，界面拿到的是一句人话（不是英文异常）',
         typeof info.text === 'string' && info.text.length > 0 && !/Error|undefined/.test(info.text),
         JSON.stringify(info));
       check('说清了是哪一种情况（要能给出下一步）',
         ['old-door', 'no-service'].includes(info.state), info.state);
-      check('「旧门」那条会告诉用户门要什么版本（0.0.12）',
-        info.state !== 'old-door' || /0\.0\.12/.test(info.detail || ''), info.detail);
+      /*
+       * 用户 2026-09-19 的意见（第二次提）：面板里不许出现「门」「dsh-acp-door」
+       * 「0.0.12」「档」这些只有我们自己懂的词。这一条就守在**真发出去的消息**上：
+       * 不是查源码，是查这一轮真的跑出来的界面文案。
+       */
+      const JARGON = /门|dsh-acp-door|dsh-base|dsh-door|@deepseek-ai|0\.0\.\d+|档|profile|settings\.yaml|dshPanel\.|zstd/;
+      check('这句人话里没有内部词（门 / 包名 / 版本号 / 档 / 设置项）',
+        !JARGON.test(`${info.text} ${info.detail || ''}`), `${info.text} ／ ${info.detail || ''}`);
       const noticesOf = () =>
         view.messages
           .map((item) => item.message)
           .filter(
-            (item) => item.type === 'notice' && /切不了/.test(String(item.text || '')),
+            (item) => item.type === 'notice' && /换不了|切不了/.test(String(item.text || '')),
           );
       const notices = noticesOf();
       check('对话流里把原因说清楚了（顶栏那行放不下长文）', notices.length >= 1,
@@ -570,6 +603,9 @@ function typesOf(items) {
       check('那句话说人话（不是英文异常）',
         notices.length > 0 && !/Error|undefined|Method not found/.test(notices[0].text),
         notices.length > 0 ? notices[0].text.split('\n')[0] : '');
+      check('对话流里那句也没有内部词',
+        notices.length > 0 && !JARGON.test(notices[0].text),
+        notices.length > 0 ? notices[0].text : '');
       // 权限是每次建会话都会读一遍的：同一种原因重复播就成了噪音。
       const countBefore = notices.length;
       const beforeAgain = view.messages.length;
@@ -631,6 +667,36 @@ function typesOf(items) {
         check('能切回原来的档（别把内核留在测试值上）', true);
       }
     }
+  }
+
+  section('8.86 「换不了权限就换一台能换的」——判据是纯函数，这里逐个验');
+  {
+    /*
+     * 为什么有这一节：用户 2026-09-19 报「改了之后我切换不了权限了」。
+     * 真相不是代码坏了，是**面板接上了桌面端那个内核**（桌面档里的连接组件
+     * 是 0.0.7，没有权限方法）。面板原来只会说一句「切不了」，用户还得自己
+     * 去搞明白为什么 —— 现在它会改用自己启动的那台（那台组件是新的）。
+     *
+     * 真拉起内核那条路（慢、要进程）在别处验；这里只验**判据**：
+     * 什么情况下该换、什么情况下不该换。
+     */
+    const { shouldSwitchToOwnKernel } = require('../src/panel/view');
+    const base = { state: 'old-door', targetPort: 47821, cfgPort: 47821, autoStart: true, switched: false };
+    check('组件旧 + 接在现成那台上 + 允许自启 → 换',
+      shouldSwitchToOwnKernel(base) === true);
+    check('已经在自己那台上 → 不换（换了是原地打转）',
+      shouldSwitchToOwnKernel({ ...base, targetPort: 47831 }) === false);
+    check('用户关了自动启动 → 不换（别在背后拉进程）',
+      shouldSwitchToOwnKernel({ ...base, autoStart: false }) === false);
+    check('一台面板只换一次 → 不来回弹',
+      shouldSwitchToOwnKernel({ ...base, switched: true }) === false);
+    check('「那台 DSH 没带权限设置」→ 不换（换了也一样）',
+      shouldSwitchToOwnKernel({ ...base, state: 'no-service' }) === false);
+    check('读不到（网络抖 / 会话没了）→ 不换（先别动结构）',
+      shouldSwitchToOwnKernel({ ...base, state: 'error' }) === false);
+    check('端口对不上时不误判', shouldSwitchToOwnKernel({ ...base, targetPort: undefined }) === false);
+    check('缺参数也不炸（webview 与扩展之间什么都可能来）',
+      shouldSwitchToOwnKernel() === false && shouldSwitchToOwnKernel(undefined) === false);
   }
 
   section('8.9 历史会话（dsh-door/sessions 旁路方法，需要门 0.0.8+）');
@@ -739,6 +805,32 @@ function typesOf(items) {
     console.log(`     最长顶栏：${longest(statuses, (m) => m.detail)}`);
     console.log(`     最长提示：${longest(notices, (m) => String(m.text).split('\n')[0])}`);
     console.log(`     最长报错：${longest(errors, (m) => m.human && m.human.title)}`);
+
+    /*
+     * 第二条规矩（用户 2026-09-19 第二次提意见的原话）：
+     * 「『门』都出来了，别人能知道是什么意思？类似的提示全删了。」
+     *
+     * 面板是给用户看的，不是给我们自己排障的 —— 所以**这一整套跑下来真发出去
+     * 过的所有提示/报错/顶栏文案**里，不许出现内部词：组件名（门）、包名
+     * （dsh-acp-door / dsh-base / @deepseek-ai/*）、版本号（0.0.12）、「档」
+     * （profile）、设置项全名、「内核原话」这种我们自己才用的说法。
+     *
+     * 注意边界：**内核原文不算**。它是内核自己吐的英文/JSON，收在
+     * 「原始报错（点开）」折叠区里和日志里，一个字都不删 —— 那是我自己那句话
+     * 之后附上的证据，不是我在跟用户讲解。所以这里只扫：
+     * 顶栏 detail、提示 text、报错 human.title / human.advice。
+     */
+    const JARGON = /门|dsh-acp-door|dsh-base|dsh-door|@deepseek-ai|0\.0\.\d+|档|profile=|settings\.yaml|dshPanel\.|zstd|Node \d/;
+    const userFacing = [
+      ...statuses.map((m) => ['顶栏', String(m.detail || '')]),
+      ...notices.map((m) => ['提示', String(m.text || '')]),
+      ...errors.filter((m) => m.human).map((m) => ['报错标题', String(m.human.title || '')]),
+      ...errors.filter((m) => m.human).map((m) => ['报错建议', String(m.human.advice || '')]),
+    ];
+    const withJargon = userFacing.filter(([, text]) => JARGON.test(text));
+    check(`给用户看的字里没有内部词（扫了 ${userFacing.length} 条：门 / 包名 / 版本号 / 档 / 设置项）`,
+      withJargon.length === 0,
+      JSON.stringify(withJargon));
   }
 
   section('9. 收摊');

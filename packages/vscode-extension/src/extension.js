@@ -87,7 +87,7 @@ function activate(context) {
      */
     vscode.commands.registerCommand('dshPanel.stopKernel', () => {
       const stopped = kernelManager(log).disposeAll('用户手动停掉');
-      const text = stopped > 0 ? `已停掉 ${stopped} 个后台 DSH 内核。` : '没有本扩展拉起的后台内核。';
+      const text = stopped > 0 ? `已停掉 ${stopped} 个后台 DSH。` : '没有本扩展拉起的后台 DSH。';
       log('info', text);
       vscode.window.showInformationMessage(text);
     }),

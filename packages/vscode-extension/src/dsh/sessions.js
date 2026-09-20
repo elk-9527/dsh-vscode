@@ -87,7 +87,9 @@ function hasZstdSupport() {
  */
 function decodeSessionFile(file) {
   if (!hasZstdSupport()) {
-    return { events: [], frames: 0, error: '本机 Node 不支持 zstd，解不了会话文件' };
+    // 给用户看的（会话卡片上那行）：说清"这台机器读不了"，别甩 Node/zstd 这些词。
+    // 「本机 Node 没有 zstd」这个事实进日志（调用方 log 那条路）。
+    return { events: [], frames: 0, error: '读不了这个会话文件（这台机器的运行环境不支持这种压缩）' };
   }
   let buf;
   try {

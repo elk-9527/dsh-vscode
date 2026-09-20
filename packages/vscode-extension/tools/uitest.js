@@ -799,12 +799,14 @@ function assertionsScript(scene) {
       document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
       assert('点别处也能关掉', !visible(accessPop));
 
-      // 切不了的时候（旧门 / 内核没装权限预设）：按钮灰掉 + 说人话，
+      // 换不了的时候（连的那台版本旧 / 没带权限设置）：按钮灰掉 + 说人话，
       // 而且那句话挂在悬浮提示上（顶栏那行放不下长文，完整原因走对话流）。
+      // ⚠️ 这段文案里**不许有内部词**（门 / 包名 / 版本号）—— 用户提过意见，
+      // 这里就用扩展真的会发的那两句当素材（见 src/dsh/permission.js）。
       window.postMessage({ type: 'permissionState', unavailable: {
         state: 'old-door',
-        text: '切不了权限（内核里的门太旧）',
-        detail: '要门插件 dsh-acp-door 0.0.12+；升级那个档里的门。',
+        text: '这个 DSH 版本旧，这里换不了权限',
+        detail: '在桌面端自己的界面上换，或把 DSH 升到最新版',
       } }, '*');
       await new Promise(function (resolve) { setTimeout(resolve, 200); });
       assert('切不了时按钮灰掉', accessBtn.disabled === true);
@@ -812,11 +814,13 @@ function assertionsScript(scene) {
       // 理由挂 data-why + 悬浮提示，完整说法在对话流里。
       assert('按钮上只写结论「切不了」（不塞长句子）',
         (accessBtn.textContent || '').trim() === '切不了', accessBtn.textContent);
-      assert('按钮记着是哪一种切不了', accessBtn.dataset.why === '门太旧', accessBtn.dataset.why);
+      assert('按钮记着是哪一种换不了', accessBtn.dataset.why === '版本旧', accessBtn.dataset.why);
       assert('切不了时按钮没有被切字',
         accessBtn.scrollWidth <= accessBtn.clientWidth + 2,
         accessBtn.scrollWidth + '>' + accessBtn.clientWidth);
-      assert('完整原因挂在悬浮提示里', /0\.0\.12/.test(accessBtn.title || ''), accessBtn.title);
+      assert('完整原因挂在悬浮提示里', /换不了权限/.test(accessBtn.title || ''), accessBtn.title);
+      assert('悬浮提示里没有内部词（门 / 包名 / 版本号）',
+        !/门|dsh-acp-door|0\.0\.\d+|档/.test(accessBtn.title || ''), accessBtn.title);
       window.__received.length = 0;
       accessBtn.click();
       assert('灰掉之后点它也不弹清单', !visible(accessPop));

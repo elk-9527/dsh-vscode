@@ -51,7 +51,7 @@ const RULES = [
     test: /\b401\b|\b403\b|unauthorized|forbidden|invalid[ _-]?api[ _-]?key|incorrect api key|authentication|鉴权|未授权/i,
     title: '服务商拒绝了：密钥不对或没有权限。',
     advice: () =>
-      '看内核 settings.yaml 里这个服务商的 apiKeyEnv 指向哪个环境变量，确认它有值；换过密钥要重启内核。',
+      '确认这个服务商的密钥有值（设置里那一项，或对应的环境变量）；换过密钥要重启 DSH。',
   },
   {
     kind: 'port',
@@ -60,7 +60,7 @@ const RULES = [
     advice: (text) => {
       const port = String(text).match(/\b(\d{4,5})\b/);
       const which = port ? port[1] : '47821';
-      return `先确认 ${which} 上是谁在监听；要换端口，dshPanel.port 和门插件里的 port 得改成同一个。`;
+      return `先看 ${which} 被谁占着；要换端口的话，设置里和 DSH 那边要改成同一个。`;
     },
   },
   {
@@ -70,26 +70,26 @@ const RULES = [
     advice: (text) => {
       const name = String(text).match(/(?:ENOENT[^\n]*?['"]([^'"]+)['"])|(?:'([^']+)' is not recognized)/i);
       const which = (name && (name[1] || name[2])) || 'dsh';
-      return `多半是「${which}」不在 PATH，或 dshPanel.dshCommand 指错了。`;
+      return `多半是没找到「${which}」：在设置里把 DSH 的位置填成完整路径。`;
     },
   },
   {
     kind: 'connection',
     test: /ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EPIPE|EHOSTUNREACH|ENETUNREACH|socket hang ?up|fetch failed|other side closed|连接(?:被对方)?关闭|连接断了|connection refused/i,
-    title: '连不上内核，或连接中途断了。',
+    title: '连不上 DSH，或连接中途断了。',
     advice: () => '直接发消息即可自动重连；不行就执行「DSH：重新连接」。',
   },
   {
     kind: 'preset-locked',
     test: /agent-preset\/locked|预设[^\n]*锁|preset[^\n]*locked/i,
-    title: '内核不允许中途换模式。',
-    advice: () => '点顶栏「新建对话」，新模式在新对话里生效（内核的规矩）。',
+    title: '一段对话中途换不了模式。',
+    advice: () => '点顶栏「新建对话」，新模式在新对话里生效。',
   },
   {
     kind: 'model',
     test: /unknown model|model[^\n]*not (?:found|exist)|no such model|模型不存在/i,
-    title: '这个模型名内核不认识。',
-    advice: () => '核对 dshPanel.model 与内核 settings.yaml 里的 model id；拿不准就留空让内核自己定。',
+    title: '这个模型名 DSH 不认识。',
+    advice: () => '在设置里核对模型名；拿不准就留空，让 DSH 自己挑。',
   },
   {
     kind: 'timeout',
@@ -108,8 +108,8 @@ const RULES = [
  */
 const UNKNOWN = {
   kind: 'unknown',
-  title: '内核报了一个错，这一回合没跑完。',
-  advice: () => '下面是内核原话。看不懂就把这几行发我；或执行「DSH：显示日志」。',
+  title: 'DSH 报了一个错，这一回合没跑完。',
+  advice: () => '下面是它的原话。看不懂就把这几行发我；或执行「DSH：显示日志」。',
 };
 
 /**

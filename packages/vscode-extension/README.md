@@ -194,11 +194,19 @@ error: profile "desktop" is managed exclusively by the Electron application
   内核的 `agentPresets` 在首个回合之后会锁住（`agent-preset/locked`），
   而且 ACP 没把预设暴露成可选配置项。
 - **权限模式**：ACP 同样没暴露（它只认模型/推理强度两个 config option），
-  所以这一项是门插件替内核接出来的旁路方法，**要门 0.0.12 以上**。
-  门太旧的时候按钮会灰掉写「切不了」并告诉你去升哪个档里的门；
-  内核没挂 `@deepseek-ai/dsh-permission-presets` 时也会照实说明。
-  「新会话默认用哪一档」仍然是内核设置（`$DSH_HOME/settings.yaml` 里的
-  `permission.defaultPreset`，桌面端「通用设置」改的就是它），面板只读不改。
+  所以这一项是连接组件替内核接出来的旁路方法，**要 dsh-acp-door 0.0.12 以上**。
+  连的那台太旧、换不了权限时，面板会**自动改用自己启动的那台**（那台的组件
+  是跟本扩展配套的新版）—— 所以「接着桌面端那个内核」不会让你丢掉权限选择器；
+  代价是那一刻会多一个内核进程。真换不了（比如那台 DSH 压根没带权限设置）时，
+  按钮灰掉写「切不了」，原因用一句人话说明（不出现「门」「包名」「版本号」）。
+- **不许在面板里说内部词**（用户 2026-09-20 的原话：「『门』都出来了，别人能
+  知道是什么意思？类似的提示全删了」）。所以界面文案里不许出现：连接组件名
+  （「门」）、包名（`dsh-acp-door` / `dsh-base` / `@deepseek-ai/*`）、版本号
+  （`0.0.12`）、「档」（profile）、设置项全名、「内核原话」这种我们自己才用的说法。
+  **内核自己吐的原文不在此列** —— 它收在「原始报错（点开）」折叠区和日志里，
+  一个字都不删，那是证据不是讲解。这条规矩有三个测试盯着
+  （`test/permission.js` §6 黑名单、`test/panel.js` §8.7 与 §8.9 扫真发出去的消息、
+  `tools/uitest.js` 扫渲染出来的悬浮提示）。
 - **历史会话列表**能列出本机 `$DSH_HOME/sessions` 里的会话（标题、时间、回合数、
   工作目录），点一条就能接回上下文 —— 连的是本机时面板自己读盘，不用门支持什么
   新方法。连**别的机器**上的门时，只能靠门提供 `dsh-door/sessions/*`（0.0.8+），
@@ -210,7 +218,7 @@ error: profile "desktop" is managed exclusively by the Electron application
   | 位置 | 上限 | 例子 |
   | --- | --- | --- |
   | 顶栏状态 | ≤ 24 字、不许换行 | `正在启动…`、`就绪` |
-  | 对话流提示第一行 | ≤ 32 字 | `正在启动内核…`、`沿用已启动的内核。` |
+  | 对话流提示第一行 | ≤ 32 字 | `正在启动 DSH…`、`接着用已经开着的 DSH。` |
   | 提示里引用的内核原话 | 另起一行、≤ 80 字 | `原因：…` |
   | 报错的标题 / 怎么办 | ≤ 32 / ≤ 48 字 | `额度或频率到上限了，这一回合没跑完。` |
 
@@ -219,6 +227,12 @@ error: profile "desktop" is managed exclusively by the Electron application
   第一次会慢一点，之后就快了。」这种长句。这条规矩有两个测试盯着
   （`test/panel.js` §8.9 扫一遍这次跑下来**真发出去过的所有消息**、
   `test/fallback.js` 盯自启那条路），加长文案会直接红。
+- **两个内核的情形**（`autoStart` 打开时）：面板先连 `dshPanel.port`（47821）上
+  现成的那台 —— 桌面端开着时那就是桌面端的内核；如果它换不了权限，面板会改用
+  自己启动的那台（在 `selfStartPort` 上）。所以在「桌面端 + VS Code 面板」同时
+  开着、而桌面档里的连接组件还是旧版时，机器上会有两个内核：一个桌面端的、
+  一个面板自己的。想只要一个，就把桌面那个档里的连接组件也升上来
+  （那个档归桌面端管，升级后要重启桌面端）。
 - **顶栏配置行的宽度怎么分**（同一天定的，用户第二次反馈「模型的占地有点大，
   其他两点有点小」）：三个格子按 7:6:6 分，各自有**下限**（模型 116 / 模式 96 /
   权限 108），用量条排在最后、**装不下就自己换行**（宁可顶栏多一行小条，
@@ -292,8 +306,10 @@ node test/fallback.js    # 自启内核：端口空着时能否从零拉起来�
                          #   $env:DSH_PANEL_TEST_PORT = '47830'; node test/fallback.js
 node test/resume.js      # 断线后 session/resume 到底能不能把上下文接回来（带对照组）
 node test/presets.js     # 模式（agent preset）：新会话挂上、恢复会话补挂、工具没丢
-node test/permission-live.js  # 权限预设（门 0.0.12+）：自己起内核，四档全切一遍，
+node test/permission-live.js  # 权限预设（连接组件 0.0.12+）：自己起内核，四档全切一遍，
                          #   两段会话互不影响、错名字/错会话都要明确报错
+                         #   另有一套纯函数断言盯着「接上的那台换不了权限时要不要换一台」
+                         #   （test/panel.js §8.86；真窗口那条路见 tools/vscode-check.js）
 node test/smoke.js       # 端到端：协议、真回合、工具调用、中断、切模型、多轮、
                          #   以及编辑器上下文（选中代码里的暗号 + 带进来的文件里的暗号）
 node tools/uitest.js     # 无头 Chrome 里对界面做 400+ 项断言（10 个场景，含通用视觉体检：
@@ -318,6 +334,13 @@ node tools/who-owns-door.cjs       # 47821 上那个门是谁开的（桌面端�
                                    # 门没开时会告诉你面板会自己启动一个内核
 node tools/check-eol.cjs           # 有没有文件混着 CRLF 和 LF（逐字节比对最怕这个；混了就非 0 退出）
                                    # 从任何目录跑都一样，不依赖当前工作目录
+# tools/vscode-check.js 是真窗口自检，用法见文件开头：
+#   自启模式（跑完 15 项）：   $env:DSH_PANEL_CHECK_PORT='47832'; node tools/vscode-check.js
+#   接旧门→换内核（跑完 16 项）：$env:DSH_PANEL_CHECK_PORT='47821'
+#                              $env:DSH_PANEL_CHECK_SELF_PORT='47832'
+#                              $env:DSH_PANEL_CHECK_PROFILE='vscode-panel'
+#                              node tools/vscode-check.js
+#   （后者验的是「接上那台换不了权限 → 改用自己启动的那台 → 读完权限」这条链）
 
 node tools/vscode-check.js  # **真 VS Code 窗口里**的自检：开一个隔离窗口（自己的 user-data-dir 和
                             # extensions-dir，不碰你正开着的窗口），用 DSH_PANEL_AUTOFOCUS=1 让它

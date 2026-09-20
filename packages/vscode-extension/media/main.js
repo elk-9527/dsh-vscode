@@ -1129,10 +1129,11 @@
    *
    * 注意：**不再写在按钮上**（那一格只有 4 个字的地方，写了就被切一半），
    * 而是挂在 `data-why` 上给测试看，人看悬浮提示与对话流里的完整说法。
+   * 这几个字同样不许出现「门」「档」这类内部词（用户提过意见）。
    */
   function shortAccessReason(kind) {
-    if (kind === 'old-door') return '门太旧';
-    if (kind === 'no-service') return '内核没装';
+    if (kind === 'old-door') return '版本旧';
+    if (kind === 'no-service') return '没带权限设置';
     return '读不到';
   }
 
@@ -1148,7 +1149,7 @@
     state.pendingAccess = undefined;
     if (!permission) return;
     const options = permission.options;
-    el.accessPopNote.textContent = options.length > 1 ? `${options.length} 档` : '';
+    el.accessPopNote.textContent = options.length > 1 ? `共 ${options.length} 种` : '';
     let active = undefined;
     for (const option of options) {
       const button = document.createElement('button');

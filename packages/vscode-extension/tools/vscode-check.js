@@ -59,8 +59,19 @@ const ROOT = path.resolve(__dirname, '..');
  *   设了 DSH_PANEL_CHECK_PORT，面板和门就都在那个端口上。
  *   档里的门如果是旧版（不认这个变量），面板会两个端口都盯，照样能接上 ——
  *   那条兼容路也在这里被真实走了一遍。
+ *
+ *   还有一种组合要**两个端口不一样**：接的那台换不了权限时，面板会改用自己
+ *   启动的那台（2026-09-20 用户报「切不了权限」的那个修法）。验这条就用
+ *
+ *     $env:DSH_PANEL_CHECK_PORT = '47821'       # 有现成的门（桌面端那个旧组件）
+ *     $env:DSH_PANEL_CHECK_SELF_PORT = '47832'  # 空着的，给自启那台用
+ *
+ *   两个口相同时，"换内核"会换成同一个口上那台（等于没换）—— 那是设置的边界，
+ *   不是这条路的毛病。
  */
 const PORT = Number(process.env.DSH_PANEL_CHECK_PORT || 47821);
+/** 自启内核用的端口（默认跟 PORT 一致；见写设置那一段的注释）。 */
+const SELF_PORT = Number(process.env.DSH_PANEL_CHECK_SELF_PORT || PORT);
 const CHECK_PROFILE = process.env.DSH_PANEL_CHECK_PROFILE || '';
 const CHECK_DSH = process.env.DSH_PANEL_CHECK_DSH || '';
 const args = process.argv.slice(2);
@@ -328,11 +339,18 @@ async function main() {
 
   // 只在设了覆盖项时才写设置 —— 写的是**隔离窗口自己的** user settings，
   // 你的设置一个字都不会动。
-  if (CHECK_PROFILE || CHECK_DSH || PORT !== 47821) {
+  if (CHECK_PROFILE || CHECK_DSH || PORT !== 47821 || SELF_PORT !== PORT) {
     const settings = { 'dshPanel.port': PORT };
-// 自启的内核把门钉在"面板自己的端口"上；自检里让它和 PORT 一致，
-// 于是"接入"和"自启"两条路都落在同一个端口上，端口空着就走自启。
-settings['dshPanel.selfStartPort'] = PORT;
+    /*
+     * 自启的内核把门钉在"面板自己的端口"上；自检里默认让它和 PORT 一致，
+     * 于是"接入"和"自启"两条路都落在同一个端口上，端口空着就走自启。
+     *
+     * 但有一条路需要两者**不同**：`DSH_PANEL_CHECK_PORT=47821`（桌面端那个
+     * 旧连接组件所在的口）+ 另一个空着的自启口 —— 那是「接上了，但那台换不了
+     * 权限，于是改用自己启动的那台」这条路（2026-09-20 用户报的那个）。
+     * 用 DSH_PANEL_CHECK_SELF_PORT 指定它。
+     */
+    settings['dshPanel.selfStartPort'] = SELF_PORT;
     if (CHECK_PROFILE) settings['dshPanel.fallbackProfile'] = CHECK_PROFILE;
     if (CHECK_DSH) settings['dshPanel.dshCommand'] = CHECK_DSH;
     const settingsDir = path.join(userData, 'User');
@@ -382,12 +400,31 @@ settings['dshPanel.selfStartPort'] = PORT;
   // 「还没有那一行」的旧快照，于是断言误报（真踩过：13 项里红这一项，
   // 而日志文件里其实有那行）。所以这里再等一小会儿，专门等它出现；
   // 两样都没有才是真的没结果（那正是要报出来的情况）。
+  /*
+   * 权限那一路：**等到有结论**再判断。
+   *
+   * 三种结论都算"有结果"：读到了清单 / 换了内核之后读到了（同样是「当前权限：」）/
+   * 明确说清了换不了（「权限预设读不到（…）」而且日志不再动）。
+   *
+   * 为什么不能"一看到「权限预设读不到」就跳出"：接上的那台换不了权限时，面板
+   * 会去启动自己那台（要十几秒），日志里**先出现的是换之前那条** ——
+   * 一看到它就跳出，就会把"正在换"当成"换不了"（2026-09-20 真踩过：
+   * 断言红，而日志再往后几行就写着「改用面板自己启动的」+「当前权限：」）。
+   */
   const accessStart = Date.now();
-  while (Date.now() - accessStart < 10000) {
-    if (/当前权限：|权限预设读不到（/.test(panelText)) break;
-    sleep(500);
+  let lastLen = -1;
+  let stableSince = Date.now();
+  while (Date.now() - accessStart < 90000) {
     const file = findPanelLog(userData);
     if (file) panelText = fs.readFileSync(file, 'utf8');
+    if (/当前权限：/.test(panelText)) break;
+    if (panelText.length !== lastLen) {
+      lastLen = panelText.length;
+      stableSince = Date.now();
+    } else if (Date.now() - stableSince > 5000 && /权限预设读不到（/.test(panelText)) {
+      break;
+    }
+    sleep(700);
   }
 
   console.log('');
@@ -418,35 +455,60 @@ settings['dshPanel.selfStartPort'] = PORT;
     panelText ? `等了 ${waited} 秒` : `等了 ${waited} 秒还没读到扩展日志`);
 
   // 权限选择器：界面那一半在 tools/uitest.js 里用真浏览器点过了，这里要证明
-  // **真窗口里那份清单也是从内核读回来的**（门 → 内核 permissionPresets → 面板）。
-  // 连的是旧门（桌面端那个档里的门还没升到 0.0.12）时，这条路本来就该走
-  // 「切不了」那句解释 —— 两种结果都算过，但不许两样都没有。
+  // **真窗口里那份清单也是从内核读回来的**（扩展 → DSH → 内核 permissionPresets）。
+  // 连的那台不支持权限方法时，正确的结果是**改用面板自己启动的那台**
+  // （2026-09-20 用户报「改了之后我切换不了权限了」的修法）；实在换不了才走
+  // 「换不了权限」那句解释。三种结果都算过，但不许一样都没有。
   const accessRead = /当前权限：/.test(panelText);
   const accessUnavailable = /权限预设读不到（/.test(panelText);
-  check('权限那一路有结果（读到清单，或者明确说清为什么切不了）',
-    accessRead || accessUnavailable,
-    accessRead ? '读到了清单' : accessUnavailable ? '走了「切不了」那条解释' : '两样都没有');
+  const switched = /改用面板自己启动的/.test(panelText);
+  check('权限那一路有结果（读到清单，或者换了内核，或者明确说清为什么换不了）',
+    accessRead || switched || accessUnavailable,
+    accessRead ? '读到了清单' : switched ? '换了内核' : accessUnavailable ? '走了「换不了」那条解释' : '三样都没有');
+  if (switched) {
+    // 换内核这条路的完整证据链：先说清为什么（old-door），再换，最后读到了清单。
+    const at = panelText.indexOf('改用面板自己启动的');
+    const whyBefore = /权限预设读不到（old-door）/.test(panelText.slice(0, at));
+    const readAfter = /当前权限：/.test(panelText.slice(at));
+    check('换内核之前说清了原因，换完之后真的读到了权限清单',
+      whyBefore && readAfter,
+      `换之前有原因=${whyBefore}，换之后读到清单=${readAfter}`);
+  }
   if (accessRead) {
     const line = panelText.split('\n').filter((item) => item.includes('当前权限：')).pop() || '';
     check('读到的那一档是个认识的名字（不是 undefined / 空白）',
       /当前权限：.+（[\w-]+）/.test(line), line.trim().slice(0, 90));
   }
+  /*
+   * 「界面文案里不许有内部词（门 / 包名 / 版本号）」这条不在这儿验 ——
+   * 输出面板里的日志本来就该带这些词（它是给排障看的）。那条规矩守在
+   * **真发出去的消息**上：test/panel.js §8.9 把整套跑下来发过的每条提示、
+   * 报错标题/建议、顶栏状态都扫了一遍，tools/uitest.js 再在真浏览器里看渲染结果。
+   */
 
-  // 拉起内核这件事：接入模式下必须**没有**新内核，自启模式下必须有。
+  // 拉起内核这件事：接入模式下（且不需要换内核时）必须**没有**新内核，自启模式下必须有。
+  // 「接了又换掉」是第三种：接上的那台换不了权限（桌面端那个内核就是），
+  // 面板会改用自己启动的那台 —— 这时**必须**有新内核，不然权限还是切不了。
   const kernel = ourKernels(beforePids)[0];
-  if (attached) {
+  const suspects = () =>
+    newProcesses(beforePids)
+      .filter((item) => /--no-open/.test(item.cmdline))
+      .map((item) => `${item.pid}(${item.name}: ${item.cmdline.slice(0, 70)})`);
+  if (attached && switched) {
+    check('接入但换内核模式：接的那台换不了权限，于是自己起了一台（权限才切得动）',
+      Boolean(kernel),
+      kernel ? `PID ${kernel.pid}（${kernel.cmdline.slice(0, 80)}）`
+        : `没找到；现场有 ${suspects().length} 个 --no-open 进程：${suspects().join(' / ') || '一个都没有'}`);
+  } else if (attached) {
     check('接入模式：连着正在跑的门，没有另起内核（一个进程、一个大脑）', !kernel,
       kernel ? `却拉起了 PID ${kernel.pid}` : '没有新内核');
   } else {
     // 找不到时把「所有像内核的进程」列出来，方便一眼看出是漏判还是真没起。
-    const suspects = newProcesses(beforePids)
-      .filter((item) => /--no-open/.test(item.cmdline))
-      .map((item) => `${item.pid}(${item.name}: ${item.cmdline.slice(0, 70)})`);
     check('自启模式：自己拉起了 DSH 内核（不用先开桌面端）', Boolean(kernel),
       kernel ? `PID ${kernel.pid}（${kernel.cmdline.slice(0, 80)}）`
-        : `没找到；现场有 ${suspects.length} 个 --no-open 进程：${suspects.join(' / ') || '一个都没有'}`);
-    if (kernel) fs.writeFileSync(path.join(sandbox, 'kernel-cmdline.txt'), kernel.cmdline, 'utf8');
+        : `没找到；现场有 ${suspects().length} 个 --no-open 进程：${suspects().join(' / ') || '一个都没有'}`);
   }
+  if (kernel) fs.writeFileSync(path.join(sandbox, 'kernel-cmdline.txt'), kernel.cmdline, 'utf8');
 
   /*
    * 停一会儿再看一眼（DSH_PANEL_CHECK_LINGER=90）。
