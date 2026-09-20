@@ -1,5 +1,5 @@
 /*
- * ACP 接入点插件（dsh-acp-door）应当监听哪个端口。该判定单独构成一个纯模块，便于测试，
+ * ACP 接入点插件（dsh-acp-door）应当监听哪个地址和端口。该判定单独构成一个纯模块，便于测试，
  * 也无须为验证它而载入整个插件（该插件需要 import 内核）。
  *
  * 优先顺序：环境变量 `DSH_ACP_DOOR_PORT` > 档中配置的 `port` > 默认 47821。
@@ -12,8 +12,25 @@
  * 传 0 合法（由系统分配空闲端口），因此判定条件为 >= 0。
  */
 
+/** 接入点固定使用的回环地址。没有鉴权，因此不得接受其它地址。 */
+export const LOOPBACK_HOST = '127.0.0.1';
+
 /** 档中未配置且环境变量未设置时使用的端口（与桌面端一致，便于客户端直接连接）。 */
 export const DEFAULT_PORT = 47821;
+
+/**
+ * 规整监听地址。配置中的 host 仅为旧版配置兼容而保留；任何非回环值都不会生效。
+ *
+ * 返回 rejected 使调用方能够写入明确诊断，避免用户误以为接入点已暴露到局域网。
+ */
+export function resolveDoorHost(config = {}) {
+  const requested =
+    config && typeof config.host === 'string' ? config.host.trim() : '';
+  return {
+    host: LOOPBACK_HOST,
+    rejected: Boolean(requested && requested !== LOOPBACK_HOST),
+  };
+}
 
 /**
  * 把一个可能为数字、也可能为空值或无效值的输入转换为合法端口；不合法时返回 undefined。

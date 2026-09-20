@@ -6,7 +6,7 @@
  * 界面停留在「正在启动…」，用户需等待约两分钟。目前面板可用 DSH_ACP_DOOR_PORT 固定
  * 该端口，这一层的优先级必须有测试覆盖，否则调整判定顺序会造成静默回退。
  */
-import { DEFAULT_PORT, resolveDoorPort } from '../lib/port.js';
+import { DEFAULT_PORT, LOOPBACK_HOST, resolveDoorHost, resolveDoorPort } from '../lib/port.js';
 
 let passed = 0;
 let failed = 0;
@@ -24,6 +24,18 @@ function check(name, condition, detail = '') {
 
 console.log('\n── 该插件的端口判定 ───────────────────────────────────');
 
+check('监听地址固定为 127.0.0.1（没有鉴权，不允许暴露到其它地址）', LOOPBACK_HOST === '127.0.0.1');
+check(
+  '未配置地址或明确回环地址 → 监听 127.0.0.1，且不产生拒绝标记',
+  resolveDoorHost({}).host === LOOPBACK_HOST && !resolveDoorHost({ host: '127.0.0.1' }).rejected,
+);
+check(
+  '0.0.0.0、localhost、局域网地址均被拒绝并固定回环',
+  ['0.0.0.0', 'localhost', '192.168.1.8'].every((host) => {
+    const result = resolveDoorHost({ host });
+    return result.host === LOOPBACK_HOST && result.rejected;
+  }),
+);
 check('默认是 47821（与桌面端一致，便于"有该插件即连接"）', DEFAULT_PORT === 47821, String(DEFAULT_PORT));
 check('什么都没配 → 默认端口', resolveDoorPort({}, {}) === 47821);
 check('档里配了 → 用档里的', resolveDoorPort({ port: 1234 }, {}) === 1234);

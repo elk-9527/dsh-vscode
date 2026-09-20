@@ -46,7 +46,7 @@ import {
 } from './frames.js';
 import { DEFAULT_LIST_LIMIT, getSession, listSessions, resolveSessionsRoot } from './sessions.js';
 // 端口判定单独构成一个纯模块：否则必须载入整个插件（需 import 内核）才能测试该判定。
-import { resolveDoorPort } from './port.js';
+import { LOOPBACK_HOST, resolveDoorHost, resolveDoorPort } from './port.js';
 // 权限预设的旁路方法（纯帧工具与载荷规整），理由见该文件开头。
 import {
   DOOR_ERR_NO_SESSION,
@@ -76,9 +76,6 @@ export const name = 'acp-door';
  * 缺少该服务的 profile 将直接不启动该接入点，可直接观察，优于静默产生一个没有可用工具的 agent。
  */
 export const inject = ['agents', 'llm', 'sessionPersistence', 'sessions', 'agentPresets'];
-
-const DEFAULT_HOST = '127.0.0.1';
-
 
 /** 新会话默认挂载的 agent preset（客户端未指定时使用）。 */
 const DEFAULT_PRESET = 'standard';
@@ -580,7 +577,7 @@ function isPresetLocked(error) {
  *
  * @param ctx - 内核上下文（由 DSH 注入上面列出的服务）。
  * @param config - 见 cordis.patch.yml。
- * @param config.host - 监听地址，默认 127.0.0.1（不应改为 0.0.0.0）。
+ * @param config.host - 旧版兼容字段。接入点固定监听 127.0.0.1，其它取值会被忽略。
  * @param config.port - 监听端口，默认 47821；传 0 由系统分配一个空闲端口。
  *   优先级：环境变量 `DSH_ACP_DOOR_PORT` > 此处的配置 > 默认值。
  *   设置环境变量这一层的原因（2026-09-19）：端口原先只写在档的配置中，
@@ -600,12 +597,18 @@ function isPresetLocked(error) {
  *   `DSH_ACP_DOOR_DIAG`）。不配置则完全不写入。
  */
 export function apply(ctx, config = {}) {
-  const host = config.host ?? DEFAULT_HOST;
+  const { host, rejected: rejectedHost } = resolveDoorHost(config);
   const port = resolveDoorPort(config, process.env);
   const { provider, model } = config;
   const preset =
     typeof config.preset === 'string' && config.preset ? config.preset : DEFAULT_PRESET;
   const diag = makeDiag(config.diagLog ?? process.env.DSH_ACP_DOOR_DIAG);
+
+  if (rejectedHost) {
+    const warning = `acp-door: 已忽略非回环监听地址；该插件固定监听 ${LOOPBACK_HOST}`;
+    diag(warning);
+    ctx.logger?.warn?.(warning);
+  }
 
   // 历史会话：目录与内核采用同一套判定（DSH_HOME 或 ~/.dsh）。只读，见 lib/sessions.js。
   const sessionsRoot =

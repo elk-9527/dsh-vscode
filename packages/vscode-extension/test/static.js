@@ -178,6 +178,8 @@ check(
 const extensionManifest = JSON.parse(read('package.json'));
 const settings = extensionManifest.contributes.configuration.properties;
 const doorPatch = read('../dsh-door/cordis.patch.yml');
+const doorRuntime = read('../dsh-door/lib/index.js');
+const doorPortModule = read('../dsh-door/lib/port.js');
 const doorPort = Number(/^\s*port:\s*(\d+)/m.exec(doorPatch)?.[1]);
 const doorHost = /^\s*host:\s*([\d.]+)/m.exec(doorPatch)?.[1];
 
@@ -195,6 +197,10 @@ check(
   '该插件只监听回环地址',
   doorHost === '127.0.0.1' || doorHost === 'localhost',
   `该插件监听在 ${doorHost}`,
+);
+check(
+  '该插件在运行时固定回环地址（配置中的其它地址不会生效）',
+  /resolveDoorHost/.test(doorRuntime) && /LOOPBACK_HOST\s*=\s*'127\.0\.0\.1'/.test(doorPortModule),
 );
 check(
   // 2026-09-19 修改：默认档原为 desktop，而该档被桌面端独占，命令行无法启动
