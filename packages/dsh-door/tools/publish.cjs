@@ -1,22 +1,22 @@
 #!/usr/bin/env node
 /*
- * 把这个门插件发到 npm（DSH 的插件市场就是从 npm / GitHub Release 装的）。
+ * 将 ACP 接入点插件（`dsh-acp-door`）发布到 npm（DSH 的插件市场从 npm / GitHub Release 安装）。
  *
- * 背景（2026-09-20 查的，别记错）：DSH 这边的"插件市场"不是一个上传后台，
- * 而是 —— ① 官方客户端里的市场（dsh-market / dsh-community-market）和
- * ② 目录站，两者都读同一份**精选列表** `awesome-dsh-plugin/awesome-dsh-plugin`。
- * 上架的完整动作是：
+ * 背景（2026-09-20 查证）：DSH 的"插件市场"不是一个上传后台，
+ * 而是 —— ① 官方客户端中的市场（dsh-market / dsh-community-market）与
+ * ② 目录站，两者都读取同一份**精选列表** `awesome-dsh-plugin/awesome-dsh-plugin`。
+ * 上架的完整步骤是：
  *
- *   1. 把包发到 npm（可选，但强烈建议：市场装插件优先用"经仓库验证的 npm 包"）；
- *   2. 给那份精选列表提一个 PR，加 **一个文件**
- *      `data/plugins/<owner>__<repo>.yml`（内容这个脚本会打印给你，直接抄）。
+ *   1. 将包发布到 npm（可选，但建议执行：市场安装插件优先采用"经仓库验证的 npm 包"）；
+ *   2. 向该精选列表提交一个 PR，新增 **一个文件**
+ *      `data/plugins/<owner>__<repo>.yml`（内容由本脚本打印，可直接复制）。
  *
- * 凭据：脚本不读、不打印你的 token。`npm publish` 自己认 `npm login` 或
- * 环境变量 `NODE_AUTH_TOKEN`（配在 .npmrc 里）。
+ * 凭据：脚本不读取、不打印 token。`npm publish` 自行识别 `npm login` 或
+ * 环境变量 `NODE_AUTH_TOKEN`（配置在 .npmrc 中）。
  *
  * 用法：
- *   node tools/publish.cjs          # 彩排：自检 + npm pack --dry-run + 打印要提的 PR 内容
- *   node tools/publish.cjs --yes    # 真发到 npm
+ *   node tools/publish.cjs          # 试运行：自检 + npm pack --dry-run + 打印拟提交的 PR 内容
+ *   node tools/publish.cjs --yes    # 实际发布到 npm
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -62,9 +62,9 @@ const brokenImages = urls.filter((src) => !/^https?:/.test(src) && !fs.existsSyn
 check(brokenImages.length === 0, 'README 里的图片都在（相对路径按本包目录算）', brokenImages.join(', ') || '都在');
 
 /*
- * 市场的截图清单：**放在本仓库**（`screenshots.json`，紧跟 package.json）——
- * 上游 contributing.md 明确要求这么做：写死在他们那边的绝对 URL 会悄悄烂掉
- * （已发布的 773 张里有 41 张就是这样 404 的），相对路径在自己仓库里改名立刻可见。
+ * 市场的截图清单：**放在本仓库**（`screenshots.json`，与 package.json 同级）——
+ * 上游 contributing.md 明确要求如此：写死在上游仓库的绝对 URL 会失效
+ * （已发布的 773 张中有 41 张即因此返回 404），相对路径在本仓库改名后可立即发现。
  * 规则：1–8 张；相对路径不能以 / 开头、不能含 ..；也接受 GitHub 托管的 https 绝对地址。
  */
 const shotFile = path.join(ROOT, 'screenshots.json');
@@ -85,7 +85,7 @@ if (Array.isArray(shots)) {
   check(bad.length === 0, '截图路径都在本包里、且没跳出目录', bad.join(', ') || '都在');
 }
 
-// 装出来的 tarball 里到底有什么 —— 只该有 lib / cordis.patch.yml / README / CHANGELOG / LICENSE。
+// 打包生成的 tarball 实际含有的文件 —— 应当只包含 lib / cordis.patch.yml / README / CHANGELOG / LICENSE。
 console.log('\n  ── 包内文件（npm pack --dry-run）─────────────────────────');
 const pack = spawnSync('npm', ['pack', '--dry-run'], { cwd: ROOT, stdio: 'inherit', shell: true, windowsHide: true });
 if (pack.status !== 0) process.exit(1);
@@ -96,7 +96,7 @@ const entry = [
   'category: dev',
   'description:',
   "  en: 'Loopback-only ACP door for DeepSeek Harness: attach an external client (such as the DSH Panel VS Code extension) to the kernel you already have running, exposing session listing and permission presets.'",
-  '  zh: 给正在运行的 DeepSeek Harness 内核多开一扇只监听本机的 ACP 门，让外部客户端（如 VS Code 的 DSH 面板）接上同一个内核，并接出会话列表与权限预设。',
+  '  zh: 为正在运行的 DeepSeek Harness 内核新增一个仅监听本机回环地址的 ACP 接入点，供外部客户端（如 VS Code 的 DSH 面板）连接同一个内核，并接出会话列表与权限预设。',
 ].join('\n');
 
 console.log('\n  ── 上架精选列表要提的那个文件 ───────────────────────────');

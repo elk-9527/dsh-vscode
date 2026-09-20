@@ -1,9 +1,9 @@
 /**
- * 门的「看帧/改帧」纯函数测试。
+ * ACP 接入点插件（`dsh-acp-door`）的帧解析与改写纯函数测试。
  *
- * 为什么要有这一层：门本体只能在**真内核**里跑（起进程、连 TCP、等模型），
- * 一次几十秒；而这里这些判断是纯函数，几毫秒就能全测一遍。所以凡是能拿到
- * 外面来的逻辑，都放在 lib/frames.js 里，由这个文件盯着。
+ * 设置该层的原因：该插件本体只能在**真实内核**中运行（启动进程、建立 TCP 连接、等待模型响应），
+ * 单次执行耗时数十秒；此处覆盖的判断均为纯函数，全部执行耗时数毫秒。因此凡是可以脱离内核
+ * 独立测试的逻辑都放在 lib/frames.js 中，由本文件负责验证。
  *
  * 跑法：node test/frames.js
  */
@@ -46,7 +46,7 @@ function equal(label, actual, expected) {
 }
 
 // ─────────────────────────────────────────────────────────────
-section('1. parseLine：坏行不能把门搞崩');
+section('1. parseLine：坏行不得使该插件异常');
 equal('正常一帧', parseLine('{"id":1,"method":"session/new"}\n').method, 'session/new');
 equal('前后有空白也认', parseLine('  {"id":2}\t').id, 2);
 equal('空行 → undefined', parseLine(''), undefined);
@@ -75,7 +75,7 @@ equal('正常点名', requestedPreset(meta('ptc')), 'ptc');
 equal('两边空白会去掉', requestedPreset(meta('  cordis  ')), 'cordis');
 equal('没带 _meta → undefined', requestedPreset({ params: {} }), undefined);
 equal(
-  '_meta 里没有本门的键 → undefined',
+  '_meta 里没有该插件的键 → undefined',
   requestedPreset({ params: { _meta: { other: { preset: 'ptc' } } } }),
   undefined,
 );
@@ -85,7 +85,7 @@ equal('preset 全是空格 → undefined', requestedPreset(meta('   ')), undefin
 equal('preset 是 null → undefined', requestedPreset(meta(null)), undefined);
 equal('meta 不是对象也不炸', requestedPreset({ params: { _meta: { [DOOR_META_KEY]: 'ptc' } } }), undefined);
 equal('整帧 undefined 也不炸', requestedPreset(undefined), undefined);
-equal('本门的键名就是 dsh-door', DOOR_META_KEY, 'dsh-door');
+equal('该插件的键名就是 dsh-door', DOOR_META_KEY, 'dsh-door');
 
 // ─────────────────────────────────────────────────────────────
 section('4. isResponseTo：只认我们等的那几个 id');
@@ -128,13 +128,13 @@ equal('不是数组 → 空清单', normalizePresets('nope').length, 0);
 equal('undefined → 空清单', normalizePresets(undefined).length, 0);
 equal('空数组 → 空清单', normalizePresets([]).length, 0);
 equal('order 是 NaN 就不带', 'order' in normalizePresets([{ id: 'a', order: Number.NaN }])[0], false);
-equal('兜底清单有 4 个', FALLBACK_PRESETS.length, 4);
+equal('后备清单有 4 个', FALLBACK_PRESETS.length, 4);
 check(
-  '兜底清单的 id 跟内核自带的对得上',
+  '后备清单的 id 与内核自带的对得上',
   FALLBACK_PRESETS.map((p) => p.id).join(',') === 'standard,ptc,minimal,cordis',
   FALLBACK_PRESETS.map((p) => p.id).join(','),
 );
-check('兜底清单每个都带中文名', FALLBACK_PRESETS.every((p) => typeof p.name === 'string' && p.name));
+check('后备清单每个都带中文名', FALLBACK_PRESETS.every((p) => typeof p.name === 'string' && p.name));
 
 // ─────────────────────────────────────────────────────────────
 section('6. withPresetMeta：只加 _meta，别的一个不动');
@@ -174,7 +174,7 @@ equal(
 );
 equal('没有就 undefined', readPresetMeta({ id: 1, result: {} }), undefined);
 equal('坏帧也不炸', readPresetMeta(undefined), undefined);
-// 一条完整的来回：客户端点名 → 门补清单 → 客户端读
+// 一次完整往返：客户端指定预设名，该插件补全清单，客户端读取
 const roundTrip = withPresetMeta(
   { id: 9, result: { sessionId: 's1' } },
   { presets: normalizePresets([{ id: 'minimal', name: '极简模式' }]), current: requestedPreset(meta('minimal')) },
@@ -182,11 +182,11 @@ const roundTrip = withPresetMeta(
 equal('点名什么，回来就是什么', readPresetMeta(roundTrip).current, 'minimal');
 
 // ─────────────────────────────────────────────────────────────
-// 出站中继是异步管道，放 async 段里测；总结在最后统一打。
+// 出站中继是异步管道，因此在 async 段内测试；总结在最后统一输出。
 async function relayTests() {
   section('8. createOutboundRelay：写进来的行必须真的从 sink 出来');
   const encoder = new TextEncoder();
-  // 假 sink：收字节，攒成一个字符串。真 socket 在 web 化之后长这样。
+  // 模拟 sink：接收字节并累积为一个字符串。真实 socket 在 web 化之后与此相同。
   const chunks = [];
   const sink = new WritableStream({
     write(chunk) {
@@ -214,19 +214,19 @@ async function relayTests() {
   await flushRelay();
   equal('普通回复一字不改地通过', text(chunks), '{"jsonrpc":"2.0","id":7,"result":{"ok":true}}\n');
 
-  // (2) session/new 的回复：要补上预设清单。
+  // (2) session/new 的回复：需要补全预设清单。
   state.replies.set(8, { request: 8, preset: undefined });
   await writer.write(encoder.encode('{"jsonrpc":"2.0","id":8,"result":{"sessionId":"s1"}}\n'));
   await flushRelay();
   const lines = text(chunks).split('\n').filter(Boolean);
   const decorated = parseLine(lines[lines.length - 1]);
   check('session/new 回复带上了 _meta 清单', Boolean(readPresetMeta(decorated)), text(chunks));
-  equal('清单里是兜底四项', readPresetMeta(decorated).presets.length, FALLBACK_PRESETS.length);
+  equal('清单里是后备四项', readPresetMeta(decorated).presets.length, FALLBACK_PRESETS.length);
   equal('current 报默认预设', readPresetMeta(decorated).current, 'standard');
   equal('sessionId 没被动过', decorated.result.sessionId, 's1');
 
-  // (3) 门自己的旁路应答（state.respond）跟内核回复走**同一个**写出口，
-  //     而且先后顺序不乱 —— 两个来源交错写会把一行 JSON 劈成两半。
+  // (3) 该插件自身的旁路应答（state.respond）与内核回复使用**同一个**写出通道，
+  //     且先后顺序不会错乱 —— 两个来源交错写入会将一行 JSON 拆成两段。
   chunks.length = 0;
   state.respond(doorSessionsResult(99, { sessions: [], skipped: 0 }));
   await writer.write(encoder.encode('{"jsonrpc":"2.0","id":10,"result":{}}\n'));
@@ -235,7 +235,7 @@ async function relayTests() {
     text(chunks),
     '{"jsonrpc":"2.0","id":99,"result":{"sessions":[],"skipped":0}}\n{"jsonrpc":"2.0","id":10,"result":{}}\n');
 
-  // (4) 半截行（没有换行）不提前出站；close 时吐出来。
+  // (4) 不完整的行（没有换行）不提前出站；close 时输出。
   chunks.length = 0;
   await writer.write(encoder.encode('{"partial":'));
   await flushRelay();
@@ -245,7 +245,7 @@ async function relayTests() {
   await flushRelay();
   equal('close 时把半截行吐出来', text(chunks), '{"partial":');
 
-  // (5) 坏行也不炸：装饰抛错就原样放行。
+  // (5) 损坏的行不导致失败：装饰抛错时原样放行。
   const state2 = makeState();
   const sink2Chunks = [];
   const relay2 = createOutboundRelay(
@@ -260,9 +260,9 @@ async function relayTests() {
   writer2.releaseLock();
   await relay2.close();
 
-  // (6) 建会话**失败**时，点名必须从队列里摘掉 —— 否则下一次建会话会领到它。
-  //     这是一个真实存在过的 bug：预筛里有 `line.includes('"result"')`，
-  //     于是"只有 error、没有 result"的回复根本没被看，队列永远不清理。
+  // (6) 建会话**失败**时，指定的预设名必须从队列中移除 —— 否则下一次建会话会取到它。
+  //     这是一个实际出现过的 bug：预筛条件为 `line.includes('"result"')`，
+  //     于是"只有 error、没有 result"的回复完全没有被处理，队列始终不清理。
   const state3 = makeState();
   state3.queue = [];
   state3.resumes = new Map();
@@ -274,7 +274,7 @@ async function relayTests() {
   );
   const writer3 = relay3.getWriter();
 
-  // 用户点名 ptc 建会话 → 失败。
+  // 用户指定 ptc 预设建立会话，请求失败。
   const failedAsk = { request: 21, preset: 'ptc' };
   state3.queue.push(failedAsk);
   state3.replies.set(21, failedAsk);
@@ -286,7 +286,7 @@ async function relayTests() {
   equal('失败的点名已从队列里摘掉', state3.queue.length, 0);
   equal('失败请求也从"等回复"里摘掉了', state3.replies.size, 0);
 
-  // 下一次建会话（这次没点名）：必须拿不到上一次那个 ptc。
+  // 下一次建会话（本次未指定预设）：不得取到上一次的 ptc。
   const nextAsk = { request: 22, preset: undefined };
   state3.queue.push(nextAsk);
   state3.replies.set(22, nextAsk);
@@ -299,7 +299,7 @@ async function relayTests() {
     state3.queue.length === 1 && state3.queue[0] === nextAsk,
     `队列 ${state3.queue.map((item) => `${item.request}:${item.preset ?? '-'}`).join(',') || '(空)'}`);
 
-  // session/resume 失败同理：resumes 里那条也要摘掉。
+  // session/resume 失败时同理：resumes 中的对应条目同样需要移除。
   const resumeAsk = { request: 23, preset: 'minimal', sessionId: 's9' };
   state3.resumes.set('s9', resumeAsk);
   state3.replies.set(23, resumeAsk);
@@ -307,10 +307,10 @@ async function relayTests() {
   await flushRelay();
   check('恢复失败时 resumes 里那条也摘掉了', !state3.resumes.has('s9'));
 
-  // 没跟踪过的 id 出错：不碰任何状态，也不多说话。
+  // 未跟踪过的 id 出错：不改变任何状态，也不产生额外输出。
   state3.replies.clear();
   const before = JSON.stringify([...state3.resumes.keys()]);
-  await writer3.write(encoder.encode('{"jsonrpc":"2.0","id":404,"error":{"code":-32601,"message":"不认识的方法"}}\n'));
+  await writer3.write(encoder.encode('{"jsonrpc":"2.0","id":404,"error":{"code":-32601,"message":"未知的方法"}}\n'));
   await flushRelay();
   equal('没跟踪过的出错回复不碰状态', JSON.stringify([...state3.resumes.keys()]), before);
   writer3.releaseLock();
@@ -333,12 +333,12 @@ try {
 }
 
 // ─────────────────────────────────────────────────────────────
-// waitForMount：入站/出站两道闸共用的「等，但必须有上限」。
-// 它防的是「内核某个服务永不落定 → 消息被永久按住、静默消失」——
-// 这种故障没有报错、没有日志，只有用户"发了没反应"。
+// waitForMount：入站与出站两处等待共用的「等待，但必须有上限」。
+// 其防范的场景是「内核某个服务永不落定 → 消息被永久扣留、静默消失」——
+// 此类故障没有报错、没有日志，用户侧的表现只有"发出后没有响应"。
 section('9. waitForMount：等挂载，但绝不无限等');
 
-/** 取一个永远不会自己落定的 promise（外加一个收尾用的 resolve）。 */
+/** 构造一个永不自行落定的 promise，并额外提供用于收尾的 resolve。 */
 function makeNever() {
   let release;
   const promise = new Promise((resolve) => {
@@ -354,12 +354,12 @@ try {
   const waited = Date.now() - t0;
   check('永不落定的挂载：到点放行（返回 false）', timedOut === false, `返回 ${timedOut}`);
   check('确实等满了上限才放行', waited >= 35 && waited < 2000, `等了 ${waited}ms`);
-  never.release('late'); // 收尾，别把定时器悬在那里
+  never.release('late'); // 收尾，避免定时器持续挂起
 
   equal('正常落定：返回 true', await waitForMount(Promise.resolve('ok'), 1000), true);
   equal(
     '挂载失败也算落定（返回 true，不因为它无限等）',
-    await waitForMount(Promise.reject(new Error('挂载挂了')), 1000),
+    await waitForMount(Promise.reject(new Error('挂载失败')), 1000),
     true,
   );
   equal('没有 pending（undefined）：直接放行', await waitForMount(undefined, 1000), true);

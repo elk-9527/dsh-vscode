@@ -5,13 +5,13 @@
     - id: acp-door
       name: dsh-acp-door
       config:
-        # 只监听本机回环。改 host 会把门开到局域网上，别改。
+        # 仅监听本机回环地址。修改 host 会使该插件在局域网上可达，因此不得修改。
         host: 127.0.0.1
         port: 47821
-        # 新会话的初始模型；面板连上后可以按会话再改。
+        # 新会话的初始模型；面板接入后可按会话另行修改。
         provider: opencode-go
         model: deepseek-v4.1-flash
-        # 新会话挂载哪套 agent preset。桌面端把宿主层的工具全关了、改成
-        # 「每个会话按预设挂载」，而 ACP 这条路从不点名预设，所以门要替它补上。
+        # 新会话挂载哪套 agent preset。桌面端已关闭宿主层的全部工具，改为
+        # 「每个会话按预设挂载」，而 ACP 路径不指定预设，因此由该插件补挂。
         # 可选：standard（标准）| ptc（PTC 模式）| cordis（创造模式）| minimal（极简模式）。
         preset: standard

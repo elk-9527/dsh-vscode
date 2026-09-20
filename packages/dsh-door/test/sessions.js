@@ -1,8 +1,8 @@
 /**
- * 门的「历史会话」读取测试。
+ * ACP 接入点插件（`dsh-acp-door`）的「历史会话」读取测试。
  *
- * 不依赖真内核：自己用 zlib.zstdCompressSync 造一份**多帧**会话文件
- * （事件形状按实测逆向的 v3 格式抄），把解码、名片、回放、按 id 取全部过一遍。
+ * 不依赖真实内核：本文件用 zlib.zstdCompressSync 构造一份**多帧**会话文件
+ * （事件形状依据实测逆向得到的 v3 格式），对解码、名片、回放、按 id 取全部执行一遍。
  *
  * 跑法：node test/sessions.js（Node 没有 zstd 时退出码 2 = 环境不满足）
  */
@@ -55,7 +55,7 @@ if (!hasZstdSupport()) {
   process.exit(2);
 }
 
-/** 造一个会话文件：把若干批事件各自压成一帧再拼接 —— 模拟内核的多帧写法。 */
+/** 构造一个会话文件：将若干批事件分别压缩为一帧后拼接 —— 模拟内核的多帧写法。 */
 function writeSession(root, group, dirName, batches) {
   const dir = path.join(root, group, dirName);
   fs.mkdirSync(dir, { recursive: true });
@@ -71,7 +71,7 @@ function writeSession(root, group, dirName, batches) {
 
 const base = Date.now();
 
-/** 一段内容完整的假会话（覆盖：标题、插件噪音、思考、工具、坏帧）。 */
+/** 一段内容完整的模拟会话（覆盖：标题、插件噪音、思考、工具、损坏的帧）。 */
 function sampleEvents({ id = 'session-abc123', turnTime = base, withTool = true } = {}) {
   const events = [
     { type: 'session', version: 3, id, createdAt: turnTime, cwd: 'D:\\demo', agentPreset: 'standard' },
@@ -164,13 +164,13 @@ section('3. summarizeSession：名片字段');
   equal('预设', card.preset, 'standard');
   equal('回合数', card.turns, 1);
   equal('用户消息数（插件噪音不算）', card.userMessages, 1);
-  check('兜底标题取用户第一句话', card.fallbackTitle.includes('帮我看看这个文件'));
+  check('后备标题取用户第一句话', card.fallbackTitle.includes('帮我看看这个文件'));
   equal('lastTime 取最后一个事件', card.lastTime, base + 9);
 }
 
 section('4. listSessions：按修改时间排序、limit 截断');
 {
-  // 第二个会话更晚修改；再放一个没有会话文件的目录（应被无视）。
+  // 第二个会话的修改时间更晚；另放置一个没有会话文件的目录（应当被忽略）。
   const newer = base + 100000;
   writeSession(root, 'g2', 'session-newer', [sampleEvents({ id: 'session-newer', turnTime: newer })]);
   fs.mkdirSync(path.join(root, 'g2', 'not-a-session'), { recursive: true });
@@ -231,7 +231,7 @@ section('7. getSession：按 id 取 + 路径穿越防护');
   const { card, entries } = getSession(root, 'session-abc123');
   equal('名片 id', card.id, 'session-abc123');
   check('有回放', entries.length >= 3, String(entries.length));
-  // 不带 session- 前缀也认
+  // 不带 session- 前缀同样可以识别
   const alt = getSession(root, 'abc123');
   equal('前缀可省', alt.card.id, 'session-abc123');
   let threw = '';
@@ -250,15 +250,15 @@ section('7. getSession：按 id 取 + 路径穿越防护');
   check('找不到说人话', threw.includes('找不到会话'), threw);
 }
 
-section('8. frames：门方法的判断与应答构造');
+section('8. frames：该插件方法的判断与应答构造');
 {
   const list = { jsonrpc: '2.0', id: 7, method: 'dsh-door/sessions/list', params: {} };
   const get = { jsonrpc: '2.0', id: 8, method: 'dsh-door/sessions/get', params: { id: 'x' } };
   const prompt = { jsonrpc: '2.0', id: 9, method: 'session/prompt', params: {} };
   check('list 请求认出来', isDoorSessionsRequest(list));
   check('get 请求认出来', isDoorSessionsRequest(get));
-  check('session/prompt 不归门', !isDoorSessionsRequest(prompt));
-  check('没有 id 的通知不归门', !isDoorSessionsRequest({ jsonrpc: '2.0', method: 'dsh-door/sessions/list' }));
+  check('session/prompt 不属于该插件', !isDoorSessionsRequest(prompt));
+  check('没有 id 的通知不属于该插件', !isDoorSessionsRequest({ jsonrpc: '2.0', method: 'dsh-door/sessions/list' }));
   equal('方法名 list', doorSessionsMethod(list), 'list');
   equal('方法名 get', doorSessionsMethod(get), 'get');
   equal('前缀常量没漂移', DOOR_SESSIONS_PREFIX, 'dsh-door/sessions/');

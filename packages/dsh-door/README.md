@@ -1,12 +1,12 @@
 # dsh-acp-door
 
-在**正在运行的** DeepSeek Harness 内核上额外开一扇 **ACP 门**（只监听 `127.0.0.1`），
-让外部程序（VS Code 面板）能驱动**同一个** DSH —— 同一套配置、同一份记忆、
+在**正在运行的** DeepSeek Harness 内核上额外提供 **ACP 接入点**（只监听 `127.0.0.1`），
+使外部程序（VS Code 面板）能够驱动**同一个** DSH —— 同一套配置、同一份记忆、
 同一套工具、同一份会话记录。
 
-![VS Code 面板通过本插件连接同一个 DSH](assets/panel-chat.png)
+![VS Code 面板通过 ACP 接入点插件连接同一个 DSH](assets/panel-chat.png)
 
-| 权限模式（本插件把内核的权限预设接了出来） |
+| 权限模式（ACP 接入点插件对外暴露内核的权限预设） |
 | --- |
 | ![权限选择器](assets/panel-permission.png) |
 
@@ -38,47 +38,47 @@ startup.
 ## 安装
 
 ```sh
-dsh plugin --profile <你的档> add dsh-acp-door
+dsh plugin --profile <档名> add dsh-acp-door
 ```
 
-装完要**重启内核**（或重启桌面端）才生效：插件是在内核启动时加载的。
-装进哪个档，外部程序就连得上哪个档的 DSH —— 桌面端那个档归桌面端自己管
-（运行时命令行改不动它），所以通常装进你自己那个档。
+安装完成后需要**重启内核**（或重启桌面端）才会生效：ACP 接入点插件（`dsh-acp-door`）在内核启动时加载。
+该插件装入哪个档，外部程序即可连接该档的 DSH —— 桌面端所用的档由桌面端自身管理
+（运行时命令行无法修改），因此通常装入用户自己的档。
 
-配置项（写在档的 `cordis.patch.yml` 里，见本包自带的那个文件）：
+配置项（写入档的 `cordis.patch.yml`，见本包自带的同名文件）：
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
-| `host` | `127.0.0.1` | 监听地址。**不要改成 `0.0.0.0`**，那会把门开到局域网上。 |
-| `port` | `47821` | 监听端口。也可以用环境变量 `DSH_ACP_DOOR_PORT` 覆盖（0.0.11 起）。 |
-| `provider` / `model` | 见文件 | 新会话的初始模型；客户端连上后可以按会话再改。 |
-| `preset` | `standard` | 新会话挂载哪套 agent preset。 |
+| `host` | `127.0.0.1` | 监听地址。**不应改为 `0.0.0.0`**，该取值会把接入点暴露到局域网。 |
+| `port` | `47821` | 监听端口。也可用环境变量 `DSH_ACP_DOOR_PORT` 覆盖（0.0.11 起）。 |
+| `provider` / `model` | 见文件 | 新会话的初始模型；客户端连接后可针对会话修改。 |
+| `preset` | `standard` | 新会话挂载的 agent preset 套件。 |
 
-## 它解决什么问题
+## 解决的问题
 
-ACP 默认走「标准输入输出」：那根线只能在进程**启动的那一刻**接上。
-而你已经把 DSH Desktop 开着在用了，外部程序没办法把线插进去。
+ACP 默认使用标准输入输出：该通道只能在进程**启动时**接入。
+而 DSH Desktop 已处于运行状态时，外部程序无法接入该通道。
 
-但 DSH 自带的 ACP 插件支持**注入传输层**（其源码里写着）：
+DSH 自带的 ACP 插件支持**注入传输层**（其源码中有对应实现）：
 
 ```js
 const stream = config.stream ?? ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin));
 ```
 
-所以本插件做的唯一一件事是：**每个 TCP 连接上，再挂一份 ACP 桥**。
+因此该插件仅执行一项操作：**在每个 TCP 连接上挂载一份 ACP 桥**。
 
 ```
-DSH Desktop（已在跑）
+DSH Desktop（运行中）
 ├── 内核：agents / llm / sessions / 工具 / 记忆 / 技能      ← 只有一份
 ├── 网页界面                                     （原有）
-└── 本插件：127.0.0.1:47821  ── 每个连接 = 一份 ACP 桥      （新增）
+└── 该插件：127.0.0.1:47821  ── 每个连接 = 一份 ACP 桥      （新增）
 ```
 
-## 为什么还要替会话「补挂预设」
+## 会话预设补挂的必要性
 
-这是本插件除了开端口之外**唯一**做的实事，也是最容易踩空的地方，所以单独说清楚。
+这是该插件除监听端口之外**唯一**执行的实际操作，也是最易出错的环节，因此单独说明。
 
-桌面端 / 网页端架构把**宿主层**的工具全部停用了 —— `dsh-web-app` 的补丁里：
+桌面端与网页端架构停用了**宿主层**的全部工具 —— `dsh-web-app` 的补丁中：
 
 ```yaml
 - id: tool-bash
@@ -94,49 +94,49 @@ DSH Desktop（已在跑）
 ```
 
 它的注释说明了理由：*"the Web surface disables them here and
-**lets each session mount a preset instead**"* —— 也就是说，工具改成了
-**每个会话按 agent preset 挂一套**。
+**lets each session mount a preset instead**"* —— 即工具改为
+**每个会话按 agent preset 挂载一套**。
 
-而 `@deepseek-ai/dsh-acp` 建 agent 时只传了工作目录、**从不点名预设**
-（`dsh-acp/lib/index.js` 的 `AcpSession.create` 里 `meta: { cwd }`）。
-两边一凑，走 ACP 的会话就掉进缝里：**宿主层没有工具，预设层也没人给它指定** ——
-一个「有嘴没手」的 agent（它会说「我来读一下这个文件」，然后什么也做不了）。
+而 `@deepseek-ai/dsh-acp` 创建 agent 时只传入工作目录、**从不指定预设**
+（`dsh-acp/lib/index.js` 的 `AcpSession.create` 中为 `meta: { cwd }`）。
+两者结合后，经 ACP 建立的会话缺少工具来源：**宿主层未提供工具，预设层也未指定预设** ——
+即一个无法调用工具的 agent（该 agent 会声明「我来读一下这个文件」，随后无法执行任何操作）。
 
-内核自己的报错文案指明了正道：
+内核自身的报错文案指明正确做法：
 
 > `(join through AgentPresets.mount() or composeFrom() in the agent factory setup)`
 
-所以本插件监听 `agent/created`，用公开的 `agentPresets` 补上这一步。**新会话**和
-**恢复的会话**走的是两个不同的入口 —— 这是踩出来的，不是猜的：
+因此该插件监听 `agent/created`，使用公开的 `agentPresets` 补上这一步。**新建会话**与
+**恢复的会话**使用两个不同的入口 —— 该结论来自实测，并非推测：
 
-| 情况 | 用哪个 | 为什么 |
+| 情况 | 所用入口 | 原因 |
 |---|---|---|
-| 新建的会话 | `select(agent, id)` | 它会重组装 agent 的作用域，并把这次选择**追加进会话事件日志**（`agent-preset/selected`）。 |
-| 恢复的会话（断线接回 / 打开历史会话） | `mount(agent.ctx, id)` | 内核按「有没有跑过回合」给 `select` 上了锁（`agent-preset/locked`，这是设计）。而恢复时 agent 的作用域是**重新组装**的，不补这一刀它就是个空壳。`mount` 是工厂期用的入口，只负责组装，不看那把锁。 |
+| 新建的会话 | `select(agent, id)` | 该入口重新组装 agent 的作用域，并将本次选择**追加进会话事件日志**（`agent-preset/selected`）。 |
+| 恢复的会话（断线重连 / 打开历史会话） | `mount(agent.ctx, id)` | 内核按「是否执行过回合」为 `select` 设置了锁（`agent-preset/locked`，属设计行为）。恢复时 agent 的作用域为**重新组装**的结果，缺少该调用时作用域为空。`mount` 是工厂期使用的入口，只负责组装，不检查该锁。 |
 
-### 恢复会话这里真出过一个 bug，记下来
+### 恢复会话的缺陷记录
 
 症状：面板断线重连（或重启内核后接回旧会话）之后，会话**一个工具都没有** ——
-模型会说"我来跑一下"，然后把工具调用当文本写出来（`<｜｜DSML｜｜invoke …>`）。
-实测数据：同一个会话，断线前 18 次工具调用，接回来 **0 次**，正文变成裸的 DSML。
+模型会声明"我来跑一下"，随后把工具调用当作文本写出（`<｜｜DSML｜｜invoke …>`）。
+实测数据：同一个会话，断线前 18 次工具调用，接回后 **0 次**，正文退化为未转义的 DSML。
 
-为什么：`select()` 只在**新建**时能挂上；恢复时它被锁，而预设又**不会**从会话记录里
-自动还原（见下面那条"记录里其实没有预设"）。于是恢复出来的 agent 手里空空。
+原因：`select()` 只在**新建**时能够挂载；恢复时该入口被锁定，而预设又**不会**从会话记录中
+自动还原（见下文「会话记录中不含预设」）。因此恢复出的 agent 作用域为空。
 
-修法：`select` 撞锁就改用 `mount(agent.ctx, id)`。修完同一个试验立刻变成接回后 10 次
-工具调用（`test/presets.js` 第 8 节把这条钉住了）。
+修法：`select` 遇到预设锁时改用 `mount(agent.ctx, id)`。修复后同一试验立即变为接回后 10 次
+工具调用（`packages/vscode-extension/test/presets.js` 第 8 节固定了这一结论）。
 
-### 两个必须注意的坑（都实测踩过）
+### 两项必须注意的约束（均已实测）
 
 1. **`agentPresets` 必须写成声明式依赖。** cordis 的服务代理对未声明的属性
-   **直接抛**（`cannot get property "…" without inject`）。而这个异常发生在内核
-   创建 agent 的**同步**流程里：要么打断 `session/new`，要么被 async 吞掉、
-   让门**假装在工作**。所以它进了 `inject`，缺这个服务的 profile 会直接不启动这扇门。
-   同一条也适用于 `mount()`：它要的是 **agent 的作用域上下文**（`agent.ctx`），
-   传错东西会抛 `refusing to compose an unscoped context`。
+   **直接抛错**（`cannot get property "…" without inject`）。该异常发生在内核
+   创建 agent 的**同步**流程中：或打断 `session/new`，或被 async 捕获，
+   使该插件**静默失败**。因此该服务写入 `inject`，缺少该服务的 profile 不会启动这个插件。
+   同一结论也适用于 `mount()`：该入口需要 **agent 的作用域上下文**（`agent.ctx`），
+   传入错误对象会抛 `refusing to compose an unscoped context`。
 
-2. **有一道竞态，必须用入站闸挡住。** 内核派发 `agent/created` 时**不等待**
-   监听器返回的 promise，于是「补挂预设」和「客户端发第一个 prompt」是并行的。
+2. **存在一处竞态，必须由入站闸阻塞。** 内核派发 `agent/created` 时**不等待**
+   监听器返回的 promise，因此「补挂预设」与「客户端发送第一个 prompt」并行执行。
    实测数据（诊断日志原文）：
 
    | 时刻 | 事件 |
@@ -145,110 +145,111 @@ DSH Desktop（已在跑）
    | `37.224` | 客户端 prompt 到达（**+55ms**） |
    | `37.526` | 预设挂载完成（耗时 **357ms**） |
 
-   客户端跑赢了，于是模型收到 **0 个工具 schema**（会话记录里 `toolsTokens: 0`），
-   只能把工具调用当文本写出来。因此 {@link gatePrompts} 在传输层把该会话的
-   `session/prompt` 按住，直到挂载落定 —— 上表那一轮实际压了 303ms。
+   客户端请求先到达，因此模型收到 **0 个工具 schema**（会话记录中 `toolsTokens: 0`），
+   只能把工具调用当作文本写出。因此 {@link gatePrompts} 在传输层阻塞该会话的
+   `session/prompt`，直到挂载完成 —— 上表所示一轮实际阻塞 303ms。
 
-### 记录里其实没有预设（这条纠正过）
+### 会话记录中不含预设（结论已修正）
 
-上面那句"记进会话记录"曾经写在这里，**是错的**。实测（解开
+上文「记进会话记录」的表述曾出现在此处，**该表述有误**。实测（解开
 `$DSH_HOME/sessions/<项目>/<会话>/session.v3.jsonl.zstd`）：
 
-- 桌面端建的会话，第一行 header 里有 `"agentPreset":"standard"`；
-- 走本门建的会话，**没有** `agentPreset` —— 建完就读没有，跑完一个回合再读还是没有。
+- 桌面端建立的会话，第一行 header 中含 `"agentPreset":"standard"`；
+- 经该插件建立的会话，**不含** `agentPreset` —— 建立后读取即不存在，执行完一个回合后再读仍不存在。
 
-也就是说，内核只在"桌面端那种建会话方式"下才把预设写进记录。所以：
+即内核仅在桌面端所使用的建会话方式下将预设写入记录。因此：
 
-1. 门不能指望从记录里知道自己原来挂的是哪个预设 → 门在**内核进程内**记一份
-   `sessionId → preset`（跨连接共享），客户端也会在 `session/resume` 的
-   `_meta` 里点名它要的预设，两个来源合并着用。
-2. 这也正是上面那个 bug 的根：不看记录就没法自动还原，必须靠 `mount` 补挂。
+1. 该插件无法从记录中获知原先挂载的预设 → 该插件在**内核进程内**保存一份
+   `sessionId → preset` 映射（跨连接共享），客户端也会在 `session/resume` 的
+   `_meta` 中指定所需预设，两个来源合并使用。
+2. 这也是上文缺陷的根源：不读取记录则无法自动还原，必须依靠 `mount` 补挂。
 
 ## 配置
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `host` | `127.0.0.1` | 监听地址。**不要改成 `0.0.0.0`**，那会把门开到局域网上。 |
-| `port` | `47821` | 监听端口；传 `0` 让系统挑空闲端口。 |
-| `provider` | — | 新会话的初始模型服务商。**必须写**，见下面的警告。 |
-| `model` | — | 新会话的初始模型名。**必须写。** |
+| `host` | `127.0.0.1` | 监听地址。**不应改为 `0.0.0.0`**，该取值会把接入点暴露到局域网。 |
+| `port` | `47821` | 监听端口；传 `0` 由系统分配空闲端口。 |
+| `provider` | — | 新会话的初始模型服务商。**必须填写**，见下文警告。 |
+| `model` | — | 新会话的初始模型名。**必须填写。** |
 | `preset` | `standard` | 新会话挂载的 agent preset：`standard`（标准）/ `ptc` / `cordis`（创造）/ `minimal`（极简）。 |
-| `diagLog` | 关 | 诊断日志文件路径；也可用环境变量 `DSH_ACP_DOOR_DIAG`。排查时序问题用，不配则完全不写文件。 |
+| `diagLog` | 关 | 诊断日志文件路径；也可用环境变量 `DSH_ACP_DOOR_DIAG`。用于排查时序问题，未配置时不写任何文件。 |
 
-### 警告：`provider` / `model` 缺了会静默变哑
+### 警告：缺少 `provider` / `model` 时静默失败
 
-少了这两项，**会话照样建得起来、门照样开得好好的**，但第一个回合直接失败：
+缺少这两项时，**会话仍可建立，接入点仍正常监听**，但第一个回合直接失败：
 
 ```
 agent "…" has no provider/model: set AgentOptions.provider and AgentOptions.model
 ```
 
-很容易踩，因为 id 定向的 `--patch` 覆盖是**整体替换**这份配置（不是合并）——
-只想改 `port` 而没写全其它键，就把 `provider`/`model` 一起冲掉了。所以门在启动时
-会检查这两项，缺了就在内核日志里吵一次，不等用户发了消息才发现。
-（`test/presets.js` 也盯着 `cordis.patch.yml` 里必须有这两项。）
+该问题易于触发，因为按 id 定向的 `--patch` 覆盖是**整体替换**这份配置（并非合并）——
+仅修改 `port` 而未写全其它键，会同时覆盖 `provider`/`model`。因此该插件在启动时
+检查这两项，缺失时在内核日志中记录一次警告，无需等待用户发送消息才发现。
+（`packages/vscode-extension/test/presets.js` 也校验 `cordis.patch.yml` 中必须包含这两项。）
 
 ## 版本变更
 
 | 版本 | 改了什么 |
 | --- | --- |
-| 0.0.12 | 新增 `dsh-door/permission/get` 与 `dsh-door/permission/set` 两个旁路方法：把内核 `@deepseek-ai/dsh-permission-presets` 的权限预设**清单与切换**透给客户端（ACP 只暴露模型/推理强度两个 config option，权限选择器属于它「刻意不提供」的 DSH 专用 UI 那类）。清单**不写死** —— 内核配了什么就回什么（`read-only`/`workspace-write`/`danger-full-access` 来自 `dsh-base`，`auto-approval` 由 `dsh-auto-approval-plugin` 加，用户还能自己加），所以客户端那份跟桌面端永远同一个真源。`permissionPresets` 是**可选**依赖（`ctx.inject`），档里没挂这个服务时门照常工作、只回一句「这个内核没有权限预设」。回归测试：`test/permission.js`（纯函数 29 项）+ 扩展那边的 `test/permission-live.js`（真内核，四档全切一遍 24 项）。 |
-| 0.0.9 | **修两个 bug**：① 建会话**失败**时的预设点名会留在队列里，被**下一次**建会话领走（用户没点名却挂上了别的模式）—— 出错的回复原来根本没被处理（预筛要求那行含 `"result"`）；② 入站闸等预设挂载**没有超时**，内核某个服务返回永不落定的 promise 时，`session/prompt` 会被永久按住 —— 症状是"发了消息毫无反应、也没有任何报错"。现在入站与出站同一个上限（`MOUNT_WAIT_MS`，经 `waitForMount()`），到点放行。<br>回归测试：`test/frames.js` 第 8 节第 (6) 段、第 9 节。 |
-| 0.0.8 | 新增 `dsh-door/sessions/list` 与 `dsh-door/sessions/get` 两个旁路方法（门只读解析 `$DSH_HOME/sessions`，多帧 zstd）。给「内核没有 `session/load`、面板又想看历史」用。另修出站中继必须返回 `WritableStream`（写成 `TransformStream` 没人消费 readable 时，门的回复永远出不去，客户端看到的是"接了线但不应答"）。 |
-| 0.0.7 | 模式（agent preset）切换；修「断线接回之后会话没有工具」（撞预设锁就改用工厂期的 `mount()` 补挂）。 |
-| 0.0.5 | 第一版能用的门。 |
+| 0.0.12 | 新增 `dsh-door/permission/get` 与 `dsh-door/permission/set` 两个旁路方法：将内核 `@deepseek-ai/dsh-permission-presets` 的权限预设**清单与切换**透传给客户端（ACP 仅暴露模型与推理强度两个 config option，权限选择器属于其「刻意不提供」的 DSH 专用 UI 类别）。清单**不写死** —— 内核配置了什么就返回什么（`read-only`/`workspace-write`/`danger-full-access` 来自 `dsh-base`，`auto-approval` 由 `dsh-auto-approval-plugin` 添加，用户也可自行添加），因此客户端一侧与桌面端始终为同一真源。`permissionPresets` 是**可选**依赖（`ctx.inject`），档中未挂载该服务时该插件照常工作、仅返回「这个内核没有权限预设」。回归测试：`test/permission.js`（纯函数 29 项）+ 扩展一侧的 `test/permission-live.js`（真内核，四档全切一遍 24 项）。 |
+| 0.0.9 | **修复两个缺陷**：① 建会话**失败**时的预设指定会留在队列中，被**下一次**建会话取走（用户未指定却挂载了其它模式）—— 出错的回复原先未被处理（预筛要求该行含 `"result"`）；② 入站闸等待预设挂载**没有超时**，内核某个服务返回永不落定的 promise 时，`session/prompt` 会被永久阻塞 —— 症状为「发送消息后毫无响应、也没有任何报错」。现在入站与出站使用同一上限（`MOUNT_WAIT_MS`，经 `waitForMount()`），到时放行。<br>回归测试：`test/frames.js` 第 8 节第 (6) 段、第 9 节。 |
+| 0.0.8 | 新增 `dsh-door/sessions/list` 与 `dsh-door/sessions/get` 两个旁路方法（该插件只读解析 `$DSH_HOME/sessions`，多帧 zstd）。供「内核没有 `session/load`、面板又需查看历史」的场景使用。另修复出站中继必须返回 `WritableStream`（写成 `TransformStream` 且无人消费 readable 时，该插件的回复始终无法发出，客户端表现为「已连接但不应答」）。 |
+| 0.0.7 | 模式（agent preset）切换；修复「断线重连之后会话没有工具」（遇到预设锁时改用工厂期的 `mount()` 补挂）。 |
+| 0.0.5 | 首个可用版本。 |
 
-**注意**：门装进 `desktop` 档之后**不一定升得上去** —— 桌面端跑着的时候
-`dsh plugin --profile desktop …` 会被拒（`profile "desktop" is managed exclusively
-by the Electron application`），得等它没跑的时候。所以**面板不依赖门的版本**：
-连的是本机时它自己读 `$DSH_HOME/sessions`（`packages/vscode-extension/src/dsh/sessions.js`，
-与 `lib/sessions.js` 有一致性测试拴着）。
+**注意**：该插件装入 `desktop` 档之后**不一定能够升级** —— 桌面端运行时
+`dsh plugin --profile desktop …` 会被拒绝（`profile "desktop" is managed exclusively
+by the Electron application`），需等待桌面端未运行。因此**面板不依赖该插件的版本**：
+连接本机时面板自行读取 `$DSH_HOME/sessions`（`packages/vscode-extension/src/dsh/sessions.js`，
+与 `lib/sessions.js` 之间有一致性测试约束）。
 
-## 旁路方法：ACP 装不下的东西从这里过
+## 旁路方法：ACP 未提供的能力
 
-门除了转发 ACP，还自己应答一小撮 `dsh-door/…` 前缀的请求帧（**不转发给内核**，
-就地回），因为 ACP 协议里没有对应的抽屉：
+该插件除转发 ACP 之外，还自行应答少量带 `dsh-door/…` 前缀的请求帧（**不转发给内核**，
+就地回复），因为 ACP 协议中不包含对应能力：
 
-| 方法 | 门要的 params | 门的回复 | 从哪版起 |
+| 方法 | 该插件所需的 params | 该插件的回复 | 起始版本 |
 | --- | --- | --- | --- |
 | `dsh-door/sessions/list` | `{}`（可选 `cwd`） | `{ skipped, sessions: [...] }` | 0.0.8 |
 | `dsh-door/sessions/get` | `{ id, limit? }` | `{ card, entries, truncated }` | 0.0.8 |
 | `dsh-door/permission/get` | `{ id }` | `{ currentValue, options: [{value, name?, description?}], defaultPreset? }` | 0.0.12 |
-| `dsh-door/permission/set` | `{ id, value }` | 同 `permission/get`（**改完之后回读**的真实状态） | 0.0.12 |
+| `dsh-door/permission/set` | `{ id, value }` | 同 `permission/get`（**修改之后回读**的真实状态） | 0.0.12 |
 
-权限那两个为什么不能走 ACP：`@deepseek-ai/dsh-acp` 只把**模型**与**推理强度**
-暴露成 `session/set_config_option`，README 里写明它「刻意不提供 DSH 专用呈现数据
-与交互式 UI 功能」。而权限选择器正好是这一类。
+权限相关的两个方法无法经由 ACP 提供：`@deepseek-ai/dsh-acp` 仅将**模型**与**推理强度**
+暴露为 `session/set_config_option`，其 README 写明该实现「刻意不提供 DSH 专用呈现数据
+与交互式 UI 功能」。权限选择器正属于该类别。
 
-实现上注意两点：
+实现上需注意两点：
 
-1. `permissionPresets` 是**可选**依赖 —— 用 `ctx.inject(['permissionPresets'], …)`
-   而不是写进 `export const inject`。写死的话，没挂这个服务的档（比如极简的自建档）
-   会**整扇门都加载不了**，而不是只有权限这一项不可用。
-2. 切完**回读**再回复（`settledPermission`），不做乐观更新：万一某个旋钮被别的
-   机制按住，客户端显示的是真实状态。
+1. `permissionPresets` 是**可选**依赖 —— 使用 `ctx.inject(['permissionPresets'], …)`
+   而不写入 `export const inject`。若写死，未挂载该服务的档（例如极简的自建档）
+   会**导致整个插件无法加载**，而非仅权限这一项不可用。
+2. 切换后**回读**再回复（`settledPermission`），不采用乐观更新：若某项设置被其它
+   机制阻塞，客户端显示的是真实状态。
 
-## 怎么装
+## 从源码目录或 tgz 安装
 
-在目标 profile 里装这个包，两种来源都行，但要知道它们的区别：
+在目标 profile 中安装该包，两种来源均可，但需明确两者的区别：
 
 ```powershell
-# A) 指向源码目录：开发用，装完就能用（pnpm 会把它拷进 profile）
+# A) 指向源码目录：开发用，安装后即可使用（pnpm 会将其复制进 profile）
 dsh plugin --profile <profile> add "file:<本目录>"
 
-# B) 用 npm pack 的 tgz：最接近"用户拿到的东西"，也最稳
+# B) 使用 npm pack 的 tgz：接近用户实际获取的产物
 cd <本目录>; npm pack
 dsh plugin --profile <profile> add "file:<本目录>\dsh-acp-door-<版本>.tgz"
 ```
 
-**别用 `link:`。** 那会建一个真符号链接，Node 解析依赖时按**真实路径**往上找，
-于是 `import '@deepseek-ai/dsh-acp'` 找不到（它不在源码树里，而在 profile/DSH 安装目录里），
-门直接起不来。更糟的是，删掉这个链接时 pnpm 可能**把源码目录一起清空** ——
-真发生过一次，靠 profile 里的那份拷贝才救回来。
+**不应使用 `link:`。** 该方式会建立真实符号链接，Node 解析依赖时按**真实路径**向上查找，
+因此 `import '@deepseek-ai/dsh-acp'` 无法解析（该包不在源码树中，而在 profile/DSH 安装目录中），
+导致该插件无法启动。更严重的是，删除该链接时 pnpm 可能**同时清空源码目录** ——
+该情况已实际发生一次，依靠 profile 中的那份副本才得以恢复。
 
-**改了源码必须重新 `add` 一次。** `file:` 是**拷贝**而不是链接，而且 pnpm 有缓存，
-源码变了它有时直接报 `added 0`（内容没换）。`test/helpers/door.js` 的 `syncDoor()`
-每次跑测试前会逐字节比对源码与装的那份，不一致就自动重装 —— 免得测试悄悄测了旧代码。
+**修改源码后必须重新执行一次 `add`。** `file:` 是**拷贝**而非链接，且 pnpm 存在缓存，
+源码变更后有时直接报告 `added 0`（内容未替换）。`packages/vscode-extension/test/helpers/door.js`
+的 `syncDoor()` 在每次运行测试前逐字节比对源码与已安装的那份，不一致时自动重装 ——
+避免测试实际验证旧代码。
 
 然后在该 profile 的用户自定义层 `cordis.patch.yml` 里插入一行：
 
@@ -262,23 +263,23 @@ dsh plugin --profile <profile> add "file:<本目录>\dsh-acp-door-<版本>.tgz"
         preset: standard
 ```
 
-或者把本包名 `dsh-acp-door` 加进该 profile `package.json` 的
+或者将该包名 `dsh-acp-door` 加入该 profile `package.json` 的
 `dsh.profile.bundles` 数组（本包自带的 `cordis.patch.yml` 会自动生效）。
 
-## 怎么卸
+## 卸载
 
-1. 删掉上面那条 `insert` 记录（或把 `dsh-acp-door` 从 `bundles` 里去掉）；
+1. 删除上述 `insert` 记录（或将 `dsh-acp-door` 从 `bundles` 中移除）；
 2. `dsh plugin --profile <profile> remove dsh-acp-door`。
 
 ## 已知限制
 
-- **没有鉴权**：本机上的任何程序都能连上这个端口。当前阶段靠「只监听回环」兜底，
-  正式版会加一个口令文件。
-- **硬依赖 `agentPresets`**：没有预设机制的 profile（例如纯 base 的 `acp` profile）
-  不会启动这扇门。这是刻意的 —— 见上文第 1 个坑。
-- 需要 DSH 重启后才会加载（profile 的 `patchReload` 为 `live` 时，配置改动可以热生效，
+- **没有鉴权**：本机上的任何程序均可连接该端口。当前阶段以「只监听回环」作为临时措施，
+  正式版将增加口令文件。
+- **硬依赖 `agentPresets`**：不提供预设机制的 profile（例如纯 base 的 `acp` profile）
+  不会加载该插件。该限制属刻意设计 —— 见上文第 1 项约束。
+- 需重启 DSH 后才会加载（profile 的 `patchReload` 为 `live` 时，配置改动可以热生效，
   但**新装一个包**仍需重启）。
 - 依赖三个内部接缝：`@deepseek-ai/dsh-acp` 的 `config.stream`、
   `agentPresets.select()` 的签名、以及 `agent/created` 事件。
-  它们在 DSH 升级中若变动，本插件需要跟着调整。
-- 只能挂预设，**不能中途换**：内核只允许「还没产出任何内容」的会话切换预设。
+  它们在 DSH 升级中若变动，该插件需要同步调整。
+- 仅能挂载预设，**不能中途切换**：内核只允许「尚未产出任何内容」的会话切换预设。
