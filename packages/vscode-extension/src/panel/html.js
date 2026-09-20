@@ -80,7 +80,7 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
     <div class="empty" id="empty">
       <p class="empty-title">DSH Panel</p>
       <p class="empty-hint">直接提问即可 —— DSH 会按需启动，不需要先启动桌面端。</p>
-      <p class="empty-note">记忆、历史与插件均位于本机，与桌面端为同一份数据。</p>
+      <p class="empty-note">记忆与历史保留在本机；自启时使用已准备的 DSH 配置。</p>
     </div>
   </main>
 

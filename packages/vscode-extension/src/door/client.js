@@ -16,6 +16,7 @@ const net = require('node:net');
 const { EventEmitter } = require('node:events');
 
 const { buildPromptBlocks } = require('../dsh/blocks');
+const { requireLoopbackHost } = require('./endpoint');
 
 /** ACP 协议版本（第 0 步实测：内核返回的值为 1）。 */
 const PROTOCOL_VERSION = 1;
@@ -76,7 +77,9 @@ class DoorClient extends EventEmitter {
    */
   constructor({ host, port, log }) {
     super();
-    this.host = host;
+    // 连接目标在客户端层再次收紧：即使未来有其它调用方绕过面板配置，
+    // 也不会把 ACP 请求发送到非本机地址。
+    this.host = requireLoopbackHost(host);
     this.port = port;
     this.log = log || (() => {});
     /** 内核在 initialize 中返回的自身信息。 */

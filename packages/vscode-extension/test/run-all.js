@@ -38,6 +38,7 @@ const suites = [
   { name: 'Markdown 渲染器', file: 'test/markdown.js', always: true },
   { name: '编辑器上下文拼块（纯函数）', file: 'test/blocks.js', always: true },
   { name: '会话层边界（假客户端）', file: 'test/session.js', always: true },
+  { name: '本机边界与设置来源（纯函数）', file: 'test/security-boundaries.js', always: true },
   { name: '后台内核的归属与回收（假进程）', file: 'test/kernel-manager.js', always: true },
   // 「命令路径里有空格」的两个缺陷只在真实进程中暴露（拼接出的字符串表面上正确），
   // 因此必须实际执行一次 spawn —— 见 test/spawn-quote.js 的说明。
@@ -63,7 +64,14 @@ const suites = [
     env: { DSH_PANEL_TEST_PORT: '47832' },
     hint: '加 --all 才跑（自己挑端口，不抢 47821）',
   },
-  { name: '面板层（模拟 vscode + 真实运行的该插件）', file: 'test/panel.js', always: true },
+  // 面板层会同步测试插件并启动真实 DSH。它属于完整验收，而不是不依赖 DSH 的快速套件。
+  {
+    name: '面板层（模拟 vscode + 真实运行的该插件）',
+    file: 'test/panel.js',
+    always: false,
+    needs: withDsh,
+    hint: '加 --all 才跑（会写入专用测试档）',
+  },
   { name: '端到端（真 DSH）', file: 'test/smoke.js', always: false, needs: withDsh, hint: '加 --all 才跑' },
 ];
 

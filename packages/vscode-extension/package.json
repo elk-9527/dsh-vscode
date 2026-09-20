@@ -1,9 +1,9 @@
 {
   "name": "dsh-panel",
   "displayName": "DSH Panel",
-  "description": "在 VS Code 侧边栏中直接使用 DeepSeek Harness：内核按需由该扩展启动，无需先打开桌面端；记忆、会话记录与插件均与桌面端共用同一份 $DSH_HOME。",
-  "version": "0.1.3",
-  "publisher": "todo-your-publisher-id",
+  "description": "在 VS Code 侧边栏中直接使用 DeepSeek Harness：桌面端运行时直接接入；未运行时使用同一份 $DSH_HOME 中已准备的配置集启动。",
+  "version": "0.1.4",
+  "publisher": "Elk-ydy",
   "license": "MIT",
   "icon": "media/icon.png",
   "galleryBanner": {
@@ -149,57 +149,72 @@
       "properties": {
         "dshPanel.host": {
           "type": "string",
+          "enum": [
+            "127.0.0.1",
+            "localhost"
+          ],
           "default": "127.0.0.1",
-          "description": "DSH 监听的地址。默认仅限本机回环地址。"
+          "scope": "machine",
+          "description": "DSH 的连接地址。仅支持本机回环地址，其他地址不会用于连接。"
         },
         "dshPanel.port": {
           "type": "number",
           "default": 47821,
+          "scope": "machine",
           "description": "面板连接的端口。默认 47821：桌面端运行时该端口上已有 DSH 在监听，面板会直接接入并共用同一个内核，不自行启动。"
         },
         "dshPanel.selfStartPort": {
           "type": "number",
           "default": 47831,
+          "scope": "machine",
           "description": "面板自行启动内核时使用的端口。默认 47831，与桌面端的 47821 有意分开：两个内核争用同一个端口时，未取得端口的一方不会建立监听，面板只会持续显示「正在启动…」。"
         },
         "dshPanel.kernelIdleMinutes": {
           "type": "number",
           "default": 10,
+          "scope": "machine",
           "description": "面板自行启动的内核，在最后一个面板关闭之后保留的时长（分钟）。在此期间重新打开面板会继续使用同一个内核，无需重启，也无需重连。窗口关闭时无条件终止。设为 0 表示面板关闭即终止（旧行为）。"
         },
         "dshPanel.autoStart": {
           "type": "boolean",
           "default": true,
-          "description": "端口上没有 DSH 在监听时，自行启动一个 DSH 内核（共用同一份 $DSH_HOME，因此记忆、会话记录与插件均与桌面端完全一致）。启用后无需先打开桌面端；停用则只连接已经在运行的内核。"
+          "scope": "machine",
+          "description": "端口上没有 DSH 在监听时，自行启动一个 DSH 内核。自启配置集与桌面端共用同一份 $DSH_HOME，但其插件、模型与设置需分别准备；停用则只连接已经在运行的内核。"
         },
         "dshPanel.fallbackProfile": {
           "type": "string",
           "default": "vscode-panel",
-          "description": "自行启动内核时使用哪个配置集。默认 vscode-panel（面板自身的配置集，其中装有该插件以及用户当前使用的其它插件）。不要填 desktop：该配置集由桌面端独占，命令行无法启动。该配置集中必须安装该插件；启动失败时，面板会在 $DSH_HOME/profiles 中另找一个已安装该插件的网页配置集继续尝试。"
+          "scope": "machine",
+          "description": "自行启动内核时使用哪个配置集。默认 vscode-panel。不要填 desktop：该配置集由桌面端独占，命令行无法启动。该配置集必须安装连接组件，并准备所需的模型和个人插件；启动失败时，面板会在 $DSH_HOME/profiles 中另找一个已安装连接组件的网页配置集继续尝试。"
         },
         "dshPanel.dshCommand": {
           "type": "string",
           "default": "dsh",
+          "scope": "machine",
           "description": "dsh 命令行程序的名字或完整路径。可以带参数 —— 例如本机 dsh 不在 PATH 上时，填「node C:\\Users\\<用户名>\\.dsh\\profiles\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js」；路径中有空格时，用双引号将整段括起来。"
         },
         "dshPanel.provider": {
           "type": "string",
           "default": "",
+          "scope": "machine",
           "description": "新会话的初始模型服务商。留空则由内核决定。"
         },
         "dshPanel.model": {
           "type": "string",
           "default": "",
+          "scope": "machine",
           "description": "新会话的初始模型名。留空则由内核决定。"
         },
         "dshPanel.preset": {
           "type": "string",
           "default": "",
+          "scope": "machine",
           "description": "新会话挂载的 agent preset（standard 标准模式 / ptc PTC 模式 / minimal 极简模式 / cordis 创造模式）。留空则使用 DSH 侧配置的预设（默认 standard）。注意：预设只能在新建对话时选择 —— 内核不允许在一段对话中途更换，在面板中更换预设的含义是下一段新对话使用它。"
         },
         "dshPanel.cwd": {
           "type": "string",
           "default": "",
+          "scope": "machine",
           "description": "新会话的工作目录。留空则使用 VS Code 当前打开的工作区目录。"
         }
       }

@@ -3,11 +3,11 @@
 在 VS Code 的侧边栏里直接使用 DeepSeek Harness。
 
 **无需先在桌面端启动 DSH**：打开侧边栏即可提问。内核由扩展按需启动，
-记忆、会话记录与插件均来自用户自己的 `$DSH_HOME`，与桌面端为同一份。
-桌面端处于运行状态时，面板直接连接该进程（一个进程、一个内核），不会另起第二个。
+桌面端处于运行状态时，面板直接连接该进程（一个进程、一个内核），不会另起第二个；
+桌面端未运行时，面板使用同一份 `$DSH_HOME` 中已准备的 `vscode-panel` 配置集自行启动。
 
-本扩展不是另一个 agent，也不会另起一套记忆：同一份配置、同一份记忆、
-同一份会话记录、同一套工具与权限策略。
+本扩展不是另一个 agent，也不会另起一套记忆。接入桌面端时，模型、工具与权限状态来自
+同一个运行内核；自行启动时，配置集内的插件、模型与设置需要单独准备，不会自动复制桌面端配置。
 
 ![面板](media/screenshots/panel-chat.png)
 
@@ -22,8 +22,10 @@
 VS Code sidebar. You do not have to start the desktop app first — the extension
 starts a DSH kernel on demand, or attaches to the one already running.
 
-It is not another agent and it does not keep a second memory: same `$DSH_HOME`,
-same sessions, same plugins, same tools and permission policy as the desktop app.
+It is not another agent and it does not keep a second memory. When attached to
+the desktop kernel, its model, tools and permission policy are the same running
+kernel. When started by the panel, the `vscode-panel` profile uses the same
+`$DSH_HOME`, but profile-level packages and configuration must be prepared there.
 Model, agent preset and permission mode are read from the running kernel (not
 hard-coded), and the permission mode can be switched mid-conversation.
 
@@ -51,7 +53,7 @@ VS Code 侧边栏（本扩展）
 - 该插件**只监听本机回环地址**，不接受外部连接。
 - **端口上已存在该插件时直接复用**（桌面端运行时即为此种情况，不会多起进程）；
   **端口上不存在该插件时自行启动一个内核**，使用 `dshPanel.fallbackProfile`
-  （默认 `vscode-panel`，即面板自己的档，从官方 web 模板创建，已安装该插件与用户使用的其他插件）。
+  （默认 `vscode-panel`，即面板自己的配置集，从官方 web 模板创建；其中需安装接入点插件及所需的个人插件）。
 - **面板自行启动的内核使用独立端口**（`dshPanel.selfStartPort`，默认 47831），
   不与桌面端的 47821 争用：两个内核争用同一端口没有收益，争用失败一方的插件
   将不启动，对话流停留在"正在启动…"并持续等待。扩展启动内核时把该端口写入环境变量
@@ -141,19 +143,38 @@ error: profile "desktop" is managed exclusively by the Electron application
 
 ## 安装
 
-1. **安装本扩展**：在市场搜索 `DSH Panel`，或使用命令行
-   `code --install-extension <publisher>.dsh-panel`。
-2. **为 DSH 安装配套插件**（只需执行一次）：
+1. **准备可由命令行启动的网页配置集**：桌面端正在运行且已安装配套插件时，面板会直接接入。
+   若需要在桌面端未运行时使用面板，建议创建 `vscode-panel` 配置集：
 
    ```sh
-   dsh plugin --profile <档名> add dsh-acp-door
+   dsh --profile vscode-panel --from-default-profile web --dump-config
    ```
 
-   未安装该插件时面板仍可使用：面板会自行启动内核，但该档中同样需要安装该插件，
-   否则面板无法连接任何 DSH，只会在对话流中提示「未安装连接组件（`dsh plugin --profile
-   <档名> list` 中应当有 `dsh-acp-door`）」。
-   安装的档决定了面板能够连接哪个档的 DSH（详见下文「ACP 接入点插件的目标档选择」）。
-3. 打开侧边栏，直接提问。
+   `desktop` 配置集由桌面端独占，不能作为自行启动的目标。
+2. **为该配置集安装配套插件**（首次安装时执行）：
+
+   ```sh
+   dsh plugin --profile vscode-panel add dsh-acp-door
+   dsh plugin --profile vscode-panel list
+   ```
+
+   插件配置中的 `provider` 和 `model` 必须与本机 DSH 的可用服务一致，详见
+   [`dsh-acp-door` 的配置说明](../dsh-door/README.md#配置)。安装或更新插件后重启该配置集的内核。
+3. **安装本扩展**：在市场搜索 `DSH Panel`，或使用命令行
+   `code --install-extension Elk-ydy.dsh-panel`。使用 `.vsix` 时执行
+   `code --install-extension <路径>.vsix --force`，再执行一次 `Developer: Reload Window`。
+4. 打开侧边栏，直接提问。
+
+### 其它电脑与更新
+
+- 每台电脑独立安装 DSH、配套插件和本扩展。面板不会连接远程 DSH，也不会同步其它电脑的
+  `$DSH_HOME`；各电脑的记忆和会话记录由本机 DSH 管理。
+- 自启使用的 `vscode-panel` 配置集不会自动复制桌面端的插件或模型设置。需要相同行为时，
+  在该配置集中分别安装对应插件，并配置同一模型服务。
+- 接入点固定监听 `127.0.0.1`，不支持改为局域网地址、端口转发或隧道访问。
+- 从市场安装的扩展由 VS Code 按更新设置升级；从 `.vsix` 安装的版本需要手动安装新版 `.vsix`
+  并执行 Reload Window。插件的常规兼容更新使用
+  `dsh plugin --profile <档名> update dsh-acp-door`，完成后重启内核。
 
 ## 用法
 
@@ -250,9 +271,8 @@ error: profile "desktop" is managed exclusively by the Electron application
   （`test/permission.js` §6 黑名单、`test/panel.js` §8.7 与 §8.9 检查实际发出的消息、
   `tools/uitest.js` 检查渲染出的悬浮提示）。
 - **历史会话列表**可列出本机 `$DSH_HOME/sessions` 中的会话（标题、时间、回合数、
-  工作目录），点击一条即可接回上下文。连接本机时由面板直接读取磁盘，不需要该插件
-  支持新方法。连接**其他机器**上的该插件时，只能依赖该插件提供 `dsh-door/sessions/*`（0.0.8+）；
-  该插件版本过低时，面板只返回一句提示：该 DSH 版本过低，无法读取其历史会话。
+  工作目录），点击一条即可接回上下文。面板优先向接入点查询；接入点版本较低时，
+  自动改为读取同一台机器上的会话文件，不要求修改桌面端配置集。
 - 顶栏仅显示**简短状态**（就绪 / 工作中 / 未连接）。报错原文与诊断信息进入对话流，
   长原文收在「原始报错（展开）」的折叠区中，不占用顶栏空间。访问令牌、密钥、口令等敏感
   参数的值会替换为「[已隐藏]」，其余内容保持原样。
@@ -309,9 +329,9 @@ error: profile "desktop" is managed exclusively by the Electron application
 一条命令运行全部测试（内核未启动时，测试会按需自行启动内核，运行结束后自行回收）：
 
 ```powershell
-node test/run-all.js        # 快速套件：静态契约、拼块单测、Markdown 单测、面板层，约 15s
+node test/run-all.js        # 快速套件：静态契约、纯函数与命令行回归；不启动 DSH
 node test/run-all.js --ui   # 追加真实浏览器中的界面断言（需要 Chrome）
-node test/run-all.js --all  # 追加真进程的自启内核、断线接回、模式、权限预设、端到端，约 4 分钟
+node test/run-all.js --all  # 追加面板层、真进程的自启内核、断线接回、模式、权限预设、端到端，约 4 分钟
 
 # 真实 VS Code 隔离窗口中的端到端自检（不影响用户正在使用的窗口）。**发版前应带上 --linger**：
 $env:DSH_PANEL_CHECK_PORT = '47830'

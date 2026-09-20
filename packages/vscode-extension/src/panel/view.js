@@ -28,9 +28,11 @@ const {
   panelProfileCandidates,
   redactSensitiveOutput,
 } = require('../door/locate');
+const { resolveLoopbackHost } = require('../door/endpoint');
 const { renderHtml, makeNonce } = require('../panel/html');
 const localSessions = require('../dsh/sessions');
 const { kernelManager } = require('../panel/kernel-manager');
+const { readUserSetting } = require('./settings');
 
 const VIEW_ID = 'dshPanel.chat';
 
@@ -38,19 +40,6 @@ const VIEW_ID = 'dshPanel.chat';
 function pathIsInside(target, base) {
   const rel = path.relative(base, target);
   return Boolean(rel) && !rel.startsWith('..') && !path.isAbsolute(rel);
-}
-
-/**
- * 该地址是否为本机地址。
- *
- * 需要判断该问题的原因：历史会话的数据位于**内核所在机器**的磁盘上。连接的是本机时，
- * 面板自身即可读取（因此不依赖接入点插件的版本）；连接的是其它机器时，只能向那台机器上的
- * 该插件查询 —— 本地读出的会是**本机**的会话，属于另一份数据，不能作为后备。
- */
-function isLoopbackHost(host) {
-  const text = String(host || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
-  return text === '' || text === 'localhost' || text === '::1' || text === '0:0:0:0:0:0:0:1'
-    || text.startsWith('127.');
 }
 
 /** 该错误是否为「对端不存在此方法」（该插件 0.0.8 之前未提供的历史旁路方法）。 */
@@ -306,7 +295,9 @@ class DshPanelView {
 
   config() {
     const cfg = vscode.workspace.getConfiguration('dshPanel');
-    const minutes = Number(cfg.get('kernelIdleMinutes'));
+    const read = (key, fallback) => readUserSetting(cfg, key, fallback);
+    const endpoint = resolveLoopbackHost(read('host', '127.0.0.1'));
+    const minutes = Number(read('kernelIdleMinutes', 10));
     // 面板自行启动的内核在"没有面板使用它"之后仍可存活的时间（默认 10 分钟）。
     // 设为 0 = 面板关闭时立即回收（旧行为）。视图只是使用者，内核由扩展管理 ——
     // 见 src/panel/kernel-manager.js。
@@ -314,8 +305,9 @@ class DshPanelView {
       Number.isFinite(minutes) && minutes >= 0 ? minutes * 60000 : 10 * 60000,
     );
     return {
-      host: cfg.get('host') || '127.0.0.1',
-      port: cfg.get('port') || 47821,
+      host: endpoint.host,
+      hostAccepted: endpoint.accepted,
+      port: read('port', 47821) || 47821,
       /**
        * 面板**自行**启动的内核所使用的接入点监听端口。
        *
@@ -323,14 +315,14 @@ class DshPanelView {
        * 也监听该端口，存在接入点即连接）。而面板自启的内核一律使用自身端口 —— 此前它也占用
        * 47821，两个内核竞争同一端口时，竞争失败的一方不会开放监听，用户只能停留在"正在启动…"提示上持续等待。
        */
-      selfStartPort: cfg.get('selfStartPort') || 47831,
-      autoStart: cfg.get('autoStart') !== false,
-      fallbackProfile: cfg.get('fallbackProfile') || 'vscode-panel',
-      dshCommand: cfg.get('dshCommand') || 'dsh',
-      provider: cfg.get('provider') || '',
-      model: cfg.get('model') || '',
-      preset: cfg.get('preset') || '',
-      cwd: cfg.get('cwd') || '',
+      selfStartPort: read('selfStartPort', 47831) || 47831,
+      autoStart: read('autoStart', true) !== false,
+      fallbackProfile: read('fallbackProfile', 'vscode-panel') || 'vscode-panel',
+      dshCommand: read('dshCommand', 'dsh') || 'dsh',
+      provider: read('provider', '') || '',
+      model: read('model', '') || '',
+      preset: read('preset', '') || '',
+      cwd: read('cwd', '') || '',
     };
   }
 
@@ -597,6 +589,18 @@ class DshPanelView {
   async connectInternal() {
     const cfg = this.config();
     this.post({ type: 'status', state: 'connecting', detail: '正在连接…' });
+
+    if (!cfg.hostAccepted) {
+      // 不记录用户配置的原始内容，避免把误填的 URL 参数写入日志。
+      this.log('warn', '连接地址不是本机回环地址，已拒绝连接');
+      this.postError('连接地址仅支持本机回环地址。', {
+        title: '仅支持本机连接',
+        advice: '请将连接地址恢复为默认值。',
+        raw: 'dshPanel.host 仅允许 127.0.0.1 或 localhost；不支持远程地址、端口转发或隧道。',
+      });
+      this.post({ type: 'status', state: 'error', detail: '未连接' });
+      return undefined;
+    }
 
     /*
      * 连接端口的确定顺序（2026-09-19 修改）：
@@ -867,9 +871,9 @@ class DshPanelView {
 
   // ── 历史会话 ──────────────────────────────────────────
   //
-  // 数据位于 `$DSH_HOME/sessions`（内核所在机器的磁盘上）。两条读取途径：
-  //   1. ACP 接入点插件（dsh-acp-door）0.0.8+ 的旁路方法 `dsh-door/sessions/list|get`（接入点位于其它机器时同样适用）；
-  //   2. 面板自行读取磁盘 —— 仅在连接本机时成立。
+  // 数据位于本机 `$DSH_HOME/sessions`。两条读取途径：
+  //   1. ACP 接入点插件（dsh-acp-door）0.0.8+ 的旁路方法 `dsh-door/sessions/list|get`；
+  //   2. 面板自行读取本机磁盘。
   //
   // 第 2 条途径必要的原因：接入点插件安装在用户配置集中，而**该配置集由 DSH 桌面端自行
   // 管理**（2026-09-19 实测：该配置集中安装的接入点插件版本仍为 0.0.7，且 `dsh plugin --profile
@@ -886,10 +890,10 @@ class DshPanelView {
    * @returns {Promise<{result: object, via: 'door'|'local'}>}
    */
   async readHistory(kind, id) {
-    const localRoot = isLoopbackHost(this.config().host) ? localSessions.resolveSessionsRoot() : undefined;
+    const localRoot = localSessions.resolveSessionsRoot();
     const client = this.client;
 
-    // 能够向该插件查询时即通过该插件查询：该途径对远程接入点同样适用，也是这份数据的「官方」来源。
+    // 能够向该插件查询时即通过该插件查询：这是本机 DSH 返回的正式数据来源。
     // `historyVia === 'local'` 表示本轮连接中已确认该插件没有此方法，
     // 因此不再在每次打开历史会话时发起一次注定失败的往返。
     if (this.historyVia !== 'local' && client && client.isConnected) {
@@ -901,15 +905,12 @@ class DshPanelView {
         return { result, via: 'door' };
       } catch (error) {
         const text = this.errText(error);
-        if (!isMissingMethod(error, text) || !localRoot) throw error;
+        if (!isMissingMethod(error, text)) throw error;
         this.historyVia = 'local';
         this.log('info', '该插件未提供历史会话的旁路方法（需要 0.0.8+），改为面板自行读取 $DSH_HOME/sessions');
       }
     }
 
-    if (!localRoot) {
-      throw new Error('该 DSH 位于其它机器上，面板无法读取其历史会话');
-    }
     if (!localSessions.hasZstdSupport()) {
       throw new Error('本机 Node 不支持 zstd 压缩格式，无法解析会话文件');
     }
@@ -922,8 +923,7 @@ class DshPanelView {
   /**
    * 把历史会话清单发送给界面。
    *
-   * 「接入点插件版本过低」这一情况仅在**接入点位于其它机器上**时需要用户处理（此时本地读取的结果不正确，
-   * 只能升级那台机器上的该插件）；连接本机时，上述自行读取磁盘的途径已经覆盖该情况，用户不需要执行任何操作。
+   * 接入点插件版本过低时，上述本机读取途径会自动补上，不要求用户修改桌面端配置集。
    */
   async sendHistoryList() {
     try {
@@ -957,8 +957,8 @@ class DshPanelView {
   historyErrorText(error) {
     const text = this.errText(error);
     if (isMissingMethod(error, text)) {
-      // 仅在连接其它机器上的 DSH 时进入该分支：那台 DSH 版本过低，无法读取其历史会话。
-      // 向用户只说明这一点（版本号、包名记录在日志中）。
+      // 调用方可能直接传入该插件返回的错误；向用户只说明读取能力不足，
+      // 版本号、包名记录在日志中。
       return '该 DSH 版本过低，无法读取其历史会话。';
     }
     return `读取历史会话失败：${text}`;
@@ -1447,6 +1447,5 @@ module.exports = {
   fallbackFailureText,
   fallbackAdvice,
   shouldSwitchToOwnKernel,
-  isLoopbackHost,
   isMissingMethod,
 };

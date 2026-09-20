@@ -12,6 +12,8 @@
 test/**
 tools/**
 build/**
+# 构建目录因文件锁定而暂时改名时，也绝不能被 vsce 收入市场包。
+build_stale_bak/**
 shots/**
 .vscodeignore
 

@@ -1,0 +1,41 @@
+name: 验证
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fast-check:
+    name: Windows 快速验收
+    runs-on: windows-latest
+    steps:
+      - name: 取出源码
+        uses: actions/checkout@v4
+
+      - name: 准备 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 启用包管理器
+        run: corepack enable
+
+      - name: 安装锁定的依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 运行不依赖 DSH 的快速套件
+        run: node packages/vscode-extension/test/run-all.js
+
+      - name: 检查编码与换行
+        run: node packages/vscode-extension/tools/check-eol.cjs
+
+      - name: 构建 VS Code 安装包
+        run: node packages/vscode-extension/tools/build-vsix.js
+
+      - name: 检查 DSH 插件安装包
+        working-directory: packages/dsh-door
+        run: node tools/publish.cjs

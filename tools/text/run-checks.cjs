@@ -1,13 +1,15 @@
 /*
  * 中文表述规范化的门禁汇总入口（已纳入版本控制：tools/text/）。
  *
- * 用途：依次运行全部质量门禁，输出一张汇总表，任一项未通过时以非零码结束。
+ * 用途：依次运行全部质量门禁，输出一张汇总表。常规维护只阻断真正适用于单次改动的
+ *       检查；`--formalization` 是全仓中文正式化专项，额外要求代码骨架不越界且全部
+ *       含中文文件均被本次改动覆盖。
  *       单项脚本的判定口径见 docs/注释与文档规范.md 第 9 节。
  *
  * 说明：text-check.cjs 的输出恒记为「提示」。该脚本列出的是待人工判断的命中项
  *       （可能是引文、夹具、正则或路径字面值），其本身不构成通过或未通过。
  *
- * 用法：node tools/text/run-checks.cjs [--base=<提交>]
+ * 用法：node tools/text/run-checks.cjs [--base=<提交>] [--formalization]
  *       基线默认为 HEAD（提交前比较工作区）。提交之后用 --base=<基线提交> 复现同一批证据。
  */
 'use strict';
@@ -18,6 +20,7 @@ const ROOT = path.resolve(__dirname, '..', '..');
 const baseArg = process.argv.find((arg) => arg.startsWith('--base='));
 const BASE = baseArg ? baseArg.slice('--base='.length) : 'HEAD';
 const basePass = baseArg ? [`--base=${BASE}`] : [];
+const FORMALIZATION = process.argv.includes('--formalization');
 
 /**
  * 门禁清单。每项的 judge 接收脚本输出与退出码，返回 'pass' | 'fail' | 'info' 与备注。
@@ -41,8 +44,10 @@ const CHECKS = [
     script: 'tools/text/code-diff-check.cjs',
     args: basePass,
     judge: (out, code) => ({
-      verdict: code === 0 ? 'pass' : 'fail',
-      note: (/(代码行被改动的文件：\d+ 个[^\n]*)/.exec(out) || ['', '无输出'])[1],
+      verdict: FORMALIZATION ? (code === 0 ? 'pass' : 'fail') : 'info',
+      note: `${(/(代码行被改动的文件：\d+ 个[^\n]*)/.exec(out) || ['', '无输出'])[1]}${
+        FORMALIZATION ? '' : '（常规维护仅报告；全仓正式化使用 --formalization）'
+      }`,
     }),
   },
   {
@@ -60,8 +65,12 @@ const CHECKS = [
     script: 'tools/text/coverage-audit.cjs',
     args: basePass,
     judge: (out) => ({
-      verdict: /其中未被触及：0 个；无法读取：0 个/.test(out) ? 'pass' : 'fail',
-      note: (/(含中文的已跟踪文件：\d+ 个[^\n]*)/.exec(out) || ['', '无输出'])[1],
+      verdict: FORMALIZATION
+        ? (/其中未被触及：0 个；无法读取：0 个/.test(out) ? 'pass' : 'fail')
+        : 'info',
+      note: `${(/(含中文的已跟踪文件：\d+ 个[^\n]*)/.exec(out) || ['', '无输出'])[1]}${
+        FORMALIZATION ? '' : '（常规维护仅报告；全仓正式化使用 --formalization）'
+      }`,
     }),
   },
   {
@@ -82,6 +91,7 @@ const CHECKS = [
 ];
 
 const results = [];
+console.log(`模式：${FORMALIZATION ? '全仓中文正式化（严格）' : '常规维护（覆盖面与代码骨架只报告）'}`);
 for (const check of CHECKS) {
   let out = '';
   let code = 0;

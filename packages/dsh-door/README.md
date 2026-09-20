@@ -33,6 +33,14 @@ dsh plugin --profile <your-profile> add dsh-acp-door
 Restart the kernel (or the desktop app) afterwards — plugins are loaded at
 startup.
 
+For a compatible update of an installed copy, run:
+
+```sh
+dsh plugin --profile <your-profile> update dsh-acp-door
+```
+
+Restart the kernel afterwards.
+
 </details>
 
 ## 安装
@@ -44,6 +52,28 @@ dsh plugin --profile <档名> add dsh-acp-door
 安装完成后需要**重启内核**（或重启桌面端）才会生效：ACP 接入点插件（`dsh-acp-door`）在内核启动时加载。
 该插件装入哪个档，外部程序即可连接该档的 DSH —— 桌面端所用的档由桌面端自身管理
 （运行时命令行无法修改），因此通常装入用户自己的档。
+
+若 VS Code 面板需要在桌面端未运行时自行启动 DSH，应使用可由命令行启动的网页配置集，
+而不是 `desktop` 配置集。例如：
+
+```sh
+dsh --profile vscode-panel --from-default-profile web --dump-config
+dsh plugin --profile vscode-panel add dsh-acp-door
+```
+
+安装后在该配置集的插件配置中确认 `provider` 与 `model` 对应本机可用的 DSH 服务，再重启内核。
+不同电脑分别安装各自的 DSH 与本插件；接入点固定在 `127.0.0.1`，不支持远程设备连接、端口转发或隧道。
+
+## 更新
+
+常规兼容更新使用以下命令：
+
+```sh
+dsh plugin --profile <档名> update dsh-acp-door
+```
+
+该命令按当前配置集中声明的版本范围更新。更新完成后重启对应内核（桌面端使用的配置集则重启桌面端）。
+若版本说明标为不兼容更新，按该版本的安装说明处理，避免在未阅读变更记录的情况下跨越大版本。
 
 配置项（写入档的 `cordis.patch.yml`，见本包自带的同名文件）：
 
@@ -192,6 +222,7 @@ agent "…" has no provider/model: set AgentOptions.provider and AgentOptions.mo
 
 | 版本 | 改了什么 |
 | --- | --- |
+| 0.0.13 | 固定接入点监听 `127.0.0.1`，配置中的其它监听地址会被忽略。 |
 | 0.0.12 | 新增 `dsh-door/permission/get` 与 `dsh-door/permission/set` 两个旁路方法：将内核 `@deepseek-ai/dsh-permission-presets` 的权限预设**清单与切换**透传给客户端（ACP 仅暴露模型与推理强度两个 config option，权限选择器属于其「刻意不提供」的 DSH 专用 UI 类别）。清单**不写死** —— 内核配置了什么就返回什么（`read-only`/`workspace-write`/`danger-full-access` 来自 `dsh-base`，`auto-approval` 由 `dsh-auto-approval-plugin` 添加，用户也可自行添加），因此客户端一侧与桌面端始终为同一真源。`permissionPresets` 是**可选**依赖（`ctx.inject`），档中未挂载该服务时该插件照常工作、仅返回「这个内核没有权限预设」。回归测试：`test/permission.js`（纯函数 29 项）+ 扩展一侧的 `test/permission-live.js`（真内核，四档全切一遍 24 项）。 |
 | 0.0.9 | **修复两个缺陷**：① 建会话**失败**时的预设指定会留在队列中，被**下一次**建会话取走（用户未指定却挂载了其它模式）—— 出错的回复原先未被处理（预筛要求该行含 `"result"`）；② 入站闸等待预设挂载**没有超时**，内核某个服务返回永不落定的 promise 时，`session/prompt` 会被永久阻塞 —— 症状为「发送消息后毫无响应、也没有任何报错」。现在入站与出站使用同一上限（`MOUNT_WAIT_MS`，经 `waitForMount()`），到时放行。<br>回归测试：`test/frames.js` 第 8 节第 (6) 段、第 9 节。 |
 | 0.0.8 | 新增 `dsh-door/sessions/list` 与 `dsh-door/sessions/get` 两个旁路方法（该插件只读解析 `$DSH_HOME/sessions`，多帧 zstd）。供「内核没有 `session/load`、面板又需查看历史」的场景使用。另修复出站中继必须返回 `WritableStream`（写成 `TransformStream` 且无人消费 readable 时，该插件的回复始终无法发出，客户端表现为「已连接但不应答」）。 |

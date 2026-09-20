@@ -32,6 +32,10 @@
  * 需要验证「自启模式」（用户最常采用的路径：刚开机、未启动桌面端）而桌面端又已启动时，
  * 可使用 DSH_PANEL_CHECK_PORT / _PROFILE / _DSH 这三个环境变量将该次自检
  * 引导到一个空闲端口，说明见下方 PORT 一段。
+ *
+ * 默认从用户已安装的扩展目录复制一份到隔离窗口。发布前若要核验刚生成的 VSIX，
+ * 可设置 DSH_PANEL_CHECK_EXTENSION_SOURCE 为另一个已解包的扩展目录；该目录只会
+ * 被复制到隔离窗口，用户的扩展目录不会被写入或删除。
  */
 
 const fs = require('node:fs');
@@ -110,6 +114,7 @@ const INSTALLED = (() => {
     : undefined;
   return found ? path.join(EXTENSIONS_DIR, found) : exact;
 })();
+const EXTENSION_SOURCE = process.env.DSH_PANEL_CHECK_EXTENSION_SOURCE || INSTALLED;
 
 let CODE_EXE = CODE_EXE_CANDIDATES.find((candidate) => candidate && fs.existsSync(candidate));
 
@@ -322,8 +327,23 @@ async function main() {
     console.log('  ⏭  找不到 VS Code 的 Code.exe（该机器上无法执行此步骤）');
     process.exit(2);
   }
-  if (!fs.existsSync(INSTALLED)) {
-    console.log(`  ⏭  找不到已安装的扩展：${INSTALLED}（先装一次再跑）`);
+  if (!fs.existsSync(EXTENSION_SOURCE)) {
+    console.log(`  ⏭  找不到用于隔离自检的扩展：${EXTENSION_SOURCE}`);
+    console.log('     默认读取用户已安装的版本；也可设置 DSH_PANEL_CHECK_EXTENSION_SOURCE。');
+    process.exit(2);
+  }
+  let sourceManifest;
+  try {
+    sourceManifest = JSON.parse(fs.readFileSync(path.join(EXTENSION_SOURCE, 'package.json'), 'utf8'));
+  } catch (error) {
+    console.log(`  ⏭  无法读取隔离扩展的 package.json：${error.message}`);
+    process.exit(2);
+  }
+  const sameIdentity = ['publisher', 'name', 'version'].every((key) => sourceManifest[key] === MANIFEST[key]);
+  if (!sameIdentity) {
+    console.log('  ⏭  隔离扩展的身份与当前源码不一致，不使用它进行自检。');
+    console.log(`     来源：${sourceManifest.publisher}.${sourceManifest.name}@${sourceManifest.version}`);
+    console.log(`     当前：${MANIFEST.publisher}.${MANIFEST.name}@${MANIFEST.version}`);
     process.exit(2);
   }
 
@@ -347,8 +367,9 @@ async function main() {
   const extensions = path.join(sandbox, 'extensions');
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-e2e-ws-'));
   fs.mkdirSync(userData, { recursive: true });
-  copyDir(INSTALLED, path.join(extensions, EXT_DIR_NAME));
+  copyDir(EXTENSION_SOURCE, path.join(extensions, EXT_DIR_NAME));
   console.log(`  隔离目录：${sandbox}`);
+  console.log(`  扩展来源：${EXTENSION_SOURCE}`);
   console.log(`  扩展目录里只放这一份：${fs.readdirSync(extensions).join(', ')}`);
 
   // 仅在设置了覆盖项时才写入设置；写入的是隔离窗口自身的 user settings，
