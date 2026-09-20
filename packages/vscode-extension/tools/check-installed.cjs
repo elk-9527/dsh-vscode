@@ -12,11 +12,22 @@ const os = require('node:os');
 
 // 这个脚本就住在扩展里，所以 ".." 就是扩展根目录。
 const SRC = path.resolve(__dirname, '..');
-// 打包脚本装进去的是这几样（见 tools/build-vsix.js 的 SHIP）。
-const SHIP = ['package.json', 'README.md', 'src', 'media'];
+// 装进去的是哪几样：问 tools/ship-list.js（只有那一份清单，别再抄一遍）。
+const { shipFiles } = require('./ship-list');
 
 const manifest = JSON.parse(fs.readFileSync(path.join(SRC, 'package.json'), 'utf8'));
-const DST = path.join(os.homedir(), '.vscode', 'extensions', `local.${manifest.name}-${manifest.version}`);
+// 安装目录名 = `<publisher>.<name>-<version>`（VS Code 的命名法）。publisher 从 0.1.3 起
+// 是市场用的那个 ID，所以这里跟着清单算，别再写死 `local.`；大小写也按实际目录兜一下。
+const EXTENSIONS_DIR = path.join(os.homedir(), '.vscode', 'extensions');
+const EXT_DIR_NAME = `${manifest.publisher}.${manifest.name}-${manifest.version}`;
+const DST = (() => {
+  const exact = path.join(EXTENSIONS_DIR, EXT_DIR_NAME);
+  if (fs.existsSync(exact)) return exact;
+  const found = fs.existsSync(EXTENSIONS_DIR)
+    ? fs.readdirSync(EXTENSIONS_DIR).find((name) => name.toLowerCase() === EXT_DIR_NAME.toLowerCase())
+    : undefined;
+  return found ? path.join(EXTENSIONS_DIR, found) : exact;
+})();
 
 if (!fs.existsSync(DST)) {
   console.log(`❌ 没找到装着的那份：${DST}`);
@@ -24,18 +35,7 @@ if (!fs.existsSync(DST)) {
   process.exit(1);
 }
 
-const files = [];
-for (const s of SHIP) {
-  const p = path.join(SRC, s);
-  if (!fs.existsSync(p)) continue;
-  (function walk(rel) {
-    if (fs.statSync(path.join(SRC, rel)).isDirectory()) {
-      for (const entry of fs.readdirSync(path.join(SRC, rel))) walk(path.join(rel, entry));
-      return;
-    }
-    files.push(rel);
-  })(s);
-}
+const files = shipFiles(SRC);
 
 const drift = [];
 for (const rel of files) {

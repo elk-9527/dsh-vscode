@@ -15,7 +15,7 @@
  *
  * 判据（缺一条都算失败，不会含糊过去）：
  * 1. 隔离窗口真的起来了（出现新的 Code.exe）；
- * 2. 扩展真的被激活了（扩展宿主日志里有 `_doActivateExtension local.dsh-panel`）；
+ * 2. 扩展真的被激活了（扩展宿主日志里有 `_doActivateExtension <publisher>.dsh-panel`）；
  * 3. 面板真的挂进了活动栏（渲染进程日志里有 `Added views:dshPanel.chat`）；
  * 4. 面板真的展开了（扩展自己的日志里有「面板已打开」）；
  * 5. 真的连上了 DSH（扩展自己的日志里有「握手完成」和「已建会话」）——
@@ -92,10 +92,24 @@ const CODE_EXE_CANDIDATES = [
   path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Microsoft VS Code', 'Code.exe'),
   path.join(process.env.ProgramFiles || '', 'Microsoft VS Code', 'Code.exe'),
 ];
-// 安装目录名跟着清单版本走（local.dsh-panel-<version>），提版本号时这里不用改。
+/*
+ * 安装目录名 = `<publisher>.<name>-<version>`（VS Code 自己就是这么命名的）。
+ * **别写死 `local.`** —— 0.1.3 起 publisher 换成了市场要用的那个 ID，
+ * 写死的结果是"扩展明明装着，自检却说找不到"。
+ * 大小写也不假设：市场规定 publisher 只能小写，但要是被手改过，就按实际存在的找。
+ */
 const MANIFEST = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-const EXT_DIR_NAME = `local.dsh-panel-${MANIFEST.version}`;
-const INSTALLED = path.join(os.homedir(), '.vscode', 'extensions', EXT_DIR_NAME);
+const EXTENSIONS_DIR = path.join(os.homedir(), '.vscode', 'extensions');
+const EXT_ID = `${MANIFEST.publisher}.${MANIFEST.name}`;
+const EXT_DIR_NAME = `${EXT_ID}-${MANIFEST.version}`;
+const INSTALLED = (() => {
+  const exact = path.join(EXTENSIONS_DIR, EXT_DIR_NAME);
+  if (fs.existsSync(exact)) return exact;
+  const found = fs.existsSync(EXTENSIONS_DIR)
+    ? fs.readdirSync(EXTENSIONS_DIR).find((name) => name.toLowerCase() === EXT_DIR_NAME.toLowerCase())
+    : undefined;
+  return found ? path.join(EXTENSIONS_DIR, found) : exact;
+})();
 
 let CODE_EXE = CODE_EXE_CANDIDATES.find((candidate) => candidate && fs.existsSync(candidate));
 
@@ -433,8 +447,8 @@ async function main() {
   const exthost = findLog(userData, 'exthost.log');
   const exthostText = exthost ? fs.readFileSync(exthost, 'utf8') : '';
   check('扩展真的被激活了（扩展宿主日志里有它）',
-    /_doActivateExtension local\.dsh-panel/.test(exthostText),
-    exthost ? '看过扩展宿主日志' : '没有扩展宿主日志');
+    new RegExp(`_doActivateExtension ${EXT_ID.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`).test(exthostText),
+    exthost ? `找的是 _doActivateExtension ${EXT_ID}` : '没有扩展宿主日志');
   // 命令清单从清单文件里读，别在这里再抄一份 —— 抄一份就会漏掉后加的
   // （「打开面板」就是这么被漏掉的：这正是早上"找不到入口"的那个坑）。
   const declaredCommands = require('../package.json').contributes.commands.map((item) => item.command);

@@ -4,6 +4,56 @@
 让外部程序（VS Code 面板）能驱动**同一个** DSH —— 同一套配置、同一份记忆、
 同一套工具、同一份会话记录。
 
+![VS Code 面板通过本插件连接同一个 DSH](assets/panel-chat.png)
+
+| 权限模式（本插件把内核的权限预设接了出来） |
+| --- |
+| ![权限选择器](assets/panel-permission.png) |
+
+<details>
+<summary>English</summary>
+
+**dsh-acp-door** opens an extra ACP (Agent Client Protocol) transport on a
+**running** DeepSeek Harness kernel — loopback only (`127.0.0.1`), no
+authentication, so it is meant for your own machine. External clients such as
+the *DSH Panel* VS Code extension can then drive the very same kernel you
+already have open: same config, same memory, same tools, same session records.
+
+ACP normally speaks over stdio, which can only be attached at process start;
+this plugin instead mounts one ACP bridge per TCP connection on top of the live
+kernel, and exposes a few bypass methods the core does not have over ACP
+(session listing, permission presets).
+
+Install:
+
+```sh
+dsh plugin --profile <your-profile> add dsh-acp-door
+```
+
+Restart the kernel (or the desktop app) afterwards — plugins are loaded at
+startup.
+
+</details>
+
+## 安装
+
+```sh
+dsh plugin --profile <你的档> add dsh-acp-door
+```
+
+装完要**重启内核**（或重启桌面端）才生效：插件是在内核启动时加载的。
+装进哪个档，外部程序就连得上哪个档的 DSH —— 桌面端那个档归桌面端自己管
+（运行时命令行改不动它），所以通常装进你自己那个档。
+
+配置项（写在档的 `cordis.patch.yml` 里，见本包自带的那个文件）：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `host` | `127.0.0.1` | 监听地址。**不要改成 `0.0.0.0`**，那会把门开到局域网上。 |
+| `port` | `47821` | 监听端口。也可以用环境变量 `DSH_ACP_DOOR_PORT` 覆盖（0.0.11 起）。 |
+| `provider` / `model` | 见文件 | 新会话的初始模型；客户端连上后可以按会话再改。 |
+| `preset` | `standard` | 新会话挂载哪套 agent preset。 |
+
 ## 它解决什么问题
 
 ACP 默认走「标准输入输出」：那根线只能在进程**启动的那一刻**接上。

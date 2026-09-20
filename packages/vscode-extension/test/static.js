@@ -549,11 +549,27 @@ check(
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 {
-  // vsix 里带的文件必须齐全 —— 少一个（比如忘了 media/markdown.js），
-  // 装上去是个残废扩展，而且只在运行时才发现。
-  const vsixFiles = ['package.json', 'README.md', 'src/extension.js', 'media/main.js', 'media/main.css', 'media/markdown.js', 'media/dsh.svg'];
-  const missing = vsixFiles.filter((file) => !fs.existsSync(path.join(ROOT, file)));
+  /*
+   * 打包清单：清单本身在 tools/ship-list.js（打包、装机核对、发布前漂移检查共用），
+   * 这里拴两件事 ——
+   *   ① 清单里的东西**真的存在**（少一个文件，装上去就是残废扩展，只在运行时才发现）；
+   *   ② 扩展目录下**每个顶层条目**要么在清单里、要么在 .vscodeignore 里 ——
+   *      新加一个目录/文件却两边都没登记，市场包里就会多出（或少掉）东西。
+   */
+  const { SHIP, shipFiles } = require('../tools/ship-list');
+  const missing = SHIP.filter((item) => !fs.existsSync(path.join(ROOT, item)));
   check('打包清单里的文件都在', missing.length === 0, missing.join(', '));
+  check(
+    '打包清单非空且逐个都展得开',
+    shipFiles(ROOT).length >= SHIP.length,
+    `${shipFiles(ROOT).length} 个文件`,
+  );
+  const ignore = read('.vscodeignore');
+  const unlisted = fs
+    .readdirSync(ROOT)
+    .filter((name) => !SHIP.includes(name))
+    .filter((name) => !new RegExp(`(^|\\n)\\s*${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(/|\\*|\\s|$)`).test(ignore));
+  check('扩展目录里没有"既不在清单、也不在 .vscodeignore"的东西', unlisted.length === 0, unlisted.join(', '));
 }
 
 {

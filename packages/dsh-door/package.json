@@ -1,8 +1,8 @@
 {
   "name": "dsh-acp-door",
   "version": "0.0.12",
-  "private": true,
   "description": "在正在运行的 DeepSeek Harness 内核上，额外开一扇只监听本机的 ACP 门（供 VS Code 面板等外部程序连接）。",
+  "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -12,8 +12,27 @@
   "files": [
     "lib",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek",
+    "deepseek harness",
+    "acp",
+    "agent client protocol",
+    "vscode"
+  ],
+  "homepage": "https://github.com/TODO-owner/TODO-repo/tree/main/packages/dsh-door#readme",
+  "bugs": {
+    "url": "https://github.com/TODO-owner/TODO-repo/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TODO-owner/TODO-repo.git",
+    "directory": "packages/dsh-door"
+  },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0"
   },

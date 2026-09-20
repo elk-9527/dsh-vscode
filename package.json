@@ -3,10 +3,20 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "把 DeepSeek Harness 接入 VS Code 的自有扩展：扩展自己充当 ACP 客户端，驱动 dsh --profile acp",
+  "description": "把 DeepSeek Harness 接进 VS Code 的两半：VS Code 扩展 dsh-panel + DSH 插件 dsh-acp-door",
+  "license": "MIT",
+  "homepage": "https://github.com/TODO-owner/TODO-repo#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TODO-owner/TODO-repo.git"
+  },
   "scripts": {
     "probe": "node spike/acp-probe.mjs",
-    "probe:edit": "node spike/acp-probe.mjs --edit"
+    "probe:edit": "node spike/acp-probe.mjs --edit",
+    "test": "node packages/vscode-extension/test/run-all.js --all && node packages/dsh-door/test/run-all.js",
+    "test:ext": "node packages/vscode-extension/test/run-all.js --all",
+    "test:door": "node packages/dsh-door/test/run-all.js",
+    "ui": "node packages/vscode-extension/tools/uitest.js"
   },
   "devDependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",

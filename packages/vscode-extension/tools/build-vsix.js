@@ -19,13 +19,11 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { SHIP } = require('./ship-list');
 
 const ROOT = path.resolve(__dirname, '..');
 const BUILD = path.join(ROOT, 'build');
 const STAGE = path.join(BUILD, 'stage');
-
-/** 要打进 vsix 的东西（相对扩展根目录）。测试与工具目录不打包。 */
-const SHIP = ['package.json', 'README.md', 'src', 'media'];
 
 function readManifest() {
   return JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
@@ -130,8 +128,7 @@ function main() {
   for (const item of SHIP) {
     const from = path.join(ROOT, item);
     if (!fs.existsSync(from)) {
-      console.warn(`  ⚠ 跳过不存在的文件：${item}`);
-      continue;
+      throw new Error(`清单里的东西不存在：${item}（清单在 tools/ship-list.js）`);
     }
     copyInto(from, path.join(extensionDir, item));
   }

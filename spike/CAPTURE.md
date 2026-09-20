@@ -187,6 +187,8 @@ SDK 的 `buildSession()/ActiveSession` 只覆盖 `session/new`。
 ✅ 恢复后能继续对话（全局更新路由生效）
 ```
 → `packages/acp` 要自己实现会话注册表（new + resume 统一路径），而不是包一层 `ActiveSession`。
+（2026-09-20 记：`packages/acp` 那个空壳已经删了 —— 结论落到了扩展这边，
+会话注册表在 `packages/vscode-extension/src/dsh/session.js`。）
 
 ---
 

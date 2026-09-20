@@ -3,17 +3,46 @@
   "displayName": "DSH Panel",
   "description": "在 VS Code 侧边栏里直接用 DeepSeek Harness：内核由插件自己按需启动，不用先打开桌面端；记忆、会话记录、插件与桌面端共用同一份 $DSH_HOME。",
   "version": "0.1.3",
-  "private": true,
-  "publisher": "local",
-  "license": "UNLICENSED",
+  "publisher": "todo-your-publisher-id",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#0e639c",
+    "theme": "dark"
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek harness",
+    "dsh",
+    "acp",
+    "agent",
+    "chat",
+    "ai",
+    "side panel"
+  ],
+  "homepage": "https://github.com/TODO-owner/TODO-repo#readme",
+  "bugs": {
+    "url": "https://github.com/TODO-owner/TODO-repo/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TODO-owner/TODO-repo.git",
+    "directory": "packages/vscode-extension"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
     "AI",
+    "Chat",
     "Other"
   ],
   "main": "./src/extension.js",
+  "scripts": {
+    "icon": "node tools/make-icon.cjs",
+    "package": "npx @vscode/vsce package",
+    "publish": "node tools/publish.js --yes"
+  },
   "activationEvents": [
     "onView:dshPanel.chat",
     "onStartupFinished"

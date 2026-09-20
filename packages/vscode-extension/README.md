@@ -9,6 +9,33 @@
 它不是另一个 agent，也不会另起一套记忆：同一份配置、同一份记忆、
 同一份会话记录、同一套工具与权限策略。
 
+![面板](media/screenshots/panel-chat.png)
+
+| 权限模式（会话中途也能换） | 历史会话（点一条就接回上下文） |
+| --- | --- |
+| ![权限](media/screenshots/panel-permission.png) | ![历史](media/screenshots/panel-history.png) |
+
+<details>
+<summary>English</summary>
+
+**DSH Panel** puts [DeepSeek Harness](https://github.com/deepseek-ai) (DSH) in the
+VS Code sidebar. You do not have to start the desktop app first — the extension
+starts a DSH kernel on demand, or attaches to the one already running.
+
+It is not another agent and it does not keep a second memory: same `$DSH_HOME`,
+same sessions, same plugins, same tools and permission policy as the desktop app.
+Model, agent preset and permission mode are read from the running kernel (not
+hard-coded), and the permission mode can be switched mid-conversation.
+
+To connect, DSH needs the companion plugin **`dsh-acp-door`**, which opens a
+loopback-only ACP port inside the kernel (`dsh plugin --profile <profile> add
+dsh-acp-door`). Only `127.0.0.1` is ever listened on; there is no authentication,
+so it is meant for your own machine.
+
+Requires VS Code 1.85+ and a local DSH install. UI text is Chinese today.
+
+</details>
+
 ## 它是怎么接上去的
 
 ```
@@ -111,6 +138,21 @@ error: profile "desktop" is managed exclusively by the Electron application
 同一个扩展，不带工作区文件夹能激活，带一个未被信任的文件夹就完全不加载）。
 本扩展不执行工作区里的代码：读工作区文件只发生在你主动右键「带进对话」时，
 设置也只读用户级设置（受限模式下 VS Code 本来就不套用工作区设置）。
+
+## 安装
+
+1. **装这个扩展**：市场里搜 `DSH Panel`，或者命令行
+   `code --install-extension <publisher>.dsh-panel`。
+2. **给 DSH 装上配套插件**（只需要一次）：
+
+   ```sh
+   dsh plugin --profile <你的档> add dsh-acp-door
+   ```
+
+   没装它也能用：面板会自己启动内核，但那个档里同样得有这个插件 —— 否则面板
+   连不上任何 DSH，只会在对话流里说明「这套配置里没装连接组件」。
+   装在哪个档，决定了面板能连上哪个档的 DSH（详见下面「门要装进哪个档」）。
+3. 打开侧边栏，直接提问。
 
 ## 用法
 
@@ -322,9 +364,14 @@ node tools/shots.js      # 把每个场景 × 深/浅主题拍成图（shots/*.p
                          # 用于"用眼睛看"和改动前后对比。加场景名可只拍一个。
 node tools/design-audit.js  # 界面尺度审计：字号/间距/行高/圆角各有几种、有没有硬编码颜色。
                          # 美化那一步用它量"改前改后"；加 --strict 时有硬编码颜色就非 0 退出。
-node tools/build-vsix.js # 打包成 vsix
+node tools/build-vsix.js # 打包成 vsix（本地安装用；要打进包里的文件清单在 tools/ship-list.js，
+                         # 只有那一份 —— 市场那边用 vsce + .vscodeignore，两个清单必须一致）
+node tools/make-icon.cjs # 生成市场用的 media/icon.png（128×128）。活动栏那个 svg 是单色
+                         # + currentColor，直接拿去当市场图标等于看不见，所以要从它转一张彩色的。
+node tools/publish.js    # 市场发布：不加参数是彩排（自检 + vsce 打包 + 与上面那份清单逐文件比对），
+                         # 加 --yes 才真发（需要 VSCE_PAT；占位符没填会被拒绝）
 
-# 下面四个是「排查用」的，不是测试套件的一部分，也不打进 vsix（只 ship src/media/README/package.json）。
+# 下面四个是「排查用」的，不是测试套件的一部分，也不打进 vsix（只 ship ship-list.js 里那几样）。
 # 它们跑的是你这台机器的真实环境，所以只适合手动跑：
 node tools/check-installed.cjs     # 装进 VS Code 的那份和仓库源码是否逐字节一致
                                    # （判断"用户跑的是不是当前源码"—— 出过一次"改了源码但没装"）

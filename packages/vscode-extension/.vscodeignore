@@ -1,0 +1,25 @@
+# 哪些东西不进 vsix（市场包里只放跑得起来的代码 + 市场要读的文件）。
+#
+# 为什么要有这个文件：以前只有自制的 tools/build-vsix.js 在做白名单（src/media/
+# README/package.json），一旦改用官方的 `vsce package`，没有 .vscodeignore 就会
+# 把测试、界面截图、诊断工具一起打进市场包 —— 体积翻几倍，而且把内部东西公开了。
+# 这份是**黑名单**，跟 build-vsix.js 的白名单互为兜底：两边都拦。
+#
+# 想核对最终会打进去哪些文件：npx @vscode/vsce ls --no-dependencies
+
+# 测试与开发工具（跑测试用，装到用户机器上没意义）
+test/**
+tools/**
+build/**
+shots/**
+.vscodeignore
+
+# 仓库级文件（市场页面用的是 package.json 里的字段，不需要这些）
+docs/**
+*.log
+*.tgz
+
+# 编辑器/系统杂物
+.vscode/**
+.gitignore
+.DS_Store
