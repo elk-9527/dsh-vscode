@@ -38,6 +38,7 @@ const {
   spawnBackgroundDsh,
   splitCommand,
   stripOuterQuotes,
+  redactSensitiveOutput,
 } = require('../src/door/locate');
 
 let passed = 0;
@@ -86,6 +87,13 @@ async function main() {
   fs.writeFileSync(plainCmd, body);
   const spacedOut = path.join(spacedDir, 'out.txt');
   const plainOut = path.join(plainDir, 'out.txt');
+  const secretScript = path.join(root, 'emit-secret.js');
+  const fakeWebToken = 'test-web-token-12345';
+  const fakeBearer = 'test-bearer-67890';
+  fs.writeFileSync(secretScript, [
+    `process.stdout.write(${JSON.stringify(`dsh web: http://127.0.0.1:6123/?token=${fakeWebToken}&keep=1\n`)});`,
+    `process.stderr.write(${JSON.stringify(`Authorization: Bearer ${fakeBearer}\n`)});`,
+  ].join('\n'));
   const resetOut = (file) => { try { fs.unlinkSync(file); } catch { /* 文件本就不存在 */ } };
   const outText = (file) => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim() : '');
 
@@ -160,6 +168,24 @@ async function main() {
     await wait(200);
     check('带空格的参数原样到达', argText.includes('--patch') && argText.includes('a b.yml'), argText);
     check('profile 名也在（顺带证明参数是按顺序传的）', argText.includes('--profile desktop'), argText);
+
+    section('6. 内核输出中的访问凭据不能写进日志或错误尾部');
+    const secretLogs = [];
+    const secretBg = spawnBackgroundDsh({
+      command: `"${process.execPath}" "${secretScript}"`,
+      profile: 'desktop',
+      log: (_level, message) => secretLogs.push(message),
+    });
+    await wait(1000);
+    const logged = secretLogs.join('\n');
+    const tail = secretBg.stderrTail();
+    secretBg.dispose();
+    check('网页地址中的访问凭据已隐藏',
+      !logged.includes(fakeWebToken) && logged.includes('token=[已隐藏]') && logged.includes('keep=1'), logged);
+    check('认证头中的访问凭据已隐藏',
+      !logged.includes(fakeBearer) && !tail.includes(fakeBearer) && tail.includes('Bearer [已隐藏]'), tail);
+    check('独立脱敏函数保留无关诊断信息',
+      redactSensitiveOutput('error: port=47831').includes('port=47831'));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

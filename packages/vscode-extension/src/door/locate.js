@@ -7,8 +7,8 @@
  * 后台 DSH —— 该进程与桌面端**共用同一份 `$DSH_HOME`**，因此记忆、会话记录与
  * 配置文件均为同一份，不产生第二份数据。
  *
- * 端口固定为 47821 的原因：该插件在自己的 cordis.patch.yml 中硬编码了端口。
- * 同一时刻只有一个内核可以占用该端口，因此「连接失败 = 桌面端未运行」，判据没有歧义。
+ * 接入已有桌面端时使用设置中的端口；面板自行启动时传入独立端口，避免与桌面端竞争。
+ * 两条路径都只连接或监听回环地址。
  */
 
 const net = require('node:net');
@@ -51,6 +51,32 @@ async function waitForPort(host, port, { totalMs = 90000, intervalMs = 400 } = {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/*
+ * 内核输出会进入 VS Code 日志和错误详情。网页地址、认证头或环境变量中的访问凭据
+ * 不应落盘，因此仅隐藏敏感参数的值，保留参数名称和其余诊断信息。
+ *
+ * 此处不试图识别所有保密内容；覆盖的是 DSH 启动时已观察到的 URL 参数，以及常见的
+ * JSON、HTTP 头和环境变量表达方式。调用方仍不得主动把凭据作为普通日志内容传入。
+ */
+const SENSITIVE_QUERY_VALUE =
+  /([?&#](?:access[_-]?token|api[_-]?key|authorization|token|key|secret|password)=)([^&#\s"']+)/gi;
+const SENSITIVE_JSON_VALUE =
+  /("(?:access[_-]?token|api[_-]?key|authorization|token|key|secret|password)"\s*:\s*")([^"]*)/gi;
+const SENSITIVE_ENV_VALUE =
+  /(\b(?:VSCE_PAT|NODE_AUTH_TOKEN|NPM_TOKEN|GITHUB_TOKEN|ACCESS[_-]?TOKEN|API[_-]?KEY|SECRET|PASSWORD)\s*[=:]\s*)([^\s'"]+)/gi;
+const SENSITIVE_AUTH_HEADER = /(\bauthorization\s*:\s*(?:bearer|basic|token)\s+)([^\s,;]+)/gi;
+const SENSITIVE_BEARER_VALUE = /(\bbearer\s+)([^\s,;]+)/gi;
+
+/** 隐藏可能写入日志或错误详情的访问凭据值。 */
+function redactSensitiveOutput(value) {
+  return String(value === undefined || value === null ? '' : value)
+    .replace(SENSITIVE_QUERY_VALUE, '$1[已隐藏]')
+    .replace(SENSITIVE_JSON_VALUE, '$1[已隐藏]')
+    .replace(SENSITIVE_ENV_VALUE, '$1[已隐藏]')
+    .replace(SENSITIVE_AUTH_HEADER, '$1[已隐藏]')
+    .replace(SENSITIVE_BEARER_VALUE, '$1[已隐藏]');
 }
 
 /**
@@ -97,8 +123,8 @@ function dshCommandCandidates({ dshCommand, homedir }) {
  * 在后台启动一个 DSH。
  *
  * 使用 `--no-open`（不打开浏览器）与 `--port 0`（网页界面端口由系统任意分配，
- * 本扩展使用该插件提供的接入点，不使用其网页界面）。stdio 全部丢弃：该进程为
- * 后台进程，其输出对用户没有意义，也不应污染扩展的输出通道。
+ * 本扩展使用该插件提供的接入点，不使用其网页界面）。标准输出和错误输出会限量写入
+ * 扩展日志，便于定位内核退出原因；其中的访问凭据会在写入前隐藏。
  *
  * @param {object} options
  * @param {string} options.command dsh 程序名或完整路径。
@@ -310,7 +336,7 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [], port }) {
   const line = commandLine(command, args);
   log(
     'info',
-    `后台拉起 DSH：${line}${env === process.env ? '' : `（接入点端口固定为 ${doorPort}，通过 DSH_ACP_DOOR_PORT 传入）`}`,
+    `后台拉起 DSH：${redactSensitiveOutput(line)}${env === process.env ? '' : `（接入点端口固定为 ${doorPort}，通过 DSH_ACP_DOOR_PORT 传入）`}`,
   );
 
   /*
@@ -330,9 +356,8 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [], port }) {
   /*
    * stdout 同样需要接收 —— 不能只接收 stderr。
    *
-   * 2026-09-19：内核启动时会向 **stdout** 输出一行 `dsh web: http://127.0.0.1:…/?token=…`，
-   * 崩溃时也可能向 stdout 输出；仅接收 stderr 时这些内容均不可见。
-   * 两路输出均接收，面板日志已限量（见下面的 forward）。
+   * 内核启动时会向 stdout 输出网页地址，崩溃时也可能向 stdout 输出；仅接收 stderr
+   * 时这些内容均不可见。两路输出均接收并限量转发；访问凭据会在转发前隐藏。
    */
   const winArgs = ['/d', '/s', '/c', `"${line}"`];
   const child =
@@ -375,25 +400,39 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [], port }) {
   let forwardedLines = 0;
   let forwardedChars = 0;
   let droppedOutput = 0;
-  let pendingStdout = '';
+  const pendingOutput = { out: '', err: '' };
   let stderrTail = '';
 
-  /** 将内核某一路输出按行转发到面板日志（超出上限时停止并说明）。 */
-  const forward = (which, chunk, isTail) => {
-    const text = isTail ? chunk : (pendingStdout += chunk);
-    const parts = text.split(/\r?\n/);
-    if (!isTail) pendingStdout = parts.pop();
-    for (const line of parts) {
-      const trimmed = line.trimEnd();
-      if (!trimmed) continue;
-      if (forwardedLines >= OUTPUT_LINE_CAP || forwardedChars >= OUTPUT_CHAR_CAP) {
-        droppedOutput += 1;
-        continue;
-      }
-      forwardedLines += 1;
-      forwardedChars += trimmed.length;
-      log('info', `内核[${which}] ${trimmed}`);
+  const safeStderrTail = () => redactSensitiveOutput(stderrTail).slice(-2000).trim();
+
+  /** 将已经完整的一行内核输出转发到面板日志（超出上限时停止并说明）。 */
+  const forwardLine = (which, line) => {
+    const trimmed = redactSensitiveOutput(line.trimEnd());
+    if (!trimmed) return;
+    if (forwardedLines >= OUTPUT_LINE_CAP || forwardedChars >= OUTPUT_CHAR_CAP) {
+      droppedOutput += 1;
+      return;
     }
+    forwardedLines += 1;
+    forwardedChars += trimmed.length;
+    log('info', `内核[${which}] ${trimmed}`);
+  };
+
+  /**
+   * 按行处理两路输出。不能逐块脱敏：访问凭据可能恰好被流切成两段，逐块处理会漏掉
+   * 后半段。末尾没有换行的一段在进程退出时再转发。
+   */
+  const forward = (which, chunk) => {
+    const text = pendingOutput[which] + chunk;
+    const parts = text.split(/\r?\n/);
+    pendingOutput[which] = parts.pop();
+    for (const line of parts) forwardLine(which, line);
+  };
+
+  const flushPending = (which) => {
+    if (!pendingOutput[which]) return;
+    forwardLine(which, pendingOutput[which]);
+    pendingOutput[which] = '';
   };
 
   const attach = (stream, which, isTail) => {
@@ -401,8 +440,8 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [], port }) {
     if (typeof stream.setEncoding === 'function') stream.setEncoding('utf8');
     stream.on('data', (chunk) => {
       const text = String(chunk);
-      if (isTail) stderrTail = (stderrTail + text).slice(-2000);
-      forward(which, text, isTail);
+      if (isTail) stderrTail = (stderrTail + text).slice(-8192);
+      forward(which, text);
     });
     // 管道自身出错（极少见）不应导致扩展崩溃，也不应产生未捕获异常。
     stream.on('error', () => {});
@@ -413,16 +452,18 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [], port }) {
 
   let disposed = false;
   child.on('error', (error) => {
-    log('error', `后台 DSH 启动失败：${error.message}`);
+    log('error', `后台 DSH 启动失败：${redactSensitiveOutput(error.message)}`);
   });
   child.on('exit', (code, signal) => {
     if (disposed) return;
+    flushPending('out');
+    flushPending('err');
     if (droppedOutput > 0) {
       log('warn', `后台 DSH 的输出还有 ${droppedOutput} 行没记（超过 ${OUTPUT_LINE_CAP} 行了，只留了前面这些）`);
     }
     // 并非由本扩展回收 —— 该进程自行退出。此类情形需要排查。
     log('warn', `后台 DSH 自己退出了（code=${code} signal=${signal}）`);
-    const tail = stderrTail.trim();
+    const tail = safeStderrTail();
     if (tail) {
       const last = tail.split(/\r?\n/).filter((line) => line.trim()).slice(-8);
       log('warn', `它退之前最后说的话：\n${last.join('\n')}`);
@@ -433,9 +474,9 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [], port }) {
 
   return {
     child,
-    /** 内核自行输出的最后一段 stderr（可能为空）。 */
+    /** 内核自行输出的最后一段 stderr；访问凭据已隐藏（可能为空）。 */
     stderrTail() {
-      return stderrTail.trim();
+      return safeStderrTail();
     },
     dispose() {
       if (disposed) return;
@@ -453,7 +494,7 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [], port }) {
             : '已停止本扩展启动的后台 DSH',
         );
       } catch (error) {
-        log(alreadyExited ? 'info' : 'warn', `停止后台 DSH 失败：${error.message}`);
+        log(alreadyExited ? 'info' : 'warn', `停止后台 DSH 失败：${redactSensitiveOutput(error.message)}`);
       }
     },
   };
@@ -510,8 +551,9 @@ function runDshSync({ command, args = [], timeoutMs = 120000 }) {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
   } catch (error) {
-    const detail = [error.stdout, error.stderr].filter(Boolean).join('\n').trim();
-    throw new Error(`${command} ${args.join(' ')} 失败：${detail || error.message}`);
+    const detail = redactSensitiveOutput([error.stdout, error.stderr].filter(Boolean).join('\n').trim());
+    const safeCommand = redactSensitiveOutput(`${command} ${args.join(' ')}`);
+    throw new Error(`${safeCommand} 失败：${detail || redactSensitiveOutput(error.message)}`);
   }
 }
 
@@ -630,6 +672,7 @@ module.exports = {
   stripOuterQuotes,
   resolveCommand,
   commandLine,
+  redactSensitiveOutput,
   dshCommandCandidates,
   explainKernelFailure,
   panelProfileCandidates,

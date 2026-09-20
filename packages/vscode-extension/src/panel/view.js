@@ -26,6 +26,7 @@ const {
   dshCommandCandidates,
   explainKernelFailure,
   panelProfileCandidates,
+  redactSensitiveOutput,
 } = require('../door/locate');
 const { renderHtml, makeNonce } = require('../panel/html');
 const localSessions = require('../dsh/sessions');
@@ -458,7 +459,7 @@ class DshPanelView {
       const { profile, command } = plans[i];
       const hasMore = i + 1 < plans.length;
       // 逐项尝试候选命令只写入日志，顶栏不需要随之变化。
-      this.log('info', `尝试启动：${command}（配置集：${profile}）`);
+      this.log('info', `尝试启动：${redactSensitiveOutput(command)}（配置集：${profile}）`);
       let entry;
       try {
         // 交由 manager 启动并登记：这样"视图销毁"不会终止该进程，另一个窗口也可以复用。
@@ -473,7 +474,7 @@ class DshPanelView {
           extraArgs: this.spawnArgs,
         });
       } catch (error) {
-        failures.push(`「${command}」无法启动：${this.errText(error)}`);
+        failures.push(`「${redactSensitiveOutput(command)}」无法启动：${this.errText(error)}`);
         continue;
       }
       const background = entry.background;
@@ -1368,9 +1369,10 @@ function clip(text, max = 70) {
 function fallbackFailureText({ command, profile, host, port, exitedEarly, stderr, explained }) {
   // 内核已说明原因时如实转述 —— 不应让面板的推测覆盖内核自身的说明。
   const said = explained && explained.kind !== 'unknown' ? explained : null;
-  const raw = String(stderr || '').trim();
+  const safeCommand = redactSensitiveOutput(command);
+  const raw = redactSensitiveOutput(stderr).trim();
   // 使用哪个命令或哪个配置集属于排障细节，写入原文段落即可，中文说明行只陈述结论。
-  const tail = `\n[${command} · profile=${profile}]${raw ? `\n内核原话：${raw}` : ''}`;
+  const tail = `\n[${safeCommand} · profile=${profile}]${raw ? `\n内核原话：${raw}` : ''}`;
 
   if (exitedEarly) {
     if (said) {
