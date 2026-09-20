@@ -16,6 +16,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..');
+const WORKSPACE_ROOT = path.resolve(ROOT, '..', '..');
 const read = (relative) => fs.readFileSync(path.join(ROOT, relative), 'utf8');
 
 const htmlSource = read('src/panel/html.js');
@@ -177,11 +178,20 @@ check(
 
 const extensionManifest = JSON.parse(read('package.json'));
 const settings = extensionManifest.contributes.configuration.properties;
+const workspaceManifest = JSON.parse(fs.readFileSync(path.join(WORKSPACE_ROOT, 'package.json'), 'utf8'));
+const ciWorkflow = fs.readFileSync(path.join(WORKSPACE_ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
+const ciNodeVersion = Number(/node-version:\s*(\d+)/.exec(ciWorkflow)?.[1]);
 const doorPatch = read('../dsh-door/cordis.patch.yml');
 const doorRuntime = read('../dsh-door/lib/index.js');
 const doorPortModule = read('../dsh-door/lib/port.js');
 const doorPort = Number(/^\s*port:\s*(\d+)/m.exec(doorPatch)?.[1]);
 const doorHost = /^\s*host:\s*([\d.]+)/m.exec(doorPatch)?.[1];
+
+check(
+  'CI 的 Node.js 版本满足已锁定 pnpm 11 的要求',
+  workspaceManifest.packageManager === 'pnpm@11.19.0' && ciNodeVersion >= 22,
+  `packageManager=${workspaceManifest.packageManager}；CI Node=${ciNodeVersion || '未找到'}`,
+);
 
 check(
   '扩展默认端口与该插件实际监听端口一致',

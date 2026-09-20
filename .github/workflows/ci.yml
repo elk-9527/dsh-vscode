@@ -19,7 +19,8 @@ jobs:
       - name: 准备 Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # packageManager 固定的 pnpm 11.19.0 要求 Node.js 22.13 或更高版本。
+          node-version: 24
 
       - name: 启用包管理器
         run: corepack enable
