@@ -3,14 +3,14 @@
 /**
  * 侧边栏面板。
  *
- * 职责就三件：
- * 1. 保证有一条活着的连接 —— 先连桌面端的门，连不上就按用户批准的策略
- *    在后台拉起一个 DSH（共用同一份 $DSH_HOME）；
- * 2. 把 {@link DshSession} 的事件翻译成 webview 消息；
- * 3. 把 webview 的消息变成对会话的操作。
+ * 职责共三项：
+ * 1. 维持一条可用连接 —— 先连接桌面端的 ACP 接入点插件（dsh-acp-door），连接失败时按用户批准的
+ *    策略在后台启动一个 DSH（共用同一份 $DSH_HOME）；
+ * 2. 把 {@link DshSession} 的事件转换为 webview 消息；
+ * 3. 把 webview 的消息转换为对会话的操作。
  *
- * 这个文件是**唯一**碰 vscode API 的地方之一（另一个是 extension.js），
- * 所以会话逻辑能在命令行里被单独测试。
+ * 本文件是直接调用 vscode API 的少数位置之一（另一处是 extension.js），
+ * 因此会话逻辑可以在命令行中单独测试。
  */
 
 const vscode = require('vscode');
@@ -19,8 +19,8 @@ const os = require('node:os');
 const { DoorClient } = require('../door/client');
 const { DshSession } = require('../dsh/session');
 const { describeError } = require('../dsh/errors');
-// 权限预设：中文标签与失败说明（纯函数，见那个文件开头为什么清单不写死）。
-const { decorateOptions, currentLabel, explainPermissionFailure } = require('../dsh/permission');
+// 权限预设：中文标签与失败说明（纯函数，见该文件开头关于清单不硬编码的说明）。
+const { decorateOptions, currentLabel, explainPermissionFailure, DISPLAY_ONLY } = require('../dsh/permission');
 const {
   probePort,
   dshCommandCandidates,
@@ -33,18 +33,18 @@ const { kernelManager } = require('../panel/kernel-manager');
 
 const VIEW_ID = 'dshPanel.chat';
 
-/** target 在 base 这个目录里面吗（Windows 上大小写不敏感，path.relative 会处理）。 */
+/** target 是否位于 base 目录之内（Windows 上大小写不敏感，path.relative 会处理）。 */
 function pathIsInside(target, base) {
   const rel = path.relative(base, target);
   return Boolean(rel) && !rel.startsWith('..') && !path.isAbsolute(rel);
 }
 
 /**
- * 这个地址是「本机」吗？
+ * 该地址是否为本机地址。
  *
- * 为什么关心：历史会话的数据在**内核那台机器**的磁盘上。连的是本机时，
- * 面板自己就能读（所以不依赖门的新旧）；连的是别的机器时，只能问那台机器上的
- * 门 —— 本地读出来的会是**这台机器**的会话，完全是另一回事，绝不能当兜底。
+ * 需要判断该问题的原因：历史会话的数据位于**内核所在机器**的磁盘上。连接的是本机时，
+ * 面板自身即可读取（因此不依赖接入点插件的版本）；连接的是其它机器时，只能向那台机器上的
+ * 该插件查询 —— 本地读出的会是**本机**的会话，属于另一份数据，不能作为后备。
  */
 function isLoopbackHost(host) {
   const text = String(host || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
@@ -52,7 +52,7 @@ function isLoopbackHost(host) {
     || text.startsWith('127.');
 }
 
-/** 这个错是不是「对面没有这个方法」（门 0.0.8 之前的历史旁路方法）。 */
+/** 该错误是否为「对端不存在此方法」（该插件 0.0.8 之前未提供的历史旁路方法）。 */
 function isMissingMethod(error, text) {
   return Boolean(error && (error.code === -32601 || /-32601/.test(text)))
     || /method not found|不支持.*dsh-door\/sessions/i.test(String(text || ''));
@@ -63,22 +63,22 @@ class DshPanelView {
    * @param {object} options
    * @param {vscode.Uri} options.extensionUri
    * @param {(level: string, message: string) => void} options.log
-   * @param {string[]} [options.spawnArgs] **只给测试用**：自启内核时额外加的参数。
-   *   生产路径永远是空数组 —— 正常启动不需要任何额外参数。测试拿它挂一个
-   *   `--patch`，把门指到别的端口上，这样测「从零拉起」时不必去抢 47821
-   *   （桌面端开着的时候那上面已经有门了，否则这个测试只能跳过）。
+   * @param {string[]} [options.spawnArgs] **仅供测试使用**：自启内核时额外附加的参数。
+   *   生产路径始终为空数组 —— 正常启动不需要任何额外参数。测试用它附加一个
+   *   `--patch`，把接入点指向其它端口，这样测试「从零启动」时不需要占用 47821
+   *   （桌面端运行时该端口上已存在接入点，否则该测试只能跳过）。
    */
   constructor({ extensionUri, log, spawnArgs = [], kernels }) {
     this.extensionUri = extensionUri;
     this.log = log;
     this.spawnArgs = spawnArgs;
     /**
-     * 后台内核归谁管 —— 归**扩展**，不归这个视图（见 kernel-manager.js 开头）。
+     * 后台内核的归属 —— 归**扩展**所有，不属于本视图（见 kernel-manager.js 开头）。
      *
-     * 这一条是 2026-09-19 那次"聊两句就断"的结构性修复：原来视图一销毁
-     * 就把内核杀掉，而视图太容易没了（折叠侧边栏、拖动面板、重载窗口）。
-     * 现在视图只是内核的一个"使用者"：销毁 = 释放引用，归零后还有宽限，
-     * 这期间重新打开面板会继续用同一个内核。
+     * 这一条是 2026-09-19 那次"对话进行数次后即断开"问题的结构性修复：原实现中视图一旦销毁
+     * 就终止内核，而视图的销毁条件很常见（折叠侧边栏、拖动面板、重载窗口）。
+     * 现在视图仅作为内核的"使用者"：销毁 = 释放引用，引用归零后仍保留宽限期，
+     * 该期间重新打开面板会继续使用同一个内核。
      */
     this.kernels = kernels || kernelManager(log);
     /** @type {vscode.WebviewView|undefined} */
@@ -87,94 +87,94 @@ class DshPanelView {
     this.client = undefined;
     /** @type {DshSession|undefined} */
     this.session = undefined;
-    /** @type {{dispose: () => void}|undefined} 本扩展拉起的后台 DSH。 */
+    /** @type {{dispose: () => void}|undefined} 本扩展启动的后台 DSH。 */
     this.background = undefined;
     /** 防止并发重复连接。 */
     this.connecting = null;
     /**
-     * 断线后要接回的会话 id。
+     * 断线后需要恢复的会话 id。
      *
-     * 为什么需要它：ACP 的 `session/resume` 实测**真的能把上下文接回来**
-     * （见 test/resume.js：断线后新连接 resume，它还记得断线前让它记的数字，
-     * 而新开的会话答不出来）。所以断线不该悄悄换成一个没记忆的新会话 ——
-     * 那会让用户以为它还记着上面那段对话，其实已经忘了。
+     * 需要该字段的原因：ACP 的 `session/resume` 经实测**能够恢复上下文**
+     * （见 test/resume.js：断线后新连接执行 resume，会话仍记得断线前要求它记住的数字，
+     * 而新建的会话无法回答该数字）。因此断线后不应静默切换为一个无记忆的新会话 ——
+     * 那会使用户误认为该会话仍记得此前的对话，而实际上上下文已经丢失。
      * @type {string|undefined}
      */
     this.resumeTarget = undefined;
     /**
-     * 接上现成的那台 DSH 之后，发现它换不了权限 → 改用面板自己启动的那台。
+     * 接入现成的 DSH 之后，若该 DSH 无法切换权限 → 改用面板自行启动的 DSH。
      *
-     * 为什么（2026-09-19 后半夜用户报「改了之后我切换不了权限了」）：
-     * 面板默认先连 `dshPanel.port`（47821）上现成的那台 —— 桌面端开着时那就是
-     * **桌面端的内核**，而桌面档里的连接组件是 0.0.7（那个档由桌面端自己管，
-     * 面板改不动），它没有权限方法，于是选择器只能是「切不了」。
-     * 用户看到的后果是「权限切不了」，不是「谁的门旧」—— 所以这里不让用户
-     * 自己判断：**换不了权限就换一台能换的**（自己启动的那台连接组件是新的）。
+     * 原因（2026-09-19 深夜用户报告"修改之后无法切换权限了"）：
+     * 面板默认先连接 `dshPanel.port`（47821）上现成的那台 —— 桌面端运行时该处即为
+     * **桌面端的内核**，而桌面配置集中的 ACP 接入点插件（dsh-acp-door）版本为 0.0.7（该配置集由桌面端自行
+     * 管理，面板无法修改），该版本没有权限方法，因此选择器只能显示「不可切换」。
+     * 用户观察到的结果是「权限无法切换」，而非「哪个接入点版本过低」—— 因此此处不由用户
+     * 自行判断：**无法切换权限时改用可切换权限的内核**（面板自行启动的那台使用较新的接入点插件）。
      *
-     * 两个闸门，别乱开：`ownKernelOnly` 只在这条路里置位（置位后不再回头看
-     * 47821，免得来回弹）；`switchedKernel` 保证一台面板只换一次。
+     * 两个判定开关，不应随意置位：`ownKernelOnly` 仅在该路径中置位（置位后不再检查
+     * 47821，避免反复切换）；`switchedKernel` 保证单个面板只切换一次。
      */
     this.ownKernelOnly = false;
     this.switchedKernel = false;
     /**
-     * 自启时只盯自己那个端口（不把设置里那个口上现成的旧门当成果）。
-     * 只在「接上的那台换不了权限 → 改用自己启动的那台」这条路上置位。
+     * 自启时仅监测面板自身的端口（不把配置项所指端口上现成的旧版接入点视为启动成功）。
+     * 仅在「接入的内核无法切换权限 → 改用面板自行启动的内核」这条路径中置位。
      */
     this.ownPortOnly = false;
     /**
-     * 连接流程正在决定「要不要换一台能换权限的」时，先别说那句「换不了权限」。
-     * 决定完由 connectInternal 调 explainPermissionOnce 补上（没换才补）。
+     * 连接流程正在判定「是否改用可切换权限的内核」期间，暂不输出「无法切换权限」的提示。
+     * 判定结束后由 connectInternal 调用 explainPermissionOnce 补充输出（仅在未切换时补充）。
      */
     this.quietPermissionNotice = false;
     /**
-     * 下一段新对话要用哪个 agent preset（用户在面板里选的，或设置里的默认值）。
+     * 下一段新对话使用的 agent preset（用户在面板中选择的值，或配置项中的默认值）。
      *
-     * 为什么是「下一段」而不是「当前这段」：内核不允许会话开始之后再换预设
-     * （实测报 `agent-preset/locked`），这是内核的设计，不是本扩展的偷懒。
-     * 所以面板里换预设的语义就是：**下一段新对话**用它。
+     * 该字段针对「下一段」而非「当前这段」的原因：内核不允许在会话开始之后更换预设
+     * （实测报错 `agent-preset/locked`），这是内核的设计，而非本扩展未实现该功能。
+     * 因此面板中更换预设的语义为：**下一段新对话**使用该预设。
      * @type {string|undefined}
      */
     this.preset = undefined;
     /**
-     * 当前这段会话有没有发过消息。
+     * 当前这段会话是否发送过消息。
      *
-     * 只用来决定「换预设时能不能直接重开一段」：一段还没说过话的会话重开
-     * 是零代价的，用户不用自己再点一次新建。
+     * 仅用于判定「更换预设时是否可以直接重新开启一段会话」：尚未发送过消息的会话重新开启
+     * 代价为零，用户不需要再次点击新建。
      */
     this.turnSent = false;
-    /** 门最近一次报的预设清单，界面重新加载时补发用。 */
+    /** 该插件最近一次上报的预设清单，用于界面重新加载时补发。 */
     this.lastPresets = undefined;
     /**
-     * 最近一次读到的权限预设（门给的原始载荷：`{currentValue, options}`）。
+     * 最近一次读到的权限预设（该插件返回的原始载荷：`{currentValue, options}`）。
      *
-     * 为什么面板只缓存、不当真源：权限是**内核**的状态，面板是它的一个视图。
-     * 缓存只为两件事：界面重新加载时先把上一次的补上（不闪空白），
-     * 以及查中文标签。真值每次会话定下来都重新读一遍。
+     * 面板只缓存、不作为真值来源的原因：权限是**内核**的状态，面板只是它的一个视图。
+     * 缓存仅用于两件事：界面重新加载时先补发上一次的结果（避免出现空白），
+     * 以及查找中文标签。真值在每次会话确定后重新读取。
      * @type {{currentValue: string, options: Array<object>}|undefined}
      */
     this.permission = undefined;
     /**
-     * 权限读不到时的说明（门太旧 / 档里没挂权限服务 / 其它错误）。
+     * 权限读取失败时的说明（该插件版本过低 / 配置集中未挂载权限服务 / 其它错误）。
      *
-     * 这三种都**不是面板坏了**，所以不进对话流当报错，而是让选择器变成
-     * 一句解释 —— 用户看到的是「这里为什么切不了」，不是一屏红字。
+     * 这三种情况都**不属于面板故障**，因此不写入对话流作为报错，而是让选择器显示
+     * 一句解释 —— 用户看到的是「此处无法切换的原因」，而不是整屏错误信息。
      * @type {{state: string, text: string, detail?: string}|undefined}
      */
     this.permissionUnavailable = undefined;
     /**
-     * 已经在对话流里说过一次的那种「读不到」原因（'old-door' / 'no-service' / …）。
+     * 已经在对话流中输出过一次的「读取失败」原因（'old-door' / 'no-service' / …）。
      *
-     * 只说一次：接桌面端那个内核（门 0.0.7）时每次建会话都会读失败，
-     * 每次都播一遍就成了噪音。断开重连时清掉（用户可能刚好升了门）。
+     * 每种原因只输出一次：接入桌面端内核（该插件 0.0.7）时每次建立会话都会读取失败，
+     * 每次都输出会造成冗余信息。断开重连时清除该字段（用户可能在此期间升级了该插件）。
      * @type {string|undefined}
      */
     this.permissionNotice = undefined;
     /**
-     * 历史会话这一轮连接是从哪儿读的：'door' | 'local' | undefined（还没定）。
+     * 本轮连接中历史会话的读取来源：'door' | 'local' | undefined（尚未确定）。
      *
-     * 缓存它是为了别每次点历史都多打一次注定失败的往返：门太旧是**常态**
-     * （用户档里的门会被桌面端重写回旧版），第一次问到 -32601 之后就改走本地，
-     * 这一轮连接里不再问门。重连时清掉，好让升级过门的人有机会用回门。
+     * 缓存该字段是为了避免每次打开历史会话都发起一次注定失败的往返：该插件版本过低属于**常态**
+     * （用户配置集中的该插件会被桌面端重写回旧版），第一次收到 -32601 之后即改用本地读取，
+     * 本轮连接中不再向该插件查询。重连时清除，使已升级该插件的用户有机会恢复经由该插件读取。
      * @type {'door'|'local'|undefined}
      */
     this.historyVia = undefined;
@@ -207,22 +207,22 @@ class DshPanelView {
     this.log('info', '面板已打开');
   }
 
-  /** 把一个消息发给界面（界面没开就丢掉，不报错）。 */
+  /** 向界面发送一条消息（界面未打开时直接丢弃，不报错）。 */
   post(message) {
     const view = this.view;
     if (!view) return;
     view.webview.postMessage(message).then(undefined, (error) => {
-      this.log('warn', `发给界面的消息失败：${error && error.message ? error.message : error}`);
+      this.log('warn', `向界面发送消息失败：${error && error.message ? error.message : error}`);
     });
   }
 
   /**
-   * 报一个错误给界面，**顺便把它翻成人话**。
+   * 向界面报告一个错误，**同时将其转换为可读的中文说明**。
    *
-   * 为什么不能直接把 `error.message` 发过去：内核的报错是原样穿过 ACP 的，
-   * 用户看到的就是一段英文 JSON（最典型的是 429 额度限制）。面板存在的意义
-   * 就是别让他去读那种东西。分类的活交给 `dsh/errors.js`（纯函数，好测），
-   * 这里只负责把「人话 + 原文」一起发出去 —— 原文一个字都不删。
+   * 不能直接发送 `error.message` 的原因：内核的报错原样穿过 ACP，
+   * 用户看到的会是一段英文 JSON（最典型的是 429 额度限制）。面板的作用
+   * 即在于避免用户直接阅读该内容。错误分类由 `dsh/errors.js` 完成（纯函数，便于测试），
+   * 此处只负责把「中文说明 + 原文」一并发送 —— 原文不做任何删减。
    */
   postError(message, human) {
     const shaped = human && human.title ? human : describeError(message);
@@ -236,9 +236,9 @@ class DshPanelView {
     try {
       switch (message.type) {
         case 'ready': {
-          // 界面可能是刚打开，也可能是被重新加载（会话还活着）——
-          // 后一种情况要把当前状态补一遍，否则界面上是空的。
-          // 顶栏的工作目录不依赖连接，先发。
+          // 界面可能刚打开，也可能被重新加载（会话仍然存在）——
+          // 后一种情况需要补发当前状态，否则界面上没有内容。
+          // 顶栏的工作目录不依赖连接，先发送。
           this.post({ type: 'meta', cwd: this.workdir() });
           const existing = this.session;
           await this.ensureConnection();
@@ -282,18 +282,18 @@ class DshPanelView {
           this.openLink(message.href);
           break;
         default:
-          this.log('warn', `界面发来未知消息：${message.type}`);
+          this.log('warn', `收到界面发来的未知消息：${message.type}`);
       }
     } catch (error) {
       const text = error && error.message ? error.message : String(error);
-      this.log('error', `处理界面消息出错（${message.type}）：${text}`);
+      this.log('error', `处理界面消息时出错（${message.type}）：${text}`);
       this.postError(text);
       this.post({ type: 'busy', busy: false });
     }
   }
 
   openLink(href) {
-    // 只放行 http/https，别的协议（file:、command: …）不从这里走。
+    // 仅放行 http/https，其它协议（file:、command: …）不经过此处处理。
     if (typeof href !== 'string' || !/^https?:\/\//i.test(href)) {
       this.log('warn', `拒绝打开非 http(s) 链接：${href}`);
       return;
@@ -306,8 +306,8 @@ class DshPanelView {
   config() {
     const cfg = vscode.workspace.getConfiguration('dshPanel');
     const minutes = Number(cfg.get('kernelIdleMinutes'));
-    // 面板自己拉起的那个内核，在"没有面板用它"之后还能活多久（默认 10 分钟）。
-    // 设成 0 = 面板一关就收（老行为）。视图只是个使用者，内核归扩展管 ——
+    // 面板自行启动的内核在"没有面板使用它"之后仍可存活的时间（默认 10 分钟）。
+    // 设为 0 = 面板关闭时立即回收（旧行为）。视图只是使用者，内核由扩展管理 ——
     // 见 src/panel/kernel-manager.js。
     this.kernels.setIdleMs(
       Number.isFinite(minutes) && minutes >= 0 ? minutes * 60000 : 10 * 60000,
@@ -316,11 +316,11 @@ class DshPanelView {
       host: cfg.get('host') || '127.0.0.1',
       port: cfg.get('port') || 47821,
       /**
-       * 面板**自己**起的那个内核，门开在哪个端口。
+       * 面板**自行**启动的内核所使用的接入点监听端口。
        *
-       * 为什么和 port 分开：`port` 是"我去连谁"（默认 47821，桌面端那个门也在
-       * 那儿，有门就接）。而面板自启的内核一律用自己的端口 —— 以前它也去抢
-       * 47821，两个内核抢一个口，抢输的门干脆不开，用户对着"正在启动…"干等。
+       * 与 port 分开的原因：`port` 表示"连接哪一个接入点"（默认 47821，桌面端的接入点
+       * 也监听该端口，存在接入点即连接）。而面板自启的内核一律使用自身端口 —— 此前它也占用
+       * 47821，两个内核竞争同一端口时，竞争失败的一方不会开放监听，用户只能停留在"正在启动…"提示上持续等待。
        */
       selfStartPort: cfg.get('selfStartPort') || 47831,
       autoStart: cfg.get('autoStart') !== false,
@@ -334,9 +334,9 @@ class DshPanelView {
   }
 
   workdir() {
-    // 用 trim 过的值：内核会拒绝空 cwd（"cwd must be an absolute path: "），
-    // 而设置项里填了几个空格是很容易发生的事 —— 那种情况应该退回工作区/主目录，
-    // 而不是把一串空格当成路径发过去。
+    // 使用 trim 之后的值：内核会拒绝空 cwd（"cwd must be an absolute path: "），
+    // 而配置项中填入若干空格是常见情况 —— 该情况应当回退到工作区或主目录，
+    // 而不是把一串空格作为路径发送。
     const configured = String(this.config().cwd || '').trim();
     if (configured) return configured;
     const folders = vscode.workspace.workspaceFolders;
@@ -344,7 +344,7 @@ class DshPanelView {
     return require('node:os').homedir();
   }
 
-  /** 确保有一条可用连接（多次调用安全）。 */
+  /** 确保存在一条可用连接（可重复调用）。 */
   ensureConnection() {
     if (this.session) return Promise.resolve(this.session);
     if (this.connecting) return this.connecting;
@@ -355,57 +355,57 @@ class DshPanelView {
   }
 
   /**
-   * 兜底拉起要试的候选命令（单独成方法：测试里可以隔离掉自动候选，
-   * 只测「命令坏了」这条路径）。
+   * 后备启动时需要尝试的候选命令（单独成方法：测试中可以隔离自动候选，
+   * 仅测试「命令不可用」这一条路径）。
    */
   candidatesFor(cfg) {
     return dshCommandCandidates({ dshCommand: cfg.dshCommand, homedir: os.homedir() });
   }
 
   /**
-   * 兜底拉起要试的候选档（同理：测试可以只留设置里那一个）。
+   * 后备启动时需要尝试的候选配置集（同理：测试中可仅保留配置项中指定的那一个）。
    *
-   * 为什么要试多个档：`desktop` 这个档被桌面端独占，命令行根本起不来
+   * 需要尝试多个配置集的原因：`desktop` 配置集由桌面端独占，命令行无法启动
    * （2026-09-19 实测：`error: profile "desktop" is managed exclusively by the
-   * Electron application`）。用户没改过设置时用的就是这个默认值，于是面板
-   * 在"桌面端没开"时必然起不来 —— 而"桌面端没开"恰恰是最需要它自己起来的
-   * 时候。所以：先按设置试，不行就在 `$DSH_HOME/profiles` 里找一个装了门、
-   * 而且是网页档的接着试。
+   * Electron application`）。用户未修改过配置项时使用的正是该默认值，因此面板
+   * 在"桌面端未运行"时必然无法启动 —— 而"桌面端未运行"正是最需要面板自行启动的
+   * 情况。因此：先按配置项尝试，失败后在 `$DSH_HOME/profiles` 中查找已安装接入点插件、
+   * 且不专属于桌面端的配置集继续尝试。
    */
   profilesFor(cfg) {
     return panelProfileCandidates({ configured: cfg.fallbackProfile, homedir: os.homedir() });
   }
 
   /**
-   * 后台拉起 DSH：按候选命令逐个试，谁先开出门就用谁。
+   * 在后台启动 DSH：按候选命令逐个尝试，以最先开放接入点监听者为准。
    *
-   * 为什么是「逐个试」而不是只信设置里的那一条：默认值是裸的 `dsh`，
-   * 本机多半没把它放进 VS Code 看得见的 PATH（用户的面板就是这么挂的），
-   * 只试一条等于逼用户「先开桌面端才能用面板」。候选清单见
-   * {@link dshCommandCandidates}：设置里填的优先，然后是默认安装位置的
+   * 采用「逐个尝试」而非仅使用配置项中那一条的原因：默认值为直接给出的命令 `dsh`，
+   * 本机通常未将其放入 VS Code 可见的 PATH（用户遇到的面板启动失败即由此导致），
+   * 仅尝试一条等同于要求用户「先启动桌面端才能使用面板」。候选清单见
+   * {@link dshCommandCandidates}：配置项中填写的优先，其次是默认安装位置的
    * `node …/@deepseek-ai/dsh/lib/bin.js`。
    *
-   * 等待时间：还有下一个候选时只等 30 秒（起不来的命令几乎都是秒退，
-   * 不值得为它耗两分钟）；最后一个候选等满 120 秒 —— 真内核冷启动也可能慢。
+   * 等待时间：存在下一个候选时只等待 30 秒（无法启动的命令通常立即退出，
+   * 不值得为其耗费两分钟）；最后一个候选等待满 120 秒 —— 真实内核冷启动也可能较慢。
    *
    * @returns {Promise<{ok: boolean, command?: string, detail?: string}>}
    */
   async spawnFallback(cfg) {
-    // 顶栏只留短状态；"为什么要启动""用哪个档"这类话进对话流。
+    // 顶栏只显示简短状态；"启动原因""使用哪个配置集"这类说明写入对话流。
     this.post({ type: 'status', state: 'connecting', detail: '正在启动…' });
     /*
-     * 先问一句：本扩展是不是已经在"面板自己的端口"上起过一个还活着的内核？
+     * 首先查询本扩展是否已在"面板自身的端口"上启动过仍在运行的内核。
      *
-     * 这一段是"视图销毁不等于内核死亡"的落地点：面板关掉又打开、或者
-     * 另一个 VS Code 窗口已经起过一个，都该**接着用**同一个进程，
-     * 而不是又拉起一个（多拉的那一个还会跟这一个抢端口）。
+     * 这一段是"视图销毁不等于内核终止"的落实位置：面板关闭后重新打开，或者
+     * 另一个 VS Code 窗口已经启动过一个内核时，都应当**继续使用**同一个进程，
+     * 而不是再次启动一个（多启动的进程还会与该进程竞争端口）。
      *
      * 注意两点：
-     * ① 查的是 selfStartPort —— 面板起的内核门就钉在那儿（不是 cfg.port，
-     *    那是桌面端那个内核的端口）。
-     * ② 先等门真的开出来再交差：内核活着但门没开（正在启动 / 门起崩了）
-     *    时直接返回"成功"，用户接下来看到的会是莫名其妙的握手失败。
-     *    门要是等不出来，就把它收掉重起一个。
+     * ① 查询的是 selfStartPort —— 面板启动的内核其接入点固定在端口上（不是 cfg.port，
+     *    后者是桌面端内核的端口）。
+     * ② 需要等待接入点真正开放监听之后再返回：内核仍在运行但接入点未监听（正在启动 /
+     *    接入点启动失败）时直接返回"成功"，用户随后会遇到原因不明的握手失败。
+     *    若等待不到接入点，则回收该内核并重新启动一个。
      */
     const reusable = this.kernels.live(cfg.host, cfg.selfStartPort);
     if (reusable) {
@@ -418,35 +418,35 @@ class DshPanelView {
       if (door.ok) {
         this.background = reusable.background;
         this.kernels.acquire(this, reusable);
-        this.log('info', `面板自己那个内核还在（${cfg.host}:${door.port}），接着用它，不重启`);
-        this.post({ type: 'notice', text: '接着用已经开着的 DSH。' });
+        this.log('info', `面板自行启动的内核仍在运行（${cfg.host}:${door.port}），继续使用该内核，不重新启动`);
+        this.post({ type: 'notice', text: '继续使用当前正在运行的 DSH。' });
         return { ok: true, command: reusable.command, profile: reusable.profile, port: door.port };
       }
-      this.log('warn', '本扩展起的那个内核还活着，但它的门一直没开 —— 收掉它，重起一个');
-      this.kernels.stop(reusable.key, '内核活着但门不开，重起');
+      this.log('warn', '本扩展启动的内核仍在运行，但其接入点始终未开放监听 —— 回收该内核并重新启动');
+      this.kernels.stop(reusable.key, '内核仍在运行但接入点未开放监听，重新启动');
     }
 
     const profiles = this.profilesFor(cfg);
-    // 对话流里只留一句最短的；用哪个档、等多久，都在日志里（用户不看那些）。
+    // 对话流中只保留一句最简说明；使用哪个配置集、等待多久只写入日志（用户不查看该内容）。
     this.post({ type: 'notice', text: '正在启动 DSH…' });
-    this.log('info', `端口上没有门，按设置自己拉起一个 DSH 内核（档：${profiles[0]}，门钉在 ${cfg.host}:${cfg.selfStartPort}）`);
+    this.log('info', `端口上不存在接入点，按配置自行启动一个 DSH 内核（配置集：${profiles[0]}，接入点固定为 ${cfg.host}:${cfg.selfStartPort}）`);
 
     const candidates = this.candidatesFor(cfg);
     if (candidates.length === 0) {
       return {
         ok: false,
         human: {
-          title: '找不到 DSH，没法自己启动。',
-          advice: '在设置里指定 DSH 的安装位置，或先打开桌面端。',
+          title: '无法找到 DSH，无法自行启动。',
+          advice: '在设置中指定 DSH 的安装位置，或先启动桌面端。',
           raw:
-            '不知道怎么启动 DSH：设置 dshPanel.dshCommand 是空的，' +
-            '默认安装位置（~/.dsh/profiles/node_modules/@deepseek-ai/dsh/lib/bin.js）也没找到。',
+            '无法确定 DSH 的启动方式：设置 dshPanel.dshCommand 为空，' +
+            '默认安装位置（~/.dsh/profiles/node_modules/@deepseek-ai/dsh/lib/bin.js）也未找到。',
         },
       };
     }
 
-    // 先按档、再按命令：同一个档换个命令写法是"最后一招"，而换个档往往
-    // 才是真正的原因（设置里那个档起不来）。
+    // 先按配置集、再按命令：同一配置集仅更换命令写法属于"最后手段"，而更换配置集往往
+    // 才是真正的原因（配置项中指定的配置集无法启动）。
     const plans = [];
     for (const profile of profiles) {
       for (const command of candidates) plans.push({ profile, command });
@@ -457,13 +457,13 @@ class DshPanelView {
     for (let i = 0; i < plans.length; i += 1) {
       const { profile, command } = plans[i];
       const hasMore = i + 1 < plans.length;
-      // 候选逐个试是给日志看的，顶栏没必要跟着跳字。
-      this.log('info', `试着启动：${command}（档：${profile}）`);
+      // 逐项尝试候选命令只写入日志，顶栏不需要随之变化。
+      this.log('info', `尝试启动：${command}（配置集：${profile}）`);
       let entry;
       try {
-        // 交给 manager 起并登记：这样"视图销毁"不会把它带走，另一个窗口也能复用。
-        // 门钉在面板自己的端口上（门那边读 DSH_ACP_DOOR_PORT，见 dsh-door/lib/port.js）。
-        // 档里那个 port 是**默认值**，不是命令；谁起的内核谁定端口。
+        // 交由 manager 启动并登记：这样"视图销毁"不会终止该进程，另一个窗口也可以复用。
+        // 接入点固定在面板自身的端口上（该插件读取 DSH_ACP_DOOR_PORT，见 dsh-door/lib/port.js）。
+        // 配置集中的 port 是**默认值**，不是命令；内核由哪一方启动，端口即由该方决定。
         entry = this.kernels.spawn({
           host: cfg.host,
           port: cfg.selfStartPort,
@@ -473,7 +473,7 @@ class DshPanelView {
           extraArgs: this.spawnArgs,
         });
       } catch (error) {
-        failures.push(`「${command}」起不来：${this.errText(error)}`);
+        failures.push(`「${command}」无法启动：${this.errText(error)}`);
         continue;
       }
       const background = entry.background;
@@ -485,19 +485,19 @@ class DshPanelView {
         hasMore ? 30000 : 120000,
       );
       if (outcome.ok) {
-        // 成了：这个内核归本视图用（引用计数 +1）。
-        // 门实际开在哪个口上就接哪个（旧版门只认档里那个端口）。
+        // 启动成功：该内核归本视图使用（引用计数 +1）。
+        // 接入点实际监听的端口即为连接端口（旧版接入点只识别该配置集配置的端口）。
         this.kernels.acquire(this, entry);
         if (outcome.port !== cfg.selfStartPort) {
-          this.log('warn', `这个档里的门没认端口设置，开在了 ${outcome.port}（档里的门插件是旧版？）`);
+          this.log('warn', `该配置集中的接入点未识别端口设置，监听在 ${outcome.port}（该配置集中的接入点插件为旧版）`);
         }
         return { ok: true, command, profile, port: outcome.port };
       }
-      // 没成：收掉这个进程再试下一条（killTree 连子孙一起杀，不留孤儿）。
-      // 收之前先把它自己打的最后几句话取出来 —— 原因就在里面。
+      // 启动失败：回收该进程之后再尝试下一条（killTree 同时终止子进程，不遗留孤儿进程）。
+      // 回收之前先取出该进程自身输出的最后几行 —— 失败原因位于其中。
       const stderr = typeof background.stderrTail === 'function' ? background.stderrTail() : '';
       const explained = explainKernelFailure({ profile, stderr });
-      this.kernels.stop(entry.key, '自启失败，换个档再试');
+      this.kernels.stop(entry.key, '自启失败，改用其它配置集重试');
       this.background = undefined;
       kinds.add(explained.kind);
       if (stderr) this.log('warn', `内核退出原因（${profile}）：${stderr.split('\n')[0]}`);
@@ -518,44 +518,44 @@ class DshPanelView {
     return {
       ok: false,
       human: {
-        title: '没能启动 DSH',
+        title: '无法启动 DSH',
         advice: fallbackAdvice(kinds),
         raw:
-          `启动 DSH 内核没成功（试了 ${plans.length} 种起法）：\n` +
+          `启动 DSH 内核失败（共尝试 ${plans.length} 种启动方式）：\n` +
           failures.join('\n\n'),
       },
     };
   }
 
   /**
-   * 等兜底拉起的那个内核把门开起来；它**刚启动就退出**的话早点说清楚。
+   * 等待后备启动的内核开放接入点监听；该进程**启动后立即退出**时提前报告。
    *
-   * 为什么不能只等 waitForPort：命令写错（最典型的是 dsh 不在 PATH 里、
-   * 或者 dshPanel.dshCommand 填了个不存在的路径）时，进程会立刻退出，
-   * 而 waitForPort 会老老实实等满 120 秒 —— 用户对着"正在后台启动 DSH…"
-   * 干等两分钟，最后只换来一句"没开门"，还得自己猜为什么。
-   * 既然进程都已经退出了，就没有必要再等。
+   * 不能只等待 waitForPort 的原因：命令有误（最典型的是 dsh 不在 PATH 中、
+   * 或者 dshPanel.dshCommand 填写了不存在的路径）时，进程会立即退出，
+   * 而 waitForPort 会持续等待满 120 秒 —— 用户停留在"正在后台启动 DSH…"提示上
+   * 等待两分钟，最终只得到"接入点未监听"的结论，且需要自行推测原因。
+   * 进程既已退出，继续等待没有意义。
    *
-   * `port` 可以是一个端口，也可以是一串：面板把门钉在 `selfStartPort` 上
-   * （环境变量），但**用户档里的门可能还是旧版**（不认那个环境变量），那就
-   * 只会开在档里配的端口上。只看一个端口的话，这种情况会变成"内核明明起来了，
-   * 却等满两分钟说没门"，而门其实开在另一个口上。所以：谁先开就用谁，
-   * 返回值里的 `port` 就是实际接上去的那个。
+   * `port` 可以是单个端口，也可以是端口列表：面板将接入点端口固定为 `selfStartPort`
+   * （通过环境变量），但**用户配置集中的接入点插件可能仍是旧版**（不识别该环境变量），该情况下
+   * 只会在该配置集配置的端口上监听。仅监测一个端口时，该情况会表现为"内核已经启动，
+   * 却等待满两分钟仍报告接入点未监听"，而接入点实际监听在另一个端口上。因此：以先开放监听者为准，
+   * 返回值中的 `port` 即为实际连接的端口。
    *
-   * `timeoutMs` 只是为了让测试能在几秒内跑到"等超时"那条分支 ——
-   * 生产路径不传它，就是两分钟。
+   * `timeoutMs` 仅用于使测试能在数秒内进入"等待超时"分支 ——
+   * 生产路径不传入该参数，取值为两分钟。
    */
   /**
-   * 面板自己启动内核时，盯着哪几个端口等门开。
+   * 面板自行启动内核时，监测哪些端口以等待接入点开放监听。
    *
-   * 默认盯着两个：**自己的口**（`selfStartPort`，新版连接组件认环境变量、
-   * 会开在这儿）和设置里那个口（`dshPanel.port`）—— 旧版组件不认环境变量，
-   * 只会开在档里配的那个口上，两个都盯才不至于干等两分钟。
+   * 默认监测两个：**面板自身的端口**（`selfStartPort`，较新的接入点插件识别该环境变量、
+   * 会在该端口监听）和配置项中的端口（`dshPanel.port`）—— 旧版接入点插件不识别环境变量，
+   * 只在该配置集配置的端口上监听，同时监测两者才不至于等待满两分钟。
    *
-   * 例外：`ownPortOnly`（"接上的那台换不了权限，改用自己启动的那台"那条路）。
-   * 那时**只盯自己的口** —— 否则设置里那个口上现成的旧门会被当成"新内核开好了"，
-   * 于是又接回同一台，换了个寂寞（2026-09-20 真窗口自检抓到的就是这个：
-   * 日志里 `这个档里的门没认端口设置，开在了 47821`，接的还是桌面端那台）。
+   * 例外：`ownPortOnly`（"接入的内核无法切换权限，改用面板自行启动的内核"这条路径）。
+   * 该情况下**仅监测面板自身的端口** —— 否则配置项所指端口上现成的旧版接入点会被判定为"新内核已启动完成"，
+   * 从而再次接入同一内核，切换未能生效（2026-09-20 真实窗口自检发现的问题即为该情况：
+   * 日志中记录了该配置集的接入点插件未识别端口设置、监听在 47821 的事实，接入的仍是桌面端的内核）。
    */
   fallbackPorts(cfg) {
     if (this.ownPortOnly) return [cfg.selfStartPort];
@@ -576,13 +576,13 @@ class DshPanelView {
           if (candidate && (await probePort(host, candidate))) return { ok: true, port: candidate };
         }
         if (exit) {
-          // 刚退出时端口可能还在收尾，再确认一次才判失败。
+          // 刚退出时端口可能仍在关闭过程中，需要再次确认才能判定失败。
           for (const candidate of ports) {
             if (candidate && (await probePort(host, candidate))) {
               return { ok: true, port: candidate };
             }
           }
-          this.log('warn', `兜底内核退出了（code=${exit.code} signal=${exit.signal}），不再干等`);
+          this.log('warn', `后备内核已退出（code=${exit.code} signal=${exit.signal}），不再继续等待`);
           return { ok: false, exitedEarly: true };
         }
         await new Promise((resolve) => setTimeout(resolve, 300));
@@ -598,42 +598,42 @@ class DshPanelView {
     this.post({ type: 'status', state: 'connecting', detail: '正在连接…' });
 
     /*
-     * 连哪个端口，按这个顺序定（2026-09-19 改）：
+     * 连接端口的确定顺序（2026-09-19 修改）：
      *
-     * 1. `dshPanel.port`（默认 47821）上有门 → **接上去**。这是桌面端那个内核，
-     *    也是"一个进程一个大脑"的情形 —— 面板不自起、也不去动它。
-     * 2. `dshPanel.selfStartPort`（默认 47831）上有门 → 接上去，这个门后面的内核
-     *    一般是**另一个 VS Code 窗口**起的，或者本窗口刚才起的那个（面板关掉又
-     *    打开）：复用它，别再拉一个（多拉的那个还会跟它抢端口）。
-     *    **是本扩展起的**才记成"我在用"（关面板时它才会进宽限回收）；
-     *    别人起的什么都不记 —— 绝不收别人的内核。
-     * 3. 都没有 → 自己起一个，**门钉在 selfStartPort 上**（环境变量
+     * 1. `dshPanel.port`（默认 47821）上存在接入点 → **接入该内核**。这是桌面端的内核，
+     *    也是"一个进程对应一个内核"的情形 —— 面板不自启，也不改动它。
+     * 2. `dshPanel.selfStartPort`（默认 47831）上存在接入点 → 接入该内核，其背后的内核
+     *    通常由**另一个 VS Code 窗口**启动，或由本窗口此前启动（面板关闭后重新
+     *    打开）：复用该内核，不再启动新的进程（新启动的进程还会与其竞争端口）。
+     *    仅当**内核由本扩展启动**时才记录为"本视图在用"（面板关闭后该内核才会进入宽限回收）；
+     *    由其它来源启动的内核不做任何记录 —— 不回收非本扩展启动的内核。
+     * 3. 两者均不存在 → 由面板启动一个，**接入点端口固定为 selfStartPort**（通过环境变量
      *    DSH_ACP_DOOR_PORT，见 dsh-door/lib/port.js）。
      *
-     * 为什么要分两个端口：面板自启的内核以前也用 47821 —— 那正是桌面端那个
-     * 内核的端口。两个内核抢同一个端口没有任何好处，抢输的那个门干脆不开，
-     * 用户对着"正在启动…"干等。现在自启的一律用自己的端口，谁也不碰谁。
+     * 区分两个端口的原因：面板自启的内核此前也使用 47821 —— 该端口正是桌面端内核
+     * 所用的端口。两个内核竞争同一端口没有收益，竞争失败的一方不会开放监听，
+     * 用户只能停留在"正在启动…"提示上持续等待。现在自启的内核一律使用自身端口，两者互不影响。
      */
     let target = cfg.port;
     let reachable = false;
     if (!this.ownKernelOnly && (await probePort(cfg.host, cfg.port))) {
       reachable = true;
-      this.log('info', `端口 ${cfg.host}:${cfg.port} 上有现成的门，接上去（不自启内核）`);
+      this.log('info', `端口 ${cfg.host}:${cfg.port} 上存在现成的接入点，接入该内核（不自行启动内核）`);
     } else if (await probePort(cfg.host, cfg.selfStartPort)) {
       target = cfg.selfStartPort;
       reachable = true;
       const mine = this.kernels.live(cfg.host, cfg.selfStartPort);
       if (mine) {
-        // 本扩展起的：记成"我在用"，关面板后它才会进宽限回收（不然会一直留着）。
+        // 由本扩展启动：记录为"本视图在用"，面板关闭后该内核才会进入宽限回收（否则会持续保留）。
         this.kernels.acquire(this, mine);
         this.background = mine.background;
       }
       this.log(
         'info',
-        `面板自己的端口 ${cfg.host}:${cfg.selfStartPort} 上已经有门了，接上去` +
-          (mine ? '（是本扩展起的那个内核，接着用，不重启）' : '（不是本扩展起的，我不负责收它）'),
+        `面板自身的端口 ${cfg.host}:${cfg.selfStartPort} 上已存在接入点，接上去` +
+          (mine ? '（由本扩展启动的内核，继续使用，不重新启动）' : '（非本扩展启动，本扩展不负责回收）'),
       );
-      this.post({ type: 'notice', text: '接着用已经开着的 DSH。' });
+      this.post({ type: 'notice', text: '继续使用当前正在运行的 DSH。' });
     } else if (cfg.autoStart) {
       const spawned = await this.spawnFallback(cfg);
       if (!spawned.ok) {
@@ -646,11 +646,11 @@ class DshPanelView {
     }
 
     if (!reachable) {
-      this.postError('连不上 DSH（自动启动已关）。');
+      this.postError('无法连接 DSH（自动启动已关闭）。');
       this.post({ type: 'status', state: 'error', detail: '未连接' });
       return undefined;
     }
-    // 后面每一处"连哪儿/说哪儿"都用 target，不要再回头用 cfg.port。
+    // 后续所有涉及连接目标的位置均使用 target，不再使用 cfg.port。
     this.targetPort = target;
 
     const client = new DoorClient({ host: cfg.host, port: target, log: this.log });
@@ -659,7 +659,7 @@ class DshPanelView {
     } catch (error) {
       client.close();
       const text = error && error.message ? error.message : String(error);
-      this.postError(`连不上 DSH：${text}`);
+      this.postError(`无法连接 DSH：${text}`);
       this.post({ type: 'status', state: 'error', detail: '未连接' });
       return undefined;
     }
@@ -671,22 +671,22 @@ class DshPanelView {
 
     try {
       if (this.resumeTarget) {
-        // 断线重连：先试把刚才那个会话接回来，接不回来才开新的。
+        // 断线重连：先尝试恢复此前那个会话，恢复失败时才新建会话。
         const target = this.resumeTarget;
         try {
-          // 把当前预设一起告诉门：内核不会把走门建的会话的预设记进会话记录，
-          // 门得靠这个点名（或它自己记得的）去补挂 —— 不补，接回来的会话就没有工具。
+          // 同时把当前预设告知该插件：内核不会把经由该插件建立的会话的预设写入会话记录，
+          // 该插件依赖该值指定（或依赖其自身记录的值）补充挂载 —— 不补充时，恢复的会话没有可用工具。
           await session.resume(target, this.workdir(), { preset: this.wantedPreset() });
           this.resumeTarget = undefined;
-          // 接回来的是「已经说过话的」会话：别让换预设把它悄悄重开掉。
+          // 恢复的是「已发送过消息」的会话：不应因更换预设而将其静默重新开启。
           this.turnSent = true;
-          this.post({ type: 'notice', text: '已重连，上下文接回来了。' });
+          this.post({ type: 'notice', text: '已重新连接，上下文已恢复。' });
           this.post({ type: 'status', state: 'ready', detail: '就绪' });
           return session;
         } catch (error) {
-          this.log('warn', `接回旧会话失败，改成新会话：${this.errText(error)}`);
+          this.log('warn', `恢复旧会话失败，改为新建会话：${this.errText(error)}`);
           this.resumeTarget = undefined;
-          this.post({ type: 'notice', text: '上面那段没接回来，这是新对话。' });
+          this.post({ type: 'notice', text: '上一段会话未能恢复，此处为新对话。' });
         }
       }
       this.turnSent = false;
@@ -698,19 +698,19 @@ class DshPanelView {
       });
     } catch (error) {
       const text = error && error.message ? error.message : String(error);
-      this.postError(`开新对话失败：${text}`);
+      this.postError(`新建对话失败：${text}`);
       this.post({ type: 'status', state: 'error', detail: '未连接' });
       return undefined;
     }
 
     /*
-     * 会话一定下来，**在这一条流程里等一次权限读取**，而不是只靠 session 事件
-     * 异步触发。为什么：接上的那台换不了权限时（桌面端那个内核就是），
-     * 面板要改用自己启动的那台 —— 这个决定必须发生在"这次连接交差之前"，
-     * 否则会出现两条连接流程并行（老的刚说"就绪"，新的又在建会话）。
+     * 会话确定之后，**在该流程内等待一次权限读取**，而不是仅依靠 session 事件
+     * 异步触发。原因：接入的内核无法切换权限时（桌面端的内核即为该情况），
+     * 面板需要改用自行启动的内核 —— 该决定必须发生在"本次连接返回之前"，
+     * 否则会出现两条连接流程并行（前一条刚报告"就绪"，后一条又在建立会话）。
      *
-     * 读的这段时间把「换不了权限」那句解释按住（quietPermissionNotice）：
-     * 能换内核就直接换，用户不必先读一句"为什么换不了"，再读一句"我换了一台"。
+     * 读取期间暂缓输出「无法切换权限」的解释（quietPermissionNotice）：
+     * 能够切换内核时直接切换，用户不需要先读到一句"无法切换的原因"，再读到一句"已切换内核"。
      */
     this.quietPermissionNotice = true;
     try {
@@ -719,14 +719,14 @@ class DshPanelView {
       this.quietPermissionNotice = false;
     }
     if (await this.maybeUseOwnKernel(this.permissionUnavailable)) return undefined;
-    // 换不了（或不值得换）：这才轮到说那句人话。
+    // 无法切换（或不满足切换条件）：此时才输出该中文说明。
     this.explainPermissionOnce();
 
     this.post({ type: 'status', state: 'ready', detail: '就绪' });
     return session;
   }
 
-  /** 把会话/客户端的事件桥到界面。 */
+  /** 把会话与客户端的事件转发到界面。 */
   wire(session, client) {
     session.on('user', (payload) => this.post({ type: 'user', text: payload.text }));
     session.on('assistant', (payload) => this.post({ type: 'assistant', id: payload.id }));
@@ -752,8 +752,8 @@ class DshPanelView {
     session.on('error', (payload) => this.postError(payload.message));
     session.on('session', (payload) => {
       this.log('info', `当前会话 ${payload.sessionId}`);
-      // 会话一定下来（新建/恢复/换内核）就读一次权限：权限是内核的状态，
-      // 换一个内核或换一段会话都可能不一样，不能拿上一次的接着显示。
+      // 会话确定后（新建/恢复/切换内核）读取一次权限：权限属于内核状态，
+      // 更换内核或更换会话时取值可能不同，不能沿用上一次的结果。
       void this.refreshPermission();
     });
 
@@ -761,31 +761,31 @@ class DshPanelView {
       this.post({ type: 'permission', requestId, params }),
     );
     client.on('close', (reason) => {
-      // 断开的原因可能很长（内核原文），进对话流；顶栏只说"未连接"。
+      // 断开原因可能很长（内核原文），写入对话流；顶栏只显示"未连接"。
       this.postError(this.disconnectText(reason));
       this.post({ type: 'status', state: 'error', detail: '未连接' });
       this.post({ type: 'busy', busy: false });
-      // 记住这个会话，下次连接时先试着接回来（session/resume 实测有效）。
+      // 记录该会话，下次连接时先尝试恢复（session/resume 经实测有效）。
       if (session.sessionId) this.resumeTarget = session.sessionId;
-      // 让它下次「发送」时自动重连，而不是把面板卡死。
+      // 使面板在下次执行「发送」时自动重连，而不是停留在无连接状态。
       if (this.session === session) this.session = undefined;
       if (this.client === client) this.client = undefined;
     });
   }
 
   /**
-   * 连接断了，往对话流里说人话。
+   * 连接断开后，向对话流输出中文说明。
    *
-   * 2026-09-19 用户报"聊两句就 read ECONNRESET"，翻日志才发现面板自己
-   * 拉起的那个内核是**退出 code=1** 死的，而面板只回了一句通用的
-   * "连接断开：read ECONNRESET" —— 用户完全没法判断该不该怪自己。
-   * 现在分两种情形说清楚：
+   * 2026-09-19 用户报告"对话进行数次后出现 read ECONNRESET"，查阅日志才发现面板自行
+   * 启动的内核以**退出码 code=1** 终止，而面板只返回了一句通用的
+   * "连接断开：read ECONNRESET" —— 用户无法判断该问题是否由自身操作引起。
+   * 现在区分两种情形说明：
    *
-   * - **我们自己拉的内核死了** → 报退出码 + 内核最后说的话（原文在输出面板里）；
-   * - **连的是别人正在跑的内核（多半是桌面端）** → 直说那是它退了或重启了，
-   *   面板会自己换一个，别去查配置。
+   * - **本扩展启动的内核已终止** → 报告退出码 + 内核输出的最后内容（原文位于输出面板）；
+   * - **连接的是其它来源正在运行的内核（通常为桌面端）** → 明确说明该内核已退出或重启，
+   *   面板会自行更换内核，不需要检查配置。
    *
-   * @param {string} reason 客户端给的断开原因。
+   * @param {string} reason 客户端提供的断开原因。
    */
   disconnectText(reason) {
     const background = this.background;
@@ -795,29 +795,29 @@ class DshPanelView {
       const tail =
         typeof background.stderrTail === 'function' ? background.stderrTail() : '';
       const lastLine = tail ? tail.split(/\r?\n/).filter((line) => line.trim()).pop() : '';
-      const why = lastLine ? `它最后说：${lastLine}` : '它没说话就退了（多半是被外面杀的）';
+      const why = lastLine ? `内核最后输出：${lastLine}` : '内核未输出任何内容即退出（可能由外部进程终止）';
       return (
         `DSH 自己退出了（code=${child.exitCode}）。${why}\n` +
-        '直接发消息即可；完整输出见「输出 → DSH Panel」。'
+        '可直接发送消息；完整输出见「输出 → DSH Panel」。'
       );
     }
     if (!background) {
       return (
         `连接断开：${reason}\n` +
-        '那是别处的 DSH（多半是桌面端）退了或重启了。直接发消息即可。'
+        '那是别处的 DSH（通常为桌面端）已退出或重启。可直接发送消息。'
       );
     }
     return `连接断开：${reason}`;
   }
 
-  /** 界面刚加载完时，把当前状态补一遍。 */
+  /** 界面刚加载完成时，补发当前状态。 */
   pushSnapshot() {
     const session = this.session;
     if (!session) return;
     this.post({ type: 'status', state: session.busy ? 'busy' : 'ready', detail: session.busy ? '工作中…' : '就绪' });
     this.post({ type: 'config', configOptions: session.configOptions });
     if (this.lastPresets) this.post({ type: 'presets', ...this.lastPresets });
-    // 权限：上一次读到的先补上（不闪空白）；从没读到过就问一次。
+    // 权限：先补发上一次读取的结果（避免出现空白）；从未读取成功时发起一次读取。
     if (this.permission) this.postPermissionState(this.permission);
     else if (this.permissionUnavailable) this.post({ type: 'permissionState', unavailable: this.permissionUnavailable });
     else void this.refreshPermission();
@@ -825,10 +825,10 @@ class DshPanelView {
   }
 
   /**
-   * 门报了可用预设清单。
+   * 该插件上报了可用预设清单。
    *
-   * 这份清单是**门问内核要的**（`agentPresets.list()`，每次调用重新扫盘），
-   * 所以用户在 `$DSH_HOME/.agent-presets/` 里自己写的预设也会出现在面板里。
+   * 这份清单由**该插件向内核请求获得**（`agentPresets.list()`，每次调用重新扫描磁盘），
+   * 因此用户在 `$DSH_HOME/.agent-presets/` 中自行编写的预设也会出现在面板中。
    */
   onPresets(payload) {
     const presets = Array.isArray(payload?.presets) ? payload.presets : [];
@@ -839,12 +839,12 @@ class DshPanelView {
     if (payload?.fallback) {
       this.post({
         type: 'notice',
-        text: `没有「${payload.requested}」这个模式，用了「${this.labelOf(current)}」。`,
+        text: `「${payload.requested}」模式不存在，已使用「${this.labelOf(current)}」。`,
       });
     }
   }
 
-  /** 预设的中文名（门/内核给了名字就用名字，没有就退回 id）。 */
+  /** 预设的中文名称（该插件或内核提供了名称时使用该名称，否则回退为 id）。 */
   labelOf(id) {
     if (!id) return '默认';
     const list = this.lastPresets?.presets;
@@ -859,38 +859,38 @@ class DshPanelView {
     if ((!text || !text.trim()) && items.length === 0) return;
     const session = await this.ensureConnection();
     if (!session) return;
-    // 从这一刻起这段会话「说过话」了：换预设时就不能再悄悄重开它。
+    // 自此该会话已「发送过消息」：更换预设时不能再静默重新开启该会话。
     this.turnSent = true;
     await session.send(text, { attachments: items });
   }
 
   // ── 历史会话 ──────────────────────────────────────────
   //
-  // 数据在 `$DSH_HOME/sessions` 里（内核那台机器的磁盘上）。两条来路：
-  //   1. 门 0.0.8+ 的旁路方法 `dsh-door/sessions/list|get`（对「门在别的机器上」也对）；
-  //   2. 面板自己读盘 —— 只在连的是本机时成立。
+  // 数据位于 `$DSH_HOME/sessions`（内核所在机器的磁盘上）。两条读取途径：
+  //   1. ACP 接入点插件（dsh-acp-door）0.0.8+ 的旁路方法 `dsh-door/sessions/list|get`（接入点位于其它机器时同样适用）；
+  //   2. 面板自行读取磁盘 —— 仅在连接本机时成立。
   //
-  // 为什么必须有第 2 条：门是装在用户档里的插件，而**那个档由 DSH 桌面端自己
-  // 管理**（实测 2026-09-19：那个档里装的门还是 0.0.7，而 `dsh plugin --profile
-  // desktop` 的增删会被拒），所以「门太旧、没有旁路方法」是常态而不是异常。
-  // 以前只有第 1 条时，历史会话在**最常用的那种模式**（接着桌面端那一个内核）下
-  // 直接不可用，还让用户去「重启桌面端」—— 重启一次回来还是同样一句，等于把
-  // 扩展自己的依赖问题转嫁给用户。面板本来就和内核同机，没有理由不自己读。
+  // 第 2 条途径必要的原因：接入点插件安装在用户配置集中，而**该配置集由 DSH 桌面端自行
+  // 管理**（2026-09-19 实测：该配置集中安装的接入点插件版本仍为 0.0.7，且 `dsh plugin --profile
+  // desktop` 的增删操作会被拒绝），因此「接入点插件版本过低、没有旁路方法」属于常态而非异常。
+  // 在此前仅实现第 1 条途径时，历史会话在**最常用的那种模式**（接入桌面端那一个内核）下
+  // 直接不可用，并且要求用户执行「重启桌面端」—— 重启后该问题依然存在，等同于把
+  // 扩展自身的依赖问题转由用户承担。面板与内核本就位于同一台机器，自行读取是可行的。
 
   /**
-   * 读一次历史会话。
+   * 读取一次历史会话。
    *
    * @param {'list'|'get'} kind
-   * @param {string} [id] kind==='get' 时的会话 id。
+   * @param {string} [id] kind==='get' 时使用的会话 id。
    * @returns {Promise<{result: object, via: 'door'|'local'}>}
    */
   async readHistory(kind, id) {
     const localRoot = isLoopbackHost(this.config().host) ? localSessions.resolveSessionsRoot() : undefined;
     const client = this.client;
 
-    // 门能问就问门：它对远程门也对，而且是这份数据的「官方」来路。
-    // `historyVia === 'local'` 说明这一轮连接里已经确认门没有这个方法，
-    // 就别每次点历史都多打一次注定失败的往返。
+    // 能够向该插件查询时即通过该插件查询：该途径对远程接入点同样适用，也是这份数据的「官方」来源。
+    // `historyVia === 'local'` 表示本轮连接中已确认该插件没有此方法，
+    // 因此不再在每次打开历史会话时发起一次注定失败的往返。
     if (this.historyVia !== 'local' && client && client.isConnected) {
       try {
         const result = kind === 'list'
@@ -902,15 +902,15 @@ class DshPanelView {
         const text = this.errText(error);
         if (!isMissingMethod(error, text) || !localRoot) throw error;
         this.historyVia = 'local';
-        this.log('info', '门没有历史会话的旁路方法（需要 0.0.8+），改成面板自己读 $DSH_HOME/sessions');
+        this.log('info', '该插件未提供历史会话的旁路方法（需要 0.0.8+），改为面板自行读取 $DSH_HOME/sessions');
       }
     }
 
     if (!localRoot) {
-      throw new Error('那台 DSH 在别的机器上，面板读不到它的历史');
+      throw new Error('该 DSH 位于其它机器上，面板无法读取其历史会话');
     }
     if (!localSessions.hasZstdSupport()) {
-      throw new Error('本机 Node 不支持 zstd，解不了会话文件');
+      throw new Error('本机 Node 不支持 zstd 压缩格式，无法解析会话文件');
     }
     const result = kind === 'list'
       ? localSessions.listSessions(localRoot)
@@ -919,16 +919,16 @@ class DshPanelView {
   }
 
   /**
-   * 把历史会话清单送给界面。
+   * 把历史会话清单发送给界面。
    *
-   * 「门太旧」这件事只在**门在别的机器上**时才需要用户出手（那时本地读是错的，
-   * 只能去升级那台机器上的门）；连本机时上面已经自己读盘兜住了，用户什么都不用做。
+   * 「接入点插件版本过低」这一情况仅在**接入点位于其它机器上**时需要用户处理（此时本地读取的结果不正确，
+   * 只能升级那台机器上的该插件）；连接本机时，上述自行读取磁盘的途径已经覆盖该情况，用户不需要执行任何操作。
    */
   async sendHistoryList() {
     try {
       const { result, via } = await this.readHistory('list');
       const sessions = Array.isArray(result && result.sessions) ? result.sessions : [];
-      // 本地读失败时（目录不可读等）会把原因写在 error 上，别当成「一段都没有」。
+      // 本地读取失败时（目录不可读等）原因会写入 error 字段，不应将其视为「没有历史会话」。
       if (sessions.length === 0 && result && result.error) throw new Error(result.error);
       this.post({ type: 'history', via, sessions, skipped: (result && result.skipped) || 0 });
     } catch (error) {
@@ -936,7 +936,7 @@ class DshPanelView {
     }
   }
 
-  /** 把一段历史会话的回放送给界面。 */
+  /** 把一段历史会话的回放发送给界面。 */
   async sendHistoryReplay(id) {
     try {
       const { result, via } = await this.readHistory('get', id);
@@ -952,45 +952,45 @@ class DshPanelView {
     }
   }
 
-  /** 读历史失败时给用户的那句话（纯函数，好测）。 */
+  /** 历史读取失败时向用户输出的说明（纯函数，便于测试）。 */
   historyErrorText(error) {
     const text = this.errText(error);
     if (isMissingMethod(error, text)) {
-      // 连别的机器上的 DSH 时才会走到这儿：那台 DSH 的版本旧，读不了它的历史。
-      // 对用户只说这一件事（版本号、包名在日志里）。
-      return '那台 DSH 版本旧，读不了它上面的历史。';
+      // 仅在连接其它机器上的 DSH 时进入该分支：那台 DSH 版本过低，无法读取其历史会话。
+      // 向用户只说明这一点（版本号、包名记录在日志中）。
+      return '该 DSH 版本过低，无法读取其历史会话。';
     }
-    return `读历史失败：${text}`;
+    return `读取历史会话失败：${text}`;
   }
 
   /**
-   * 从历史里接回一段会话：先回放，再试 `session/resume` 把上下文接回来。
+   * 从历史会话中恢复一段会话：先回放记录，再尝试通过 `session/resume` 恢复上下文。
    *
-   * 为什么两件事一起做：用户点「接回」要的是「接着上次聊」，只有上下文
-   * 没有记录（或只有记录没有上下文）都是残缺的。resume 失败（内核重启过、
-   * 内存里没有这段）时明确说明「上面只是回放」，绝不假装接上了。
+   * 两项操作同时进行的原因：用户点击「接回」的预期是「继续此前的对话」，仅有上下文
+   * 而无记录（或仅有记录而无上下文）都属于不完整的结果。resume 失败（内核已重启、
+   * 内存中不存在该会话）时明确说明「以上仅为回放」，不将回放表示为恢复成功。
    */
   async resumeHistory(id) {
     const session = await this.ensureConnection();
     if (!session) return;
     await this.sendHistoryReplay(id);
     if (session.busy) {
-      this.post({ type: 'notice', text: '正在工作，结束后再接回。' });
+      this.post({ type: 'notice', text: '当前正在工作，结束后再进行恢复。' });
       return;
     }
     try {
       await session.resume(String(id || ''), this.workdir(), { preset: this.wantedPreset() });
       this.turnSent = true;
       this.resumeTarget = undefined;
-      this.post({ type: 'notice', text: '已接回这段历史。' });
+      this.post({ type: 'notice', text: '已恢复该历史会话。' });
       this.post({ type: 'status', state: 'ready', detail: '就绪' });
     } catch (error) {
-      // 自己的话放第一行（短），内核的原话另起一行附上（长也没关系 ——
-      // 它是"原始信息"，不是我在跟用户絮叨）。见 §文案要短 那条测试。
-      this.log('warn', `接回历史失败：${this.errText(error)}`);
+      // 面板自身的说明放在第一行（简短），内核原文另起一行附上（原文较长不影响 ——
+      // 它属于"原始信息"，而非面板附加的说明）。见 §文案要短 那条测试。
+      this.log('warn', `恢复历史会话失败：${this.errText(error)}`);
       this.post({
         type: 'notice',
-        text: `没能接回上下文，上面只是回放。\n原因：${clip(this.errText(error), 70)}`,
+        text: `上下文未能恢复，以上内容仅为回放。\n原因：${clip(this.errText(error), 70)}`,
       });
     }
   }
@@ -998,45 +998,45 @@ class DshPanelView {
   // ── 编辑器上下文（当前文件 / 选中的代码）────────────────
 
   /**
-   * 把编辑器里的东西送进面板，变成输入框上面的一个「附件」。
+   * 把编辑器中的内容送入面板，成为输入框上方的一个「附件」。
    *
-   * 为什么是送进面板、而不是直接替用户发出去：用户按那个命令，多半是想
-   * 「就这段代码问点什么」——所以把上下文挂上、把光标留给输入框，
-   * 让他接着打字。这也是 VS Code 里其它 AI 扩展的做法。
+   * 采用送入面板而非直接代替用户发送的原因：用户执行该命令时，通常意图为
+   * 「针对这段代码提问」——因此把上下文挂载为附件、把光标保留在输入框，
+   * 使用户继续输入。VS Code 中其它 AI 扩展也采用该做法。
    *
    * @param {Array<object>} items
    */
   async attach(items) {
     const list = (Array.isArray(items) ? items : [items]).filter(Boolean);
     if (list.length === 0) return;
-    // 面板可能还没展开（命令可以从命令面板直接调），先让它出来。
+    // 面板可能尚未展开（该命令可直接从命令面板调用），先使其显示。
     await this.reveal();
     this.post({ type: 'attach', items: list });
   }
 
   /**
-   * 让面板显出来。
+   * 使面板显示出来。
    *
-   * 展开一个视图只能通过 VS Code 自己的命令 `<viewId>.focus`，
-   * 所以这里只能走 executeCommand —— 在测试的假 vscode 里它不存在，
-   * 那就记一条日志、当作没事发生（附件本身照挂）。
+   * 展开视图只能通过 VS Code 自身的命令 `<viewId>.focus`，
+   * 因此此处只能使用 executeCommand —— 在测试用的模拟 vscode 中该命令不存在，
+   * 此时记录一条日志并视为未发生错误（附件本身仍然挂载）。
    */
   async reveal() {
     try {
       await vscode.commands.executeCommand(`${VIEW_ID}.focus`);
     } catch (error) {
-      this.log('warn', `展开面板失败（不影响把内容挂上去）：${this.errText(error)}`);
+      this.log('warn', `展开面板失败（不影响附件挂载）：${this.errText(error)}`);
     }
   }
 
-  /** 把命令面板/右键菜单拿来的编辑器信息整理成附件形状。 */
+  /** 把命令面板或右键菜单提供的编辑器信息整理为附件结构。 */
   static attachmentFromEditor(editor, workdir) {
     if (!editor || !editor.document) return undefined;
     const document = editor.document;
     const uri = document.uri;
     const absolute = uri && uri.fsPath ? uri.fsPath : document.fileName;
     if (!absolute) return undefined;
-    // 名字用相对于工作目录的路径：模型和自己看都更短、更清楚。
+    // 名称使用相对于工作目录的路径：模型与用户查看时都更短、更明确。
     let name = absolute;
     if (workdir && pathIsInside(absolute, workdir)) {
       name = path.relative(workdir, absolute).split('\\').join('/');
@@ -1062,7 +1062,7 @@ class DshPanelView {
     return { ...base, kind: 'file', detail: '当前文件', id: name };
   }
 
-  /** 下一段新对话要用哪个预设：面板里选过的优先，其次是设置里的默认值。 */
+  /** 下一段新对话使用的预设：面板中选择的值优先，其次是配置项中的默认值。 */
   wantedPreset(cfg = this.config()) {
     return this.preset || cfg.preset || undefined;
   }
@@ -1073,16 +1073,16 @@ class DshPanelView {
     const cfg = this.config();
     const old = session.sessionId;
     this.post({ type: 'reset' });
-    // 用户主动要新对话，就别再想着把上一段接回来了。
+    // 用户主动请求新对话时，不再尝试恢复上一段会话。
     this.resumeTarget = undefined;
     this.turnSent = false;
-    // 新会话要先把旧的放掉，免得内核里堆一堆空会话。
+    // 新建会话前需要先关闭旧会话，避免内核中累积大量空会话。
     if (old) {
       try {
         await this.client.closeSession(old);
         this.log('info', `已关闭旧会话 ${old}`);
       } catch (error) {
-        this.log('warn', `关闭旧会话失败（不影响继续）：${this.errText(error)}`);
+        this.log('warn', `关闭旧会话失败（不影响后续操作）：${this.errText(error)}`);
       }
     }
     try {
@@ -1094,7 +1094,7 @@ class DshPanelView {
       });
       this.post({ type: 'status', state: 'ready', detail: '就绪' });
     } catch (error) {
-      this.postError(`开新对话失败：${this.errText(error)}`);
+      this.postError(`新建对话失败：${this.errText(error)}`);
       this.post({ type: 'status', state: 'error', detail: '未连接' });
     }
   }
@@ -1105,37 +1105,37 @@ class DshPanelView {
   }
 
   /**
-   * 用户在面板里换了 agent preset。
+   * 用户在面板中更换了 agent preset。
    *
-   * 内核不允许一段会话中途换预设（`agent-preset/locked`，实测），
-   * 所以这里只有两条路：
-   *   - 这段还没说过话 → 直接按新预设重开一段（零代价，用户不用自己再点新建）；
-   *   - 已经说过了 → 记下来，明确告诉他下一段新对话用它，绝不假装换成功了。
+   * 内核不允许在一段会话中途更换预设（`agent-preset/locked`，实测），
+   * 因此此处只有两条路径：
+   *   - 该会话尚未发送过消息 → 直接按新预设重新开启一段（代价为零，用户不需要另行点击新建）；
+   *   - 该会话已发送过消息 → 记录该预设，并明确说明下一段新对话使用该预设，不将更换表示为已生效。
    */
   async setPreset(value) {
     const preset = typeof value === 'string' ? value.trim() : '';
     if (!preset) return;
     this.preset = preset;
     if (this.session && !this.turnSent) {
-      this.log('info', `预设改成 ${preset}；当前这段还没说过话，直接重开一段`);
+      this.log('info', `预设已改为 ${preset}；当前会话尚未发送过消息，直接重新开启一段`);
       await this.newSession();
-      this.post({ type: 'notice', text: `已按「${this.labelOf(preset)}」重开。` });
+      this.post({ type: 'notice', text: `已按「${this.labelOf(preset)}」重新开启。` });
       return;
     }
-    this.log('info', `预设改成 ${preset}（下一段新对话生效）`);
-    this.post({ type: 'notice', text: `「${this.labelOf(preset)}」：下一段生效。` });
+    this.log('info', `预设已改为 ${preset}（下一段新对话生效）`);
+    this.post({ type: 'notice', text: `「${this.labelOf(preset)}」：自下一段新对话生效。` });
   }
 
   /**
-   * 读一次当前会话的权限预设（门 ≥0.0.12 的 `dsh-door/permission/get`）。
+   * 读取一次当前会话的权限预设（该插件 ≥0.0.12 的 `dsh-door/permission/get`）。
    *
-   * 为什么每次都问内核、而不是面板自己记着：权限是**内核**的状态
-   * （会话的 `permissions` 投影）。桌面端切了、用户改了档里的默认值、
-   * 某个插件（比如 Auto Approval）动了旋钮，面板都该照实显示 ——
-   * 这也就是「跟桌面端同步」的落实方式：同一份清单、同一个真源。
+   * 每次都向内核查询、而非由面板自行记录的原因：权限是**内核**的状态
+   * （会话的 `permissions` 投影）。桌面端修改了权限、用户修改了配置集中的默认值、
+   * 某个插件（例如 Auto Approval）调整了该项取值时，面板都应当如实显示 ——
+   * 这也是「与桌面端同步」的实现方式：同一份清单、同一个真值来源。
    *
-   * 读不到**不算错误**：门太旧（0.0.11 及以下）或这个档没挂权限服务都是常态。
-   * 这时选择器变成一句解释（见 dsh/permission.js），别的功能一点不受影响。
+   * 读取失败**不计为错误**：该插件版本过低（0.0.11 及以下）或该配置集未挂载权限服务都属于常态。
+   * 此时选择器显示一句解释（见 dsh/permission.js），其它功能不受影响。
    */
   async refreshPermission() {
     const client = this.client;
@@ -1146,42 +1146,42 @@ class DshPanelView {
       this.permission = payload;
       this.permissionUnavailable = undefined;
       this.postPermissionState(payload);
-      // 记一行日志：真窗口自检（tools/vscode-check.js）就是靠它证明
-      // 「面板真的从内核读到了权限清单」，而不是靠界面看起来像。
+      // 记录一行日志：真实窗口自检（tools/vscode-check.js）依据该日志证明
+      // 「面板确实从内核读取到了权限清单」，而不是依据界面的显示结果。
       this.log('info', `当前权限：${currentLabel(payload.currentValue, payload.options)}（${payload.currentValue}）`);
     } catch (error) {
       const shaped = explainPermissionFailure({ code: error && error.code, message: this.errText(error) });
       this.permission = undefined;
       this.permissionUnavailable = shaped;
       this.post({ type: 'permissionState', unavailable: shaped });
-      this.log('info', `权限预设读不到（${shaped.state}）：${this.errText(error)}`);
-      // 顶栏那个按钮只写「切不了」三个字（那一格很窄，写全就被切一半），
-      // 说清楚为什么得靠这里。
-      // 每种原因只说一次：接的是桌面端那个内核时，每次建会话都会走到这儿。
+      this.log('info', `权限预设读取失败（${shaped.state}）：${this.errText(error)}`);
+      // 顶栏按钮只显示「不可切换」四个字（该栏宽度受限，完整文字会被截断），
+      // 说明原因需要通过此处输出。
+      // 每种原因只输出一次：接入桌面端内核时，每次建立会话都会进入该分支。
       //
-      // ⚠️ 两种情况下这里**先不说**，由连接流程决定说哪句：
-      // ① `quietPermissionNotice`（连接流程正在读这次权限，可能要换内核 ——
-      //    换了就别再解释"为什么换不了"了）；
-      // ② 已经说过的同一种原因（去重在 explainPermissionOnce 里）。
+      // ⚠️ 以下两种情况下此处**暂不输出**，由连接流程决定输出哪一句：
+      // ① `quietPermissionNotice`（连接流程正在读取本次权限，可能切换内核 ——
+      //    已切换时不再解释"无法切换的原因"）；
+      // ② 已输出过的同一种原因（去重逻辑位于 explainPermissionOnce 中）。
       if (!this.quietPermissionNotice) this.explainPermissionOnce();
     }
   }
 
   /**
-   * 把「这里换不了权限」那句人话播出去 —— **每种原因只说一次**。
+   * 输出「此处无法切换权限」的中文说明 —— **每种原因只输出一次**。
    *
-   * 为什么单独拎出来：连接流程要先把「要不要换一台能换权限的」决定完，
-   * 才轮到说这句话；而权限读取本身可能被触发两次（建会话的事件 + 连接流程
-   * 那次显式等待），两处都得走同一个去重标记。
+   * 单独成方法的原因：连接流程需要先完成「是否改用可切换权限的内核」的判定，
+   * 之后才输出该说明；而权限读取本身可能被触发两次（建立会话的事件 + 连接流程
+   * 中的显式等待），两处都需要使用同一个去重标记。
    */
   explainPermissionOnce() {
     const shaped = this.permissionUnavailable;
     if (!shaped) return;
     if (this.permissionNotice === shaped.state) return;
     this.permissionNotice = shaped.state;
-    // 两行都短，而且**都说人话**：不出现「门」「dsh-acp-door」「0.0.12」「档」
-    // 这类内部词（用户 2026-09-19 的原话：「『门』都出来了，别人能知道
-    // 是什么意思？」）。版本号、包名只看日志。
+    // 两行都简短，而且**都不含内部术语**：不出现「dsh-acp-door」「0.0.12」这类内部词
+    // 这类内部词（用户 2026-09-19 的意见为：内部组件名称不应出现在界面文案中）。
+    // 版本号、包名只记录在日志中。
     this.post({
       type: 'notice',
       text: `${shaped.text}${shaped.detail ? `\n${shaped.detail}` : ''}`,
@@ -1189,19 +1189,19 @@ class DshPanelView {
   }
 
   /**
-   * 权限换不了的时候，值不值得改用面板自己启动的那台 DSH。
+   * 权限无法切换时，判断是否值得改用面板自行启动的 DSH。
    *
-   * 判据（`shouldSwitchToOwnKernel`，纯函数、好测）：
-   * - 只有 `old-door`（**连接组件旧**）这一种换内核能解决 —— 自己启动的那台用的
-   *   是本扩展配套的新组件。`no-service`（那个 DSH 压根没带权限设置）换谁都没用，
-   *   照实说清楚；`error` 同理。
-   * - 必须**正接在现成的那台上**（`dshPanel.port`）。已经在自己那台上了还换，
-   *   就是原地打转（自己那台也不行 = 本机环境的问题，说实话比乱换有用）。
-   * - 用户关掉了自动启动（`dshPanel.autoStart = false`）就不换：那是他明说过
-   *   「别在背后拉进程」，尊重它，只解释为什么切不了。
-   * - 一台面板只换一次（`switchedKernel`）。
+   * 判据（`shouldSwitchToOwnKernel`，纯函数、便于测试）：
+   * - 仅 `old-door`（**接入点插件版本过低**）这一种情况可以通过切换内核解决 —— 面板自行启动的内核
+   *   使用本扩展配套的新版插件。`no-service`（该 DSH 未提供权限设置）切换任何内核都无效，
+   *   应如实说明；`error` 同理。
+   * - 需要**当前接入的正是现成的那台内核**（`dshPanel.port`）。已在面板自行启动的内核上时再切换，
+   *   属于无效操作（面板自行启动的内核也无法切换时 = 本机环境问题，如实说明比切换更有效）。
+   * - 用户已关闭自动启动（`dshPanel.autoStart = false`）时不切换：用户已明确表示
+   *   「不在后台启动进程」，应当遵从该设置，只解释无法切换的原因。
+   * - 一个面板只切换一次（`switchedKernel`）。
    *
-   * 换完是**新会话**：旧会话还在盘上（历史里能翻到），不是把它丢了。
+   * 切换后为**新会话**：旧会话仍保存在磁盘上（可在历史会话中查看），并未被删除。
    */
   async maybeUseOwnKernel(shaped) {
     const cfg = this.config();
@@ -1216,25 +1216,25 @@ class DshPanelView {
     this.switchedKernel = true;
     this.ownKernelOnly = true;
     /*
-     * 还有一个更要紧的：**只认自己那个口**。设置里那个口上现成的旧门还在响，
-     * 自启的等待要是把它当成"新内核开好了"，就会又接回同一台（换了等于没换）——
-     * 真窗口自检里抓到的就是这个。
+     * 另有一项更关键的设置：**仅识别面板自身的端口**。配置项所指端口上现成的旧版接入点仍在监听，
+     * 若自启等待过程将其判定为"新内核已启动完成"，则会再次接入同一内核（切换未生效）——
+     * 真实窗口自检中发现的问题即为该情况。
      */
     this.ownPortOnly = true;
     this.log(
       'info',
-      `接上的 ${cfg.host}:${cfg.port} 换不了权限（${shaped.state}），` +
-        `改用面板自己启动的（${cfg.host}:${cfg.selfStartPort}，档：自启档）`,
+      `接入的 ${cfg.host}:${cfg.port} 无法切换权限（${shaped.state}），` +
+        `改用面板自己启动的（${cfg.host}:${cfg.selfStartPort}，配置集：自启配置集）`,
     );
-    this.post({ type: 'notice', text: '这台 DSH 版本旧，改用面板自己启动的。' });
-    // 只断连接，不杀任何内核（teardown 不碰进程）。
+    this.post({ type: 'notice', text: '该 DSH 版本过低，已改用面板自行启动的内核。' });
+    // 仅断开连接，不终止任何内核（teardown 不操作进程）。
     this.teardown();
     this.resumeTarget = undefined;
     await this.connectInternal();
     return true;
   }
 
-  /** 把一份权限载荷发给界面（统一在这儿加中文标签）。 */
+  /** 把一份权限载荷发送给界面（中文标签统一在此处添加）。 */
   postPermissionState(payload) {
     const options = decorateOptions(payload.options, payload.currentValue);
     this.post({
@@ -1247,15 +1247,15 @@ class DshPanelView {
   }
 
   /**
-   * 用户在面板里换了权限预设。
+   * 用户在面板中更换了权限预设。
    *
-   * 跟 agent preset（`setPreset`）**不是一回事**：那个换不了当前这段（内核
-   * 报 `agent-preset/locked`），而权限是**随时可换**的 —— 内核就是为此设计的
-   * （`/permission`、桌面端那个选择器都是中途可点）。所以这里直接切，
-   * 不重开会话，也不编「下一段生效」那种话。
+   * 与 agent preset（`setPreset`）**不同**：后者无法更换当前会话的预设（内核
+   * 报错 `agent-preset/locked`），而权限**随时可以更换** —— 内核即按此设计
+   * （`/permission`、桌面端的选择器均支持中途切换）。因此此处直接切换，
+   * 不重新开启会话，也不使用「下一段生效」这类表述。
    *
-   * 切完以**内核回读的**为准（不乐观更新）：万一某个旋钮被别的机制按住，
-   * 界面显示的仍然是真实状态，而不是用户以为的那一个。
+   * 切换结果以**内核回读的值为准**（不做乐观更新）：即使某项设置被其它机制限制，
+   * 界面显示的仍是真实状态，而不是用户预期的状态。
    */
   async setPermission(value) {
     const client = this.client;
@@ -1263,6 +1263,13 @@ class DshPanelView {
     const wanted = typeof value === 'string' ? value.trim() : '';
     if (!client || !sessionId || !wanted) return;
     if (typeof client.permissionSet !== 'function') return;
+    // 展示项（custom）不是可切换的目标：内核的 resolve() 对其直接抛出异常。界面上该项已显示为
+    // 灰色且点击不发送消息，但 webview 可能使用旧版 bundle，因此在此处再加一道判定 ——
+    // 否则用户会收到「无法读取当前权限」的提示，与实际情况不符。
+    if (DISPLAY_ONLY.has(wanted)) {
+      this.post({ type: 'notice', text: '该项仅表示当前状态，不是可切换的选项。' });
+      return;
+    }
     const label = currentLabel(wanted, this.permission && this.permission.options);
     try {
       const payload = await client.permissionSet(sessionId, wanted);
@@ -1270,21 +1277,21 @@ class DshPanelView {
       this.permissionUnavailable = undefined;
       this.postPermissionState(payload);
       this.post({ type: 'notice', text: `权限已切到「${label}」。` });
-      this.log('info', `权限切到 ${wanted}（内核回读 ${payload.currentValue}）`);
+      this.log('info', `权限已切换到 ${wanted}（内核回读 ${payload.currentValue}）`);
     } catch (error) {
-      // 失败要说清楚是什么失败（旧门 / 名字不对 / 会话没了），并且把界面
-      // 拉回真实状态 —— 否则用户会以为自己已经切过去了。
+      // 失败时需要说明失败类型（接入点插件版本过低 / 名称不正确 / 会话不存在），并把界面
+      // 恢复为真实状态 —— 否则用户会误认为切换已经生效。
       const shaped = explainPermissionFailure({ code: error && error.code, message: this.errText(error) });
       this.postError(`${shaped.text}${shaped.detail ? `\n${shaped.detail}` : ''}`);
-      // 这一次是用户自己点的，说一遍就够：把去重标记先记上，
-      // 免得下面那次重读又把同一句话当「notice」再播一遍。
+      // 本次由用户主动触发，说明一次即可：预先记录去重标记，
+      // 避免后续重新读取时把同一句说明作为「notice」再次输出。
       this.permissionNotice = shaped.state;
       await this.refreshPermission();
     }
   }
 
   async reconnect() {
-    this.log('info', '用户要求重新连接');
+    this.log('info', '用户请求重新连接');
     this.teardown();
     this.post({ type: 'reset' });
     await this.ensureConnection();
@@ -1295,11 +1302,11 @@ class DshPanelView {
   }
 
   /**
-   * 把一段可能很长的原文截短（只用于**附在**自己的话后面的那类引用）。
+   * 把一段可能很长的原文截短（仅用于**附加在**面板说明之后的引用）。
    *
-   * 为什么要截：内核报错动辄上百字，直接塞进提示里就成了"长句糊脸"——
-   * 用户提过两次意见。整段原文另有去处（日志、以及错误卡片的折叠区），
-   * 这里只要够看清是哪一类问题。
+   * 需要截短的原因：内核报错常达上百字，直接放入提示会形成大段文本 ——
+   * 用户已两次提出该意见。完整原文另有记录位置（日志，以及错误卡片的折叠区），
+   * 此处只需足以判断属于哪一类问题。
    */
   clip(text, max = 70) {
     return clip(text, max);
@@ -1314,9 +1321,9 @@ class DshPanelView {
       this.client.close();
       this.client = undefined;
     }
-    // 下一轮连接重新判断历史会话从哪儿读（用户可能刚好升级了门）。
+    // 下一轮连接重新判定历史会话的读取来源（用户可能在此期间升级了接入点插件）。
     this.historyVia = undefined;
-    // 权限那条说明也重新说一遍（可能刚升完门）。
+    // 权限相关说明也重新输出一次（接入点插件可能已升级）。
     this.permissionNotice = undefined;
     this.permissionUnavailable = undefined;
   }
@@ -1324,12 +1331,12 @@ class DshPanelView {
   dispose() {
     this.teardown();
     /*
-     * 关键的一行（2026-09-19 改）：**不杀内核，只释放引用**。
+     * 关键的一行（2026-09-19 修改）：**不终止内核，只释放引用**。
      *
-     * 原来这里是 `this.background.dispose()` —— 视图一销毁就把内核杀掉，
-     * 而视图太容易没了（折叠侧边栏、拖动面板、Reload Window、另一个窗口关掉）。
-     * 现在交给 manager：引用归零后还有宽限（默认 10 分钟），这期间重新打开
-     * 面板会继续用同一个内核 —— 不重启、也不用 resume。
+     * 此处原为 `this.background.dispose()` —— 视图一旦销毁即终止内核，
+     * 而视图的销毁条件很常见（折叠侧边栏、拖动面板、Reload Window、另一个窗口关闭）。
+     * 现在交由 manager 处理：引用归零后仍保留宽限期（默认 10 分钟），该期间重新打开
+     * 面板会继续使用同一个内核 —— 不重启，也不需要 resume。
      */
     this.kernels.release(this);
     this.background = undefined;
@@ -1337,10 +1344,10 @@ class DshPanelView {
 }
 
 /**
- * 把一段原文截短（超过 `max` 就加省略号）。纯函数，好测。
+ * 把一段原文截短（超过 `max` 时添加省略号）。纯函数，便于测试。
  *
- * 只用在"附在自己那句话后面的引用"上：整段原文永远另有去处（日志、
- * 错误卡片的折叠区），提示里没必要糊一屏。
+ * 仅用于"附加在面板说明之后的引用"：完整原文始终另有记录位置（日志、
+ * 错误卡片的折叠区），提示中不需要显示整屏内容。
  */
 function clip(text, max = 70) {
   const value = String(text === undefined || text === null ? '' : text);
@@ -1348,58 +1355,58 @@ function clip(text, max = 70) {
 }
 
 /**
- * 自己启动内核失败时给用户看的那段原文（纯函数，好测）。
+ * 面板自行启动内核失败时向用户展示的原文（纯函数，便于测试）。
  *
- * 两种失败要说成两件不同的事，因为**出路不一样**：
- * - 进程刚启动就退出 → 命令不对（dsh 不在 PATH、dshCommand 指错）；
- * - 进程活着但端口没开 → 这个档里可能没装门插件，或者门被指到了别的端口。
- * 把它们混成一句"没开门"，用户就只能自己猜。
+ * 两种失败需要作为两件不同的事情说明，因为**解决途径不同**：
+ * - 进程启动后立即退出 → 命令不正确（dsh 不在 PATH 中、dshCommand 指向错误）；
+ * - 进程仍在运行但端口未开放监听 → 该配置集中可能未安装接入点插件，或接入点被指向了其它端口。
+ * 将两者合并为一句"接入点未监听"，用户只能自行推测原因。
  *
- * ⚠️ 这段是**折叠区的原始信息**（`human.raw`），不是对话流里那行提示 ——
- * 所以它可以带上具体命令、档名、下游怎么办；顶栏和提示那两处才是要短的地方。
+ * ⚠️ 这段是**折叠区的原始信息**（`human.raw`），不是对话流中的提示行 ——
+ * 因此可以包含具体命令、配置集名称、后续处理方式；顶栏与提示行才是需要简短的位置。
  */
 function fallbackFailureText({ command, profile, host, port, exitedEarly, stderr, explained }) {
-  // 内核自己说了原因就照实转述 —— 别让面板的猜测盖过它自己的话。
+  // 内核已说明原因时如实转述 —— 不应让面板的推测覆盖内核自身的说明。
   const said = explained && explained.kind !== 'unknown' ? explained : null;
   const raw = String(stderr || '').trim();
-  // 用哪个命令/哪个档属于排障细节，塞在原文那段里就好，人话那行只说结论。
+  // 使用哪个命令或哪个配置集属于排障细节，写入原文段落即可，中文说明行只陈述结论。
   const tail = `\n[${command} · profile=${profile}]${raw ? `\n内核原话：${raw}` : ''}`;
 
   if (exitedEarly) {
     if (said) {
-      return `没能启动 DSH：它一启动就退出了（${said.reason}）。${said.advice}${tail}`;
+      return `无法启动 DSH：该进程启动后立即退出（${said.reason}）。${said.advice}${tail}`;
     }
-    return `没能启动 DSH：它一启动就退出了 —— 多半是找不到 DSH，或者设置里的命令写错了。${tail}`;
+    return `无法启动 DSH：该进程启动后立即退出 —— 通常是找不到 DSH，或设置里的命令填写有误。${tail}`;
   }
   return (
-    `DSH 是起来了，但没连上它（${host}:${port} 上没有应答）。两种可能：这套配置里` +
-    `没装连接组件（dsh plugin --profile ${profile} list 里应当有 dsh-acp-door），` +
-    '或者它里面的 port 要跟着 dshPanel.selfStartPort 改。' +
+    `DSH 已启动，但无法连接（${host}:${port} 上没有应答）。有两种可能：该配置中` +
+    `未安装连接组件（dsh plugin --profile ${profile} list 中应当有 dsh-acp-door），` +
+    '或其 port 需要跟随 dshPanel.selfStartPort 一并修改。' +
     tail
   );
 }
 
 /**
- * 权限换不了时，该不该改用面板自己启动的那台 DSH（纯函数，好测）。
+ * 权限无法切换时，判断是否应当改用面板自行启动的 DSH（纯函数，便于测试）。
  *
- * 只在**这一种**情形下换：接在现成的那台上（不是自己那台）、对方只是**连接
- * 组件旧**（`old-door`，自己启动的那台用的是配套的新组件）、用户没关自动启动、
- * 而且这台面板还没换过。
+ * 仅在**这一种**情形下切换：接入的是现成的那台内核（而非面板自行启动的）、对方仅为**接入点
+ * 插件版本过低**（`old-door`，面板自行启动的内核使用配套的新版插件）、用户未关闭自动启动、
+ * 且该面板尚未切换过。
  *
- * 不换的情形同样有理由：
- * - `no-service`：那台 DSH 压根没带权限设置 —— 换自己启动的也一样，说了实话
- *   比乱换有用；
- * - `error`：读不到不等于不支持（网络抖一下、会话没了），先别动结构；
- * - 已经在自己那台上：换了就是原地打转；
- * - `autoStart === false`：用户明确说过别在背后拉进程；
- * - `switched`：一台面板只换一次，不允许来回弹。
+ * 不切换的情形同样有依据：
+ * - `no-service`：该 DSH 未提供权限设置 —— 改用面板自行启动的内核结果相同，如实说明
+ *   比无效切换更有效；
+ * - `error`：读取失败不等于不支持（网络瞬时异常、会话不存在），不应急于改变连接结构；
+ * - 已在面板自行启动的内核上：切换属于无效操作；
+ * - `autoStart === false`：用户已明确要求不在后台启动进程；
+ * - `switched`：一个面板只切换一次，不允许反复切换。
  *
  * @param {object} input
- * @param {string} [input.state] `explainPermissionFailure` 的 state。
- * @param {number|string|undefined} input.targetPort 现在连的是哪个端口。
- * @param {number|string} input.cfgPort `dshPanel.port`（现成的那台在这个口上）。
- * @param {boolean} input.autoStart 用户有没有允许自启内核。
- * @param {boolean} input.switched 这台面板之前换过没有。
+ * @param {string} [input.state] `explainPermissionFailure` 返回的 state。
+ * @param {number|string|undefined} input.targetPort 当前连接的端口。
+ * @param {number|string} input.cfgPort `dshPanel.port`（现成的那台内核监听该端口）。
+ * @param {boolean} input.autoStart 用户是否允许自动启动内核。
+ * @param {boolean} input.switched 该面板此前是否切换过。
  * @returns {boolean}
  */
 function shouldSwitchToOwnKernel({ state, targetPort, cfgPort, autoStart, switched } = {}) {
@@ -1411,25 +1418,25 @@ function shouldSwitchToOwnKernel({ state, targetPort, cfgPort, autoStart, switch
 }
 
 /**
- * 所有起法都失败之后，给用户一句**对得上原因**的建议。
+ * 所有启动方式均失败之后，向用户输出**与原因对应**的建议。
  *
- * 原来这里是写死的一句"把 dshCommand 填成完整命令" —— 而当失败原因是
- * "这个档命令行起不来"（2026-09-19 那次）时，那句话把人往错的方向带。
+ * 此处原为固定的一句"把 dshCommand 填成完整命令" —— 而当失败原因为
+ * "该配置集无法通过命令行启动"（2026-09-19 那次）时，该表述会将用户引向错误方向。
  *
- * ⚠️ 这几句是**给用户看的**（错误卡片的"怎么办"那一行）：不许出现「门」
- * 「档名」「设置项全名」这类内部词。
+ * ⚠️ 这几句是**给用户看的**（错误卡片的"怎么办"那一行）：不出现「接入点插件」
+ * 「接入点插件」「设置项全名」这类内部词。
  */
 function fallbackAdvice(kinds) {
   if (kinds.has('app-managed-profile')) {
-    return '这套配置只能由桌面端启动：先打开桌面端，或在设置里换一套配置。';
+    return '该配置集只能由桌面端启动：先启动桌面端，或在设置中更换配置集。';
   }
   if (kinds.has('wrong-app-flags')) {
-    return '这套配置起不来：在设置里换一套配置试试。';
+    return '该配置集无法启动：在设置中更换配置集后重试。';
   }
   if (kinds.has('port-in-use')) {
-    return '有别的程序占着那个端口：关掉它，或在设置里换个端口。';
+    return '该端口已被其它程序占用：关闭该程序，或在设置中更换端口。';
   }
-  return '先打开桌面端，或在设置里指定 DSH 的安装位置。';
+  return '先启动桌面端，或在设置中指定 DSH 的安装位置。';
 }
 
 module.exports = {

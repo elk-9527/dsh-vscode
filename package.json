@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "把 DeepSeek Harness 接进 VS Code 的两半：VS Code 扩展 dsh-panel + DSH 插件 dsh-acp-door",
+  "description": "将 DeepSeek Harness 接入 VS Code 的两个组成部分：VS Code 扩展 dsh-panel 与 DSH 插件 dsh-acp-door",
   "license": "MIT",
   "homepage": "https://github.com/TODO-owner/TODO-repo#readme",
   "repository": {

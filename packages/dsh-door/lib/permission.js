@@ -1,36 +1,72 @@
 /**
- * 门的旁路方法：**权限预设**（`dsh-door/permission/get|set`）。
+ * ACP 接入点插件（dsh-acp-door）的旁路方法：**权限预设**（`dsh-door/permission/get|set`）。
  *
- * 为什么需要它：桌面端那个「权限」选择器（仅可查看 / 工作区内修改 /
- * Auto Approval / 完全权限）在内核里是 `@deepseek-ai/dsh-permission-presets`
- * 这个服务，客户端拿的是会话的 `permissions` 投影。而 ACP 只暴露
+ * 需要该功能的原因：桌面端的「权限」选择器（仅可查看 / 工作区内修改 /
+ * Auto Approval / 完全权限）在内核中对应 `@deepseek-ai/dsh-permission-presets`
+ * 服务，客户端读取的是会话的 `permissions` 投影。ACP 只暴露
  * 「模型」「推理强度」两个 config option（`session/set_config_option`），
- * 官方 README 也明说它「刻意不提供 DSH 专用呈现数据与交互式 UI 功能」——
- * 权限预设正好是那一类。所以门自己加两个方法，把内核的清单与切换原样透给客户端，
- * **不另造一套权限语义**（清单从内核读，切也走内核的 set()）。
+ * 官方 README 亦明确说明其「刻意不提供 DSH 专用呈现数据与交互式 UI 功能」，
+ * 权限预设属于该类数据。因此该插件自行增加两个方法，把内核的清单与切换原样传给客户端，
+ * **不另行定义权限语义**（清单从内核读取，切换亦调用内核的 set()）。
  *
- * 这个文件是纯的：不 import 内核、不碰 socket，能脱离内核单独测。
- * 内核侧的接线在 ./index.js 的 {@link handleDoorPermission}。
+ * 该文件为纯模块：不 import 内核、不操作 socket，可脱离内核单独测试。
+ * 内核侧的接线位于 ./index.js 的 {@link handleDoorPermission}。
  *
  * @module dsh-acp-door/permission
  */
 
 /**
- * 门自定义方法的前缀。跟历史会话一样带 `dsh-door` 命名空间：
+ * 该插件自定义方法的前缀。与历史会话方法相同，带 `dsh-door` 命名空间：
  * `dsh-door/permission/get`、`dsh-door/permission/set`。
  */
 export const DOOR_PERMISSION_PREFIX = 'dsh-door/permission/';
 
-/** 读当前权限 + 可选清单。 */
+/** 读取当前权限与可选清单。 */
 export const PERMISSION_GET_METHOD = 'dsh-door/permission/get';
 
-/** 切到某个权限预设。 */
+/** 切换到指定权限预设。 */
 export const PERMISSION_SET_METHOD = 'dsh-door/permission/set';
 
-/** 列表里最多接受多少项（防御：内核配了张离谱的表也不至于把客户端撑爆）。 */
+/** 清单中最多接受的项数（防御措施：内核配置了异常长度的表时，客户端负载不会超出上限）。 */
 export const MAX_PERMISSION_OPTIONS = 50;
 
-/** 是不是门自己要接的「权限预设」请求（带 id 的 JSON-RPC 请求）。 */
+/**
+ * 该插件为权限方法定义的错误码。
+ *
+ * 需要占用三个错误码的原因：这几种失败对用户而言是**三件不同的事**（更换一个仍然存在的选项 /
+ * 重新打开该会话 / 无法归类），而它们原先全部归入 -32000。归入同一码时，
+ * 客户端只能以该插件的中文原话进行正则匹配 —— 该插件修改一个词，客户端即刻分错档，
+ * 表现为「这个名字已经不在了」被表述为「读不到当前权限，点重新连接再试一次」，
+ * 而重新连接无法修复该情形（用户已于 2026-09-19 就「文案里出现内部词」提出过一次意见，
+ * 依据原话分档属于同一类问题：把供程序判定的信息写成了叙述性文字）。
+ *
+ * -32601（方法不存在）与 -32602（参数不对）为 JSON-RPC 自身的约定，沿用。
+ */
+export const DOOR_ERR_OTHER = -32000;
+
+/** 要切换的选项名不在内核表中（内核 `resolve()` 的原话照常携带，日志需要该内容）。 */
+export const DOOR_ERR_UNKNOWN_PRESET = -32002;
+
+/** 会话 id 在该内核中不存在（非该内核创建，或已经关闭）。 */
+export const DOOR_ERR_NO_SESSION = -32003;
+
+/**
+ * 把「哪个选项不存在 / 哪段会话不存在」标记在异常上，使应答层能够取得错误码。
+ *
+ * 内核原话一字不改地放入 `message` —— 该内容通常包含可用清单，供人员与日志查阅。
+ */
+export function permissionError(code, message) {
+  const error = new Error(message);
+  error.doorCode = code;
+  return error;
+}
+
+/** 从异常中读取该插件的错误码；未标记的按 {@link DOOR_ERR_OTHER} 处理（不推测为其他档）。 */
+export function doorErrorCode(error) {
+  return error && typeof error.doorCode === 'number' ? error.doorCode : DOOR_ERR_OTHER;
+}
+
+/** 判断是否为该插件应当处理的「权限预设」请求（带 id 的 JSON-RPC 请求）。 */
 export function isDoorPermissionRequest(frame) {
   return (
     Boolean(frame) &&
@@ -40,28 +76,28 @@ export function isDoorPermissionRequest(frame) {
   );
 }
 
-/** 取方法名里前缀后面的部分：'get' 或 'set'。 */
+/** 取方法名中前缀之后的部分：'get' 或 'set'。 */
 export function doorPermissionMethod(frame) {
   return isDoorPermissionRequest(frame)
     ? frame.method.slice(DOOR_PERMISSION_PREFIX.length)
     : undefined;
 }
 
-/** 门对权限请求的成功应答帧。 */
+/** 该插件对权限请求的成功应答帧。 */
 export function doorPermissionResult(id, result) {
   return { jsonrpc: '2.0', id, result };
 }
 
-/** 门对权限请求的错误应答帧。 */
+/** 该插件对权限请求的错误应答帧。 */
 export function doorPermissionError(id, code, message) {
   return { jsonrpc: '2.0', id, error: { code, message } };
 }
 
 /**
- * 从请求里取「对哪个会话、切成什么」。
+ * 从请求中取出「对哪个会话、切换为什么值」。
  *
- * `id` 用会话 id（ACP 的 sessionId 就是内核的会话 id —— 面板读会话记录
- * 用的也是它，两处一致）。`set` 必须带 `value`；`get` 带了也忽略。
+ * `id` 使用会话 id（ACP 的 sessionId 即内核的会话 id —— 面板读取会话记录
+ * 亦使用该 id，两处一致）。`set` 必须携带 `value`；`get` 携带时忽略。
  *
  * @param {string} method 'get' | 'set'
  * @param {object|undefined} params
@@ -76,12 +112,12 @@ export function permissionTarget(method, params) {
 }
 
 /**
- * 把内核给的选项洗一遍：只留 {value, name, description?}。
+ * 对内核提供的选项做规范化：仅保留 {value, name, description?}。
  *
- * 为什么洗：这份数据会直接进 webview。内核表是用户可配的（`read-only` 那几个
- * 是内置的，`auto-approval` 是插件加的，用户还能自己加），所以不能假设形状
- * —— 缺 name 就用 value 顶上（内核自己也这么兜底：`spec.name ?? name`），
- * 没有 value 的条目直接丢掉（没有它根本没法切）。
+ * 需要规范化的原因：该数据会直接进入 webview。内核的表由用户配置（`read-only` 各项
+ * 为内置项，`auto-approval` 由插件添加，用户亦可自行添加），因此不能假定其形状
+ * —— 缺少 name 时以 value 代替（内核自身亦取同样的后备值：`spec.name ?? name`），
+ * 没有 value 的条目直接丢弃（缺少该字段无法完成切换）。
  *
  * @param {unknown} raw 内核的 options 数组。
  * @returns {Array<{value: string, name: string, description?: string}>}
@@ -105,10 +141,10 @@ export function normalizePermissionOptions(raw) {
 }
 
 /**
- * 组装回给客户端的载荷。
+ * 组装返回给客户端的载荷。
  *
- * `currentValue` 可能是 `custom`（内核的推导状态：当前旋钮组合不匹配任何预设）——
- * 那不是能选的预设，但仍然要如实告诉客户端「现在不在任何预设上」。
+ * `currentValue` 可能为 `custom`（内核的推导状态：当前配置组合不匹配任何预设）——
+ * 该值不是可选预设，但仍需如实告知客户端「当前不属于任何预设」。
  *
  * @param {object} input
  * @param {string} input.currentValue
@@ -126,14 +162,14 @@ export function permissionPayload({ currentValue, options, defaultPreset }) {
 }
 
 /**
- * 切换成功之后，把一个预设名规整成客户端要的 `currentValue`。
+ * 切换成功之后，把一个预设名规整为客户端需要的 `currentValue`。
  *
- * 为什么切换后不直接信内核回读：内核的 `set()` 是「记录选择 + 写变化的旋钮」，
- * 回读要等投影折完。调用方（门）会**重新读一次**给客户端，这个函数只是
- * 把「读回来的东西」和「刚切的那个」对齐，避免版本差异导致的空值。
+ * 切换后不直接采用内核回读值的原因：内核的 `set()` 语义为「记录选择 + 写入发生变化的配置项」，
+ * 回读需要等待投影完成折算。调用方（该插件）会**重新读取一次**返回给客户端，该函数仅用于
+ * 把「读取到的值」与「刚切换的值」对齐，避免版本差异导致的空值。
  *
- * @param {string|undefined} readBack 重新读到的当前值。
- * @param {string} wanted 刚切过去的预设名。
+ * @param {string|undefined} readBack 重新读取到的当前值。
+ * @param {string} wanted 刚切换到的预设名。
  */
 export function settledPermission(readBack, wanted) {
   return typeof readBack === 'string' && readBack ? readBack : wanted;

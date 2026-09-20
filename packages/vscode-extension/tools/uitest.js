@@ -1,17 +1,17 @@
 'use strict';
 
 /**
- * 界面层自动化测试：在**真浏览器**里跑断言。
+ * 界面层自动化测试：在**真实浏览器**中执行断言。
  *
- * 为什么这么做：VS Code 的 webview 没法自动点开截图，但我可以把同一套
- * HTML/CSS/JS 丢进无头 Chrome，然后在页面里跑断言，把结果读回来。
- * 这样能测到肉眼容易漏、但一定会犯的东西：
+ * 采用该方式的原因：VS Code 的 webview 无法自动打开并截图，而同一套
+ * HTML/CSS/JS 可以传入无头 Chrome，在页面内执行断言并取回结果。
+ * 因此可覆盖人工检查容易遗漏、但必然出现的问题：
  *   - 横向溢出、元素重叠、输入框被挤出屏幕；
- *   - Markdown 有没有真的渲染成结构（代码块/列表/粗体/引用）；
- *   - 工具卡片有没有正确合并（而不是每帧长一张新卡）；
- *   - 文字对比度是否低到看不清；
- *   - 点工具卡片能不能折叠、按 Enter 能不能发送、Shift+Enter 会不会误发；
- *   - 渲染一屏 Markdown 要多少毫秒（防住 O(n²) 那种写法）。
+ *   - Markdown 是否渲染为真实结构（代码块/列表/粗体/引用）；
+ *   - 工具卡片是否正确合并（而非每帧新增一张卡片）；
+ *   - 文字对比度是否低于可辨识阈值；
+ *   - 点击工具卡片是否可折叠、Enter 是否发送、Shift+Enter 是否误发；
+ *   - 渲染一屏 Markdown 所需的毫秒数（防止出现 O(n²) 复杂度的实现）。
  *
  * 用法：node tools/uitest.js [场景名]
  */
@@ -25,33 +25,33 @@ const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const WORK = path.join(ROOT, 'build', 'uitest');
 const PROFILE = path.join(ROOT, 'build', 'chrome-profile');
 
-/** 每个场景期望看到的特殊东西。 */
+/** 每个场景特有的额外期望。 */
 const EXPECTATIONS = {
-  // 什么都没发：所有「按需出现」的东西都必须真的藏着。
+  // 未发送任何内容：所有「按需出现」的控件均需保持隐藏状态。
   bare: { needsUser: false, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, emptyChrome: true, minAssistantChars: 0 },
   empty: { needsUser: false, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0 },
   chat: { needsUser: true, needsAssistant: true, needsTools: 2, needsCaret: false, needsPermission: false, minAssistantChars: 300 },
   streaming: { needsUser: true, needsAssistant: true, needsTools: 1, needsCaret: true, needsPermission: false, minAssistantChars: 10 },
-  // 权限场景里回合还没结束（在等用户点许可），所以光标应该还在。
+  // 权限场景中回合尚未结束（等待用户点选许可），因此光标仍然存在。
   permission: { needsUser: true, needsAssistant: true, needsTools: 0, needsCaret: true, needsPermission: true, needsOptions: 3, minAssistantChars: 5 },
-  // 带编辑器上下文：输入框上面该有两块，发出去的那条消息里也该有。
+  // 带编辑器上下文：输入框上方应有两块，已发送的消息中也应有两块。
   context: { needsUser: true, needsAssistant: true, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 10, needsAttachments: 2 },
-  // 压力场景：正文由断言脚本自己灌（要计时），所以这里不要求已有正文和光标。
+  // 压力场景：正文由断言脚本自行注入（需要计时），因此此处不要求已有正文与光标。
   perf: { needsUser: true, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0, perf: true },
-  // 内核报错：人话在前、原文在后。这段只有一条用户消息 + 一个错误块。
+  // 内核报错：可读说明在前，内核原文在后。本场景只有一条用户消息与一个错误块。
   error: { needsUser: true, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0, errorShape: true },
-  // 历史会话：浮层、清单、回放、接回 —— 全在断言脚本里现场注入（见那个场景的说明）。
+  // 历史会话：浮层、清单、回放、接回 —— 均由断言脚本现场注入（见该场景的说明）。
   history: { needsUser: false, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0, historyScene: true },
-  // 权限选择器：清单由扩展（内核）给，界面只负责画与点 —— 全在断言脚本里点。
+  // 权限选择器：清单由扩展（内核）提供，界面只负责渲染与点击 —— 点击动作全部在断言脚本中执行。
   access: { needsUser: false, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0, accessScene: true },
 };
 
 /**
- * 注入页面里的断言脚本。
+ * 注入页面的断言脚本。
  *
- * 所有输出都走 document.title 和一个 <pre id="__results">，
- * 并且把非 ASCII 转义掉 —— 这样即使中间经过 PowerShell 管道，
- * 也不会因为编码问题把中文变成乱码。
+ * 所有输出都写入 document.title 和一个 <pre id="__results">，
+ * 同时转义非 ASCII 字符 —— 即使中间经过 PowerShell 管道，
+ * 也不会因编码问题使中文变为乱码。
  */
 function assertionsScript(scene) {
   const expect = EXPECTATIONS[scene] || {};
@@ -63,7 +63,7 @@ function assertionsScript(scene) {
     results.push({ name: name, ok: !!ok, detail: detail == null ? '' : String(detail) });
   }
 
-  // ── 小工具：颜色对比度 ──────────────────────────────
+  // ── 辅助函数：颜色对比度 ──────────────────────────────
   function luminance(color) {
     var m = /rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/.exec(color || '');
     if (!m) return null;
@@ -102,13 +102,13 @@ function assertionsScript(scene) {
     var body = document.body;
     var viewportWidth = window.innerWidth;
 
-    // ── 1. 骨架 ──────────────────────────────────────
+    // ── 1. 页面结构 ──────────────────────────────────────
     assert('页面渲染出高度', body.getBoundingClientRect().height > 200, body.getBoundingClientRect().height);
 
-    // ── 1.5 该藏的必须真藏住 ─────────────────────────
-    // CSS 陷阱：元素一旦被作者样式设成 display:flex，浏览器默认的
-    // [hidden] { display: none } 就被盖掉了 —— hidden 属性形同不存在。
-    // 所以这里量的是「真的看不见」，而不是只看那个属性。
+    // ── 1.5 需隐藏的控件确实隐藏 ─────────────────────────
+    // CSS 陷阱：元素一旦被作者样式设为 display:flex，浏览器默认的
+    // [hidden] { display: none } 即被覆盖 —— hidden 属性不再生效。
+    // 因此此处测量的是「实际不可见」，而不是仅检查该属性。
     var permissionBox = document.getElementById('permission');
     var configRow = document.getElementById('config-row');
     var presetField = document.getElementById('preset-field');
@@ -117,20 +117,20 @@ function assertionsScript(scene) {
     var presetCount = document.querySelectorAll('#preset-select option').length;
     var meterText = (document.getElementById('meter-text').textContent || '').trim();
 
-    assert('配置行只在有东西可调时才露出', visible(configRow) === (modelCount > 0 || presetCount > 0),
+    assert('配置行只在有东西可调时才显示', visible(configRow) === (modelCount > 0 || presetCount > 0),
       'visible=' + visible(configRow) + ' model=' + modelCount + ' preset=' + presetCount);
-    assert('模式下拉只在门报了清单时才露出', visible(presetField) === (presetCount > 0),
+    assert('模式下拉只在该插件返回清单时才显示', visible(presetField) === (presetCount > 0),
       'visible=' + visible(presetField) + ' preset=' + presetCount);
-    assert('用量条只在有数据时才露出', visible(meter) === (meterText.length > 0),
+    assert('用量条只在有数据时才显示', visible(meter) === (meterText.length > 0),
       'visible=' + visible(meter) + ' text=' + meterText);
-    // 附件块也是 flex 容器，同一个坑 —— 这里一并量。
+    // 附件块同为 flex 容器，存在同一问题 —— 此处一并测量。
     var attachmentBox = document.getElementById('attachments');
     var chipCount = document.querySelectorAll('#attachments .chip').length;
-    assert('输入框上面的附件块：有附件才露出',
+    assert('输入框上方的附件块：有附件时才显示',
       visible(attachmentBox) === (chipCount > 0),
       'visible=' + visible(attachmentBox) + ' 附件=' + chipCount);
     if (!EXPECT.needsPermission) {
-      assert('权限区默认是藏着的', !visible(permissionBox));
+      assert('权限区默认隐藏', !visible(permissionBox));
     }
     if (EXPECT.emptyChrome) {
       assert('没连上时头部不该挂空控件',
@@ -146,12 +146,12 @@ function assertionsScript(scene) {
         presetSelect.scrollWidth + '>' + presetSelect.clientWidth);
     }
 
-    // ── 1.6 顶栏配置行的宽度怎么分 ─────────────────────
-    // 用户报过：「文字被挤在一起了，模型的占地有点大，其他两点有点小」。
-    // 起因是三个格子都用「flex: 1 1 auto」（基准取内容宽度），模型那个 <select>
-    // 的基准是它最长的选项，于是它把整行吃满、另两个被压到 40~60px 并截字。
-    // 现在按 7:6:6 分并各自有下限 —— 这几条断言就是钉住这件事。
-    // 只在三个控件都在的场景（access）里量，别的场景凑不齐。
+    // ── 1.6 顶栏配置行的宽度分配 ─────────────────────
+    // 用户曾报告：「文字被挤在一起了，模型的占地有点大，其他两点有点小」。
+    // 起因是三个格子均使用「flex: 1 1 auto」（基准取内容宽度），模型那个 <select>
+    // 的基准为其最长选项，因此它占满整行、另两个被压到 40~60px 并截断文字。
+    // 现在按 7:6:6 分配并各自设有下限 —— 这几条断言即用于固定该行为。
+    // 仅在三个控件均存在的场景（access）中测量，其他场景不具备条件。
     if (EXPECT.accessScene) {
       var modelField = document.getElementById('model-field');
       var presetFieldEl = document.getElementById('preset-field');
@@ -165,7 +165,7 @@ function assertionsScript(scene) {
       var detail = '模型 ' + widths.model + ' / 模式 ' + widths.preset + ' / 权限 ' + widths.access;
       assert('三个控件都分到了足够的宽度（各 ≥100px）',
         widths.model >= 100 && widths.preset >= 100 && widths.access >= 100, detail);
-      // 「模型的占地有点大」的反面：它是最宽的一个，但**不能**宽出一大截。
+      // 针对「模型的占地有点大」的反向约束：它是最宽的一项，但**不得**显著超出其他项。
       assert('模型那一格没有把整行吃满（不超过模式那格的 1.4 倍）',
         widths.model <= widths.preset * 1.4, detail);
       assert('模式下拉里的字没被切掉',
@@ -175,7 +175,7 @@ function assertionsScript(scene) {
         accessBtn.scrollWidth <= accessBtn.clientWidth + 2,
         accessBtn.scrollWidth + '>' + accessBtn.clientWidth + ' 宽 ' + widths.access);
       assert('权限那一格的宽度够放标签 + 值', widths.access >= 108, widths.access);
-      // 用量条是第四个东西：装不下时它应该**换行**，而不是把前面三个挤扁。
+      // 用量条是第四个元素：空间不足时应当**换行**，而不是压缩前三个控件。
       var usageVisible = meterText.length > 0;
       assert('配置行没有横向溢出（挤不下就换行，不许撑破面板）',
         configRow.scrollWidth <= configRow.clientWidth + 2,
@@ -183,7 +183,7 @@ function assertionsScript(scene) {
       if (usageVisible) {
         var meterTop = Math.round(meter.getBoundingClientRect().top);
         var accessTop = Math.round(accessFieldEl.getBoundingClientRect().top);
-        // 两种都算合格：它自己换到第二行，或者跟控件同一行但控件依然够宽。
+        // 两种情形均判为合格：它自行换到第二行，或与控件同行且控件仍然足够宽。
         assert('用量条没把三个控件挤扁（要么换行，要么控件还是宽的）',
           meterTop > accessTop || widths.access >= 116,
           'meter.top=' + meterTop + ' access.top=' + accessTop + ' access 宽 ' + widths.access);
@@ -213,14 +213,14 @@ function assertionsScript(scene) {
         assistants.length >= 1 && body0.textContent.trim().length >= minChars,
         (body0 ? body0.textContent.length : 0) + ' 字，要求 >= ' + minChars,
       );
-      var hasMarkdown = EXPECT.needsTools >= 2; // chat 场景才放了完整 Markdown
+      var hasMarkdown = EXPECT.needsTools >= 2; // 仅 chat 场景包含完整 Markdown
       if (hasMarkdown) {
         assert('代码块渲染成 pre>code', document.querySelectorAll('.body pre code').length >= 1);
         assert('粗体渲染成 strong', document.querySelectorAll('.body strong').length >= 1);
         assert('有序列表渲染成 ol>li', document.querySelectorAll('.body ol li').length >= 3);
         assert('引用渲染成 blockquote', document.querySelectorAll('.body blockquote').length >= 1);
         assert('行内代码渲染成 code', document.querySelectorAll('.body p code').length >= 1);
-        assert('没有裸露的 Markdown 星号', body0.textContent.indexOf('**') === -1, body0.textContent.slice(0, 60));
+        assert('没有未转义的 Markdown 星号', body0.textContent.indexOf('**') === -1, body0.textContent.slice(0, 60));
       }
       assert('思考块可折叠', document.querySelectorAll('details.thinking').length >= 1);
       var summary = document.querySelector('details.thinking > summary');
@@ -280,7 +280,7 @@ function assertionsScript(scene) {
     assert('消息区与输入区不重叠', mRect.bottom <= cRect.top + 1, Math.round(mRect.bottom) + ' vs ' + Math.round(cRect.top));
     assert('消息区有可用高度', mRect.height > 100, Math.round(mRect.height));
 
-    // ── 7. 对比度（低到看不清才算失败，其余只报数）──
+    // ── 7. 对比度（仅低于阈值时判为失败，其余只记录数值）──
     var ratios = {};
     var assistantBody = document.querySelector('.msg-assistant .body');
     if (assistantBody) ratios['正文'] = contrastOf(assistantBody);
@@ -294,8 +294,8 @@ function assertionsScript(scene) {
     }
 
     // ── 7.5 编辑器上下文（附件块）─────────────────────
-    // 这一段只在带上下文的场景里跑：挂上去看得见吗、点 × 拿得掉吗、
-    // 发出去时带上了吗、发完有没有清空、"发出去的那条消息"回头看还认不认得出。
+    // 本段仅在带上下文的场景中执行：挂载后是否可见、点击 × 是否可移除、
+    // 发送时是否携带、发送后是否清空、「已发送的那条消息」回看时是否仍可识别。
     if (EXPECT.needsAttachments) {
       var chips = document.querySelectorAll('#attachments .chip');
       assert('挂上的上下文都显示出来了', chips.length === EXPECT.needsAttachments,
@@ -315,60 +315,60 @@ function assertionsScript(scene) {
       assert('选区那块和文件那块外观可区分（各有自己的类）',
         !!document.querySelector('#attachments .chip-sel') && !!document.querySelector('#attachments .chip-file'));
 
-      // 每个挂着的小块都要能拿掉 —— 并且是就地拿掉，不用等扩展回话。
+      // 每个已挂载的小块都需要可移除 —— 并且是就地移除，无需等待扩展回话。
       var closes = document.querySelectorAll('#attachments .chip-close');
-      assert('每一块都有拿掉的按钮', closes.length === chips.length, closes.length + ' vs ' + chips.length);
+      assert('每一块都有移除按钮', closes.length === chips.length, closes.length + ' vs ' + chips.length);
       var widthBefore = attachmentBox.getBoundingClientRect().width;
       closes[0].click();
       var after = document.querySelectorAll('#attachments .chip').length;
-      assert('点 × 能拿掉一块', after === chips.length - 1, '剩 ' + after);
-      assert('拿掉一块之后没把另一块也弄没了', after > 0);
-      assert('拿掉之后附件块还在（还剩着东西）', visible(attachmentBox));
+      assert('点击 × 可移除一块', after === chips.length - 1, '剩 ' + after);
+      assert('移除一块后其余部分不受影响', after > 0);
+      assert('移除一块后附件块仍显示（其中仍有内容）', visible(attachmentBox));
       assert('附件块没有横向溢出', attachmentBox.scrollWidth <= attachmentBox.clientWidth + 2,
         attachmentBox.scrollWidth + ' > ' + attachmentBox.clientWidth + '（宽度 ' + widthBefore + '）');
 
-      // 发出去：附件必须跟着走。
-      // 注意这里自己取 DOM，不要用第 8 段那两个变量 —— var 会提升，
-      // 在这一段还只是 undefined（踩过，整个断言脚本会静默不跑）。
+      // 发送：附件必须随消息一并发出。
+      // 注意此处自行获取 DOM，不使用第 8 段的那两个变量 —— var 会提升，
+      // 在本段仍为 undefined（曾出现该问题，整个断言脚本会静默不执行）。
       var ctxInput = document.getElementById('input');
       var ctxSend = document.getElementById('send');
       window.__received.length = 0;
-      ctxInput.value = '这两个文件是干嘛的？';
+      ctxInput.value = '这两个文件的作用是什么？';
       ctxInput.dispatchEvent(new Event('input', { bubbles: true }));
       ctxSend.click();
       var withAttach = window.__received.filter(function (m) { return m.type === 'send'; });
-      assert('带附件时照样发得出去', withAttach.length === 1, JSON.stringify(withAttach));
+      assert('带附件时同样可发送', withAttach.length === 1, JSON.stringify(withAttach));
       if (withAttach.length === 1) {
         var carried = withAttach[0].attachments || [];
-        assert('附件跟着消息一起发走了', carried.length === 1, JSON.stringify(carried));
-        assert('发走的是没被拿掉的那一块', carried[0] && carried[0].kind === 'selection', JSON.stringify(carried));
+        assert('附件随消息一并发出', carried.length === 1, JSON.stringify(carried));
+        assert('发出的是未被移除的那一块', carried[0] && carried[0].kind === 'selection', JSON.stringify(carried));
         assert('发走的附件带着正文（选区的内容不能丢）', carried[0] && carried[0].text === '<footer class="composer">',
           JSON.stringify(carried[0] && carried[0].text));
       }
-      assert('发完之后挂着的附件清空了', document.querySelectorAll('#attachments .chip').length === 0);
-      assert('清空之后附件块真的藏起来了', !visible(attachmentBox));
+      assert('发送后已附加的附件已清空', document.querySelectorAll('#attachments .chip').length === 0);
+      assert('清空后附件块已隐藏', !visible(attachmentBox));
 
-      // 回头看对话记录：那条用户消息应该还看得出当时带了什么。
+      // 回看对话记录：那条用户消息应当仍能看出当时携带的内容。
       var bubbleChips = document.querySelectorAll('.msg-user .bubble .chip');
-      assert('发出去的那条消息里，附件还看得见', bubbleChips.length === EXPECT.needsAttachments,
+      assert('已发送的消息中附件仍可见', bubbleChips.length === EXPECT.needsAttachments,
         '有 ' + bubbleChips.length + ' 块');
-      assert('历史消息里的附件不带拿掉的按钮（已经发走了）',
+      assert('历史消息中的附件不带移除按钮（已发送）',
         document.querySelectorAll('.msg-user .bubble .chip-close').length === 0);
     }
 
     // ── 7.6 压力：几百个流式增量的耗时 ────────────────
-    // 量的是「灌进去要多久」和「渲染落定后 DOM 有没有失控」。
-    // 注意两件事（都是踩过才明白的）：
-    // 1. 渲染是攒批的（rAF + 定时兜底），所以灌完之后必须**让出事件循环**再量，
-    //    同步死等会把 rAF 永远堵住；
-    // 2. 阈值给得很宽松（真实值几百毫秒），只卡数量级的回归 —— 比如有人
-    //    把渲染改成"每个增量都重渲染整棵树"。
+    // 测量的是「注入耗时」与「渲染落定后 DOM 是否失控」。
+    // 注意两点（均在出现问题后才确认）：
+    // 1. 渲染是攒批的（rAF + 定时后备），因此注入完成后必须**让出事件循环**再测量，
+    //    同步等待会永久阻塞 rAF；
+    // 2. 阈值设置很宽松（真实值几百毫秒），仅拦截数量级的回归 —— 例如将
+    //    渲染改为「每个增量都重渲染整棵树」。
     if (EXPECT.perf) {
       var messagesNode = document.getElementById('messages');
       var segments = [];
       for (var s = 0; s < 40; s += 1) {
-        // 注意换行符必须写成双反斜杠：这段断言脚本本身是个模板字符串，
-        // 单反斜杠会在生成时变成真换行，生成出来的脚本直接语法错（踩过）。
+        // 注意换行符必须写成双反斜杠：本段断言脚本本身位于模板字符串中，
+        // 单反斜杠会在生成时变为实际换行，生成出的脚本直接语法错误（曾出现）。
         segments.push('## 第 ' + s + ' 节\\n\\n这是第 ' + s + ' 段正文，带 \`inline code\` 和一个列表：\\n\\n- 一\\n- 二\\n- 三\\n');
       }
       var fullText = segments.join('\\n');
@@ -378,13 +378,13 @@ function assertionsScript(scene) {
         var node = document.querySelector(bodySel);
         return {
           nodes: messagesNode.querySelectorAll('*').length,
-          // 面板里的标题是「# 变 h2、## 变 h3」（markdown.js 里 level = 井号数 + 1）。
+          // 面板中的标题规则是「# 变 h2、## 变 h3」（markdown.js 中 level = 井号数 + 1）。
           headings: node ? node.querySelectorAll('h3').length : 0,
           chars: node ? node.textContent.length : 0,
         };
       }
 
-      // (1) 一片一片喂：模拟真实流式。
+      // (1) 分片注入：模拟真实流式。
       var chunkSize = 20;
       var chunkCount = Math.ceil(fullText.length / chunkSize);
       var t0 = performance.now();
@@ -395,7 +395,7 @@ function assertionsScript(scene) {
         );
       }
       var ingestMs = performance.now() - t0;
-      // 让出事件循环等攒批渲染落定（同步死等会把 rAF 永远堵住）。
+      // 让出事件循环，等待攒批渲染落定（同步等待会永久阻塞 rAF）。
       await new Promise(function (resolve) { setTimeout(resolve, 800); });
       var settleMs = performance.now() - t0;
       var chunked = snapshot();
@@ -406,16 +406,16 @@ function assertionsScript(scene) {
 
       assert('几百个增量受理得动（受理 < 1000ms）', ingestMs < 1000, Math.round(ingestMs) + 'ms');
       assert('渲染落定得也快（含 800ms 等待仍 < 3000ms）', settleMs < 3000, Math.round(settleMs) + 'ms');
-      // 一个字没丢：正文里的换行/井号会被 markdown 结构吃掉，所以不去比总字数，
-      // 而是确认「最后一片也到了」（流式最怕的是尾巴丢了）。
+      // 确认没有内容丢失：正文中的换行/井号会被 markdown 结构消耗，因此不比较总字数，
+      // 而是确认「最后一片也已到达」（流式最需防范的是末尾丢失）。
       var tailText = document.querySelector(bodySel) ? document.querySelector(bodySel).textContent : '';
       assert('流式的最后一片也到了（尾巴没丢）',
         tailText.indexOf('第 39 节') >= 0 && tailText.indexOf('第 39 段正文') >= 0,
         '正文长度 ' + chunked.chars + ' 字');
       assert('markdown 结构是真的（40 个小节都成了标题）', chunked.headings === 40, chunked.headings + ' 个标题');
 
-      // (2) 一次喂完同样的内容：DOM 必须跟流式一样 ——
-      // 这条才是真正要守的性质：不管分多少片到，结果都一样，没有重复、没有堆积。
+      // (2) 一次注入相同内容：DOM 必须与流式一致 ——
+      // 这条才是需要保证的性质：无论分成多少片到达，结果都一致，无重复、无堆积。
       window.postMessage({ type: 'reset' }, '*');
       await new Promise(function (resolve) { setTimeout(resolve, 200); });
       window.postMessage({ type: 'busy', busy: true }, '*');
@@ -429,15 +429,15 @@ function assertionsScript(scene) {
         whole.chars + ' vs ' + chunked.chars);
       assert('一次喂完的标题数和流式一样', whole.headings === chunked.headings,
         whole.headings + ' vs ' + chunked.headings);
-      // 这里比的是「同样内容两种切法的 DOM 规模」，差一点点正常（换行合并等），
-      // 差很多就说明流式路径在重复堆积。
+      // 此处比较的是「相同内容两种切分方式的 DOM 规模」，少量差异属正常（换行合并等），
+      // 差异过大则说明流式路径在重复堆积。
       assert('流式没有堆出多余的 DOM（和一次喂完相比不超过 15%）',
         chunked.nodes <= whole.nodes * 1.15 + 5,
         '流式 ' + chunked.nodes + ' vs 一次喂完 ' + whole.nodes);
 
-      // (3) 长对话：聊了很久之后会怎样。
-      // 两件事要守：一是别变成"每来一条就重排整棵树"（那会越用越卡），
-      // 二是**别把正在往回翻记录的人拽到底部** —— 这是聊天界面最招人烦的 bug。
+      // (3) 长对话：会话持续较久之后的表现。
+      // 需要保证两点：一是不演变为「每来一条就重排整棵树」（那会随使用越来越卡），
+      // 二是**不把正在往回翻记录的用户拽到底部** —— 这是聊天界面中影响最大的缺陷之一。
       window.postMessage({ type: 'reset' }, '*');
       await new Promise(function (resolve) { setTimeout(resolve, 200); });
 
@@ -467,12 +467,12 @@ function assertionsScript(scene) {
         longMessages + ' 条消息');
       assert('长对话受理得动（受理 < 2000ms）', longIngest < 2000, Math.round(longIngest) + 'ms');
       assert('长对话落定不慢（含 900ms 等待仍 < 4000ms）', longSettle < 4000, Math.round(longSettle) + 'ms');
-      // 线性增长：每轮（一问一答）撑不起 60 个节点就说明没有重复堆积。
+      // 线性增长：每轮（一问一答）产生的节点不超过 60 个，即说明没有重复堆积。
       assert('节点数随消息线性增长（不超过每轮 60 个）',
         longNodes <= exchanges * 60 + 200,
         longNodes + ' 个节点 / ' + exchanges + ' 轮');
 
-      // 贴着底部时，新消息应当继续贴底。
+      // 视图位于底部时，新消息应当继续使视图停留在底部。
       messagesNode.scrollTop = messagesNode.scrollHeight;
       await new Promise(function (resolve) { setTimeout(resolve, 120); });
       window.postMessage({ type: 'user', text: '贴底时的最后一句。' }, '*');
@@ -480,19 +480,19 @@ function assertionsScript(scene) {
       var bottomGap = messagesNode.scrollHeight - messagesNode.scrollTop - messagesNode.clientHeight;
       assert('贴着底时新消息继续贴底（差 < 40px）', bottomGap < 40, '差 ' + Math.round(bottomGap) + 'px');
 
-      // 用户往上翻记录时，**它自己的输出**不许把人拽回底部。
-      // 注意这里只喂 assistant 的流式正文，不带 user 消息 —— 分清两件事：
-      // 「你自己发了一句」把视图带回底部是合理的（你发的，你要看见）；
-      // 「它自己在输出」而你正在往回翻记录，把你拽下去才是招人烦的 bug。
+      // 用户向上翻看记录时，**其自身的输出**不得将视图拉回底部。
+      // 注意此处只注入 assistant 的流式正文，不带 user 消息 —— 区分两种情形：
+      // 「用户自己发送了一句」把视图带回底部是合理的（该消息由用户发出，需要看到）；
+      // 「其自身正在输出」而用户正在向上翻看记录，此时将视图拉下才属于缺陷。
       messagesNode.scrollTop = 0;
       await new Promise(function (resolve) { setTimeout(resolve, 250); });
-      // 关于「别把我拽回去」这条要怎么测：
-      // 界面靠 scroll 事件判断"用户是不是在往回翻"。但这个无头环境**不会**
-      // 为程序化改 scrollTop 派发 scroll 事件（实测 0 次 —— 我差一点就把这个
-      // 环境特性当成"界面有 bug"报出去了）。所以这里手动派发一个：
-      // 界面收到的是一个正常的 scroll 事件，跟我们真的用滚轮往回翻没区别，
-      // 区别只在"谁触发的"。真正的滚轮要看真浏览器，那一步在
-      // tools/vscode-check.js 里由人眼确认。
+      // 关于「视图不被拉回底部」这条的测量方式：
+      // 界面依赖 scroll 事件判断「用户是否在往回翻」。但该无头环境**不会**
+      // 为程序化修改 scrollTop 派发 scroll 事件（实测 0 次 —— 该结果曾一度
+      // 被误判为「界面存在缺陷」，实际为环境特性）。因此此处手动派发一个：
+      // 界面收到的是一个正常的 scroll 事件，与真实使用滚轮往回翻没有区别，
+      // 区别仅在于「由谁触发」。真实的滚轮需要真实浏览器，该步骤在
+      // tools/vscode-check.js 中由人工确认。
       var sawScrollEvent = 0;
       var countScroll = function () { sawScrollEvent += 1; };
       messagesNode.addEventListener('scroll', countScroll);
@@ -511,7 +511,7 @@ function assertionsScript(scene) {
         messagesNode.scrollTop < 60,
         'scrollTop 从 ' + scrollBefore + ' 变成了 ' + Math.round(messagesNode.scrollTop) + 'px');
 
-      // 反过来：你自己发一句，视图回到底部是应该的（不然你会看不见自己刚发的）。
+      // 反向情形：用户自己发送一句，视图回到底部属于预期行为（否则无法看到刚发送的内容）。
       window.postMessage({ type: 'user', text: '我发一句，应该能看见它。' }, '*');
       await new Promise(function (resolve) { setTimeout(resolve, 300); });
       var afterSendGap = messagesNode.scrollHeight - messagesNode.scrollTop - messagesNode.clientHeight;
@@ -519,10 +519,10 @@ function assertionsScript(scene) {
         '差 ' + Math.round(afterSendGap) + 'px');
     }
 
-    // ── 7.6 内核报错：人话在前，原文在后 ──────────────
-    // 这一段是给「错误提示改中文人话」立的护栏。以前内核的 429 是原样贴出来的，
-    // 用户看到的是一段英文 JSON，只会得出「这插件没法用」。这里量三件事：
-    // 人话在前、原文一个字都没少、长 JSON 不会把面板撑破。
+    // ── 7.6 内核报错：可读说明在前，原始报文在后 ──────────────
+    // 本段为「错误提示改为中文可读说明」设立的护栏。此前内核的 429 是原样贴出的，
+    // 用户看到的是一段英文 JSON，只会得出「该插件无法使用」。此处测量三点：
+    // 可读说明在前、原始报文一字未少、长 JSON 不会撑破面板。
     if (EXPECT.errorShape) {
       var errBox = document.querySelector('.msg-error');
       assert('错误块渲染出来了', !!errBox);
@@ -549,12 +549,12 @@ function assertionsScript(scene) {
     }
 
     // ── 7.7 历史会话：浮层 → 清单 → 回放 → 接回 ────────
-    // 真实链路是「点开浮层 → 界面向扩展要清单 → 门读盘应答」。
-    // 这里扮演扩展的那一半：点按钮后由断言脚本 postMessage 应答，
-    // 量的是界面的这一半（浮层、渲染、护栏、按钮发对消息）。
+    // 真实链路为「点开浮层 → 界面向扩展请求清单 → ACP 接入点插件（dsh-acp-door）读盘应答」。
+    // 此处模拟扩展的那一半：点击按钮后由断言脚本 postMessage 应答，
+    // 测量的是界面的这一半（浮层、渲染、护栏、按钮发送正确的消息）。
     if (EXPECT.historyScene) {
       var overlay = document.getElementById('history');
-      assert('历史浮层默认藏着', !visible(overlay));
+      assert('历史浮层默认隐藏', !visible(overlay));
       var hbtn = document.getElementById('history-btn');
       assert('历史按钮可见', visible(hbtn));
 
@@ -563,7 +563,7 @@ function assertionsScript(scene) {
       assert('点历史按钮浮层打开', visible(overlay));
       assert('打开时向扩展要了清单', window.__received.some(function (m) { return m.type === 'historyList'; }));
 
-      // 扮演扩展应答（形状对着门 0.0.8 的应答抄）。
+      // 模拟扩展应答（形状对齐 ACP 接入点插件（dsh-acp-door）0.0.8 版的应答）。
       window.postMessage({ type: 'history', skipped: 5, sessions: [
         { id: 'session-alpha', title: '修门插件的依赖注入', turns: 12, lastTime: Date.now() - 3600e3, cwd: 'D:/dsh-vscode', preset: 'standard' },
         { id: 'session-beta', title: '重写界面的渲染循环', turns: 4, lastTime: Date.now() - 86400e3, cwd: 'D:/dsh-vscode/packages/vscode-extension', preset: 'ptc' },
@@ -572,7 +572,7 @@ function assertionsScript(scene) {
       await new Promise(function (resolve) { setTimeout(resolve, 400); });
       var items = overlay.querySelectorAll('.history-item');
       assert('清单渲染出 3 段会话', items.length === 3, items.length + ' 段');
-      assert('统计里写明更早的没列出', (document.getElementById('history-meta').textContent || '').indexOf('5') >= 0,
+      assert('统计中写明更早的记录未列出', (document.getElementById('history-meta').textContent || '').indexOf('5') >= 0,
         document.getElementById('history-meta').textContent);
       var firstTitle = overlay.querySelector('.history-item-title');
       assert('第一条显示内核生成的标题', !!firstTitle && firstTitle.textContent.indexOf('修门插件') === 0,
@@ -586,7 +586,7 @@ function assertionsScript(scene) {
         (items[2].querySelector('.history-item-sub').title || '').indexOf('解码失败') >= 0,
         items[2].querySelector('.history-item-sub').title);
 
-      // 回放：点「回放」→ 界面发 historyOpen → 扩展送回 replay。
+      // 回放：点击「回放」→ 界面发送 historyOpen → 扩展送回 replay。
       window.__received.length = 0;
       items[0].querySelectorAll('button')[0].click();
       assert('点回放会向扩展要这段会话（带 id）',
@@ -612,7 +612,7 @@ function assertionsScript(scene) {
       assert('回放的工具卡写着工具名', replayTools[0] && replayTools[0].querySelector('.tool-name').textContent === 'read',
         replayTools[0] ? replayTools[0].querySelector('.tool-name').textContent : '无');
       var noteText = (document.querySelector('.msg-note') || {}).textContent || '';
-      assert('回放开头就说明了这是回放（不用先滚到底）',
+      assert('回放开头即说明内容为回放（无需滚动到底部）',
         noteText.indexOf('回放') >= 0
           && document.querySelector('.msg-note').closest('.msg') === document.querySelector('#messages .msg'),
         noteText);
@@ -620,8 +620,8 @@ function assertionsScript(scene) {
         document.getElementById('messages').scrollTop === 0,
         'scrollTop=' + document.getElementById('messages').scrollTop);
 
-      // 接回：重新打开浮层点「接回」——界面要发 historyResume。
-      // 重新打开会清列表显示「正在读取…」，所以再应答一次清单。
+      // 接回：重新打开浮层并点击「接回」——界面需要发送 historyResume。
+      // 重新打开会清空列表并显示「正在读取…」，因此再应答一次清单。
       window.__received.length = 0;
       hbtn.click();
       assert('回放之后还能再打开浮层', visible(overlay));
@@ -638,33 +638,33 @@ function assertionsScript(scene) {
       document.getElementById('history-close').click();
       assert('关闭按钮能收起浮层', !visible(overlay));
 
-      // 焦点与键盘：浮层盖住整个面板，所以焦点必须跟着走 ——
-      // 打开时进浮层，关掉时回到那个按钮（不然焦点掉到 body，键盘用户就丢了位置）。
+      // 焦点与键盘：浮层覆盖整个面板，因此焦点必须随之移动 ——
+      // 打开时进入浮层，关闭时回到该按钮（否则焦点落到 body，键盘用户将失去位置）。
       hbtn.click();
       assert('打开浮层时焦点移进了浮层（不在底下的控件上）',
         overlay.contains(document.activeElement),
         document.activeElement ? (document.activeElement.id || document.activeElement.tagName) : '无');
 
-      // Esc 关掉浮层：浮层的通用约定，没它键盘用户只能一路 Tab 到关闭按钮。
+      // Esc 关闭浮层：浮层的通用约定，缺少该行为时键盘用户只能逐次 Tab 至关闭按钮。
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      assert('按 Esc 能关掉浮层', !visible(overlay));
-      assert('关掉后焦点还回了历史按钮', document.activeElement === hbtn,
+      assert('按 Esc 可关闭浮层', !visible(overlay));
+      assert('关闭后焦点回到历史按钮', document.activeElement === hbtn,
         document.activeElement ? (document.activeElement.id || document.activeElement.tagName) : '无');
 
-      // 读失败要长得像"出事了"，不能长得像"你没有历史会话"。
+      // 读取失败需要呈现为「发生错误」，而不能呈现为「暂无历史会话」。
       hbtn.click();
       window.postMessage({ type: 'history', error: '连着的门插件太旧了，读不了历史会话。' }, '*');
       await new Promise(function (resolve) { setTimeout(resolve, 300); });
       var errBox = document.querySelector('#history-list .history-error');
       assert('读失败渲染成错误块（不是空状态）', !!errBox, errBox ? errBox.textContent : '（没有 .history-error）');
-      assert('错误块和"还没有历史会话"不是同一套样式',
+      assert('错误块与「暂无历史会话」不是同一套样式',
         !!errBox && errBox.className.indexOf('history-empty') < 0, errBox ? errBox.className : '无');
       assert('错误块带 role=alert（读屏会念出来）', !!errBox && errBox.getAttribute('role') === 'alert');
 
-      // 光有 class 不算数：选择器写错、或者被后面某条规则盖掉，class 照样在，
-      // 用户看到的却还是"什么都没有"那套样子。这个项目真踩过一次同类坑
-      // （hidden 属性被组件自己的 display 盖掉，空控件一直露在界面上）。
-      // 所以这里读**计算出来的样式**，并且拿空状态当对照组。
+      // 仅存在 class 不足以判定：选择器写错、或被后续规则覆盖时，class 依然存在，
+      // 用户看到的却仍是「什么都没有」的外观。本项目曾出现过一次同类问题
+      // （hidden 属性被组件自身的 display 覆盖，空控件一直显示在界面上）。
+      // 因此此处读取**计算后的样式**，并以空状态作为对照组。
       window.postMessage({ type: 'history', sessions: [] }, '*');
       await new Promise(function (resolve) { setTimeout(resolve, 300); });
       var emptyBox = document.querySelector('#history-list .history-empty');
@@ -673,9 +673,9 @@ function assertionsScript(scene) {
       var emptyStyle = emptyBox ? window.getComputedStyle(emptyBox) : null;
       assert('空状态是居中的', !!emptyStyle && emptyStyle.textAlign === 'center',
         emptyStyle ? emptyStyle.textAlign : '取不到');
-      // 取值要**当场取成字符串**：等这个节点被错误块替换掉之后，
-      // 那个 CSSStyleDeclaration 会解析成空串 —— 拿它去比较会"因为空而不等"，
-      // 断言看着通过、其实什么都没验（这个套件里真这么错过一次）。
+      // 取值需**当场取为字符串**：该节点被错误块替换之后，
+      // 对应的 CSSStyleDeclaration 会解析为空串 —— 用它比较会「因空而不等」，
+      // 断言表面通过、实际未验证任何内容（本套件中曾出现一次）。
       var emptyColor = emptyStyle ? emptyStyle.color : '';
 
       window.postMessage({ type: 'history', error: '连着的门插件太旧了，读不了历史会话。' }, '*');
@@ -698,13 +698,13 @@ function assertionsScript(scene) {
         !!errStyle && emptyColor !== '' && errStyle.color !== emptyColor,
         errStyle ? (errStyle.color + ' vs ' + (emptyColor || '（空状态的颜色没取到）')) : '取不到');
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      assert('出过错之后 Esc 照样能关', !visible(overlay));
+      assert('出错之后 Esc 同样可关闭', !visible(overlay));
     }
 
-    // ── 7.8 权限选择器：清单由扩展（内核）给，界面只画与点 ──────────
-    // 这一段里的清单来自 tools/preview.js 的 access 场景，而那份载荷是用
-    // **生产的翻译函数**（src/dsh/permission.js）生成的 —— 所以这里验到的
-    // 标签、说明、确认门，跟真面板上看到的是同一套。
+    // ── 7.8 权限选择器：清单由扩展（内核）提供，界面只负责渲染与点击 ──────────
+    // 本段中的清单来自 tools/preview.js 的 access 场景，该载荷由
+    // **生产环境的翻译函数**（src/dsh/permission.js）生成 —— 因此此处验证的
+    // 标签、说明、确认步骤，与真实面板上所见为同一套。
     if (EXPECT.accessScene) {
       var accessField = document.getElementById('access-field');
       var accessBtn = document.getElementById('access-btn');
@@ -712,11 +712,11 @@ function assertionsScript(scene) {
       var accessList = document.getElementById('access-list');
       var accessConfirm = document.getElementById('access-confirm');
 
-      assert('权限那一栏露出来了', visible(accessField));
+      assert('权限栏已显示', visible(accessField));
       assert('按钮上写的是当前档（中文）', (accessBtn.textContent || '').indexOf('工作区内修改') >= 0,
         accessBtn.textContent);
       assert('按钮带悬浮提示', (accessBtn.title || '').length > 0, accessBtn.title);
-      assert('小卡片默认藏着', !visible(accessPop));
+      assert('小卡片默认隐藏', !visible(accessPop));
       assert('按钮说自己是弹窗触发器', accessBtn.getAttribute('aria-haspopup') === 'dialog');
 
       accessBtn.click();
@@ -755,7 +755,7 @@ function assertionsScript(scene) {
         Math.round(popRect.left) + ',' + Math.round(popRect.top) + ' → ' + Math.round(popRect.right) + ',' + Math.round(popRect.bottom)
           + ' (窗口 ' + window.innerWidth + 'x' + window.innerHeight + ')');
 
-      // 普通档：点一下就切，不需要确认。
+      // 普通档位：点击一次即切换，不需要确认。
       window.__received.length = 0;
       accessItems[0].click();
       assert('点普通档直接发 setPermission',
@@ -763,7 +763,7 @@ function assertionsScript(scene) {
         JSON.stringify(window.__received));
       assert('发完就收起来了', !visible(accessPop));
 
-      // 完全权限：必须先过确认门 —— 这一档点了就不再逐条问用户，点错的代价太大。
+      // 完全权限：必须先通过确认步骤 —— 该档位一经选定即不再逐条询问用户，误选代价较大。
       window.__received.length = 0;
       accessBtn.click();
       var dangerItem = null;
@@ -775,14 +775,14 @@ function assertionsScript(scene) {
       assert('完全权限不会直接切（一条消息都没发）', window.__received.length === 0,
         JSON.stringify(window.__received));
       assert('确认框顶掉了清单', visible(accessConfirm) && !visible(accessList));
-      assert('确认框说清了后果（不再逐条问你）',
+      assert('确认框说明了后果（不再逐条询问）',
         (document.getElementById('access-confirm-body').textContent || '').indexOf('不再逐条') >= 0,
         document.getElementById('access-confirm-body').textContent);
       assert('确认按钮写的是「启用完全权限」',
         document.getElementById('access-confirm-accept').textContent.indexOf('启用完全权限') >= 0,
         document.getElementById('access-confirm-accept').textContent);
       document.getElementById('access-confirm-cancel').click();
-      assert('点「算了」回到清单，仍然没发消息',
+      assert('点「取消」回到清单，仍然没有发送消息',
         window.__received.length === 0 && visible(accessList) && !visible(accessConfirm));
       dangerItem.click();
       document.getElementById('access-confirm-accept').click();
@@ -791,42 +791,81 @@ function assertionsScript(scene) {
         JSON.stringify(window.__received));
       assert('确认后小卡片收起', !visible(accessPop));
 
-      // Esc 与点外面：这两种肌肉记忆都得管用。
+      // Esc 与点击外部区域：这两种习惯性操作都需要生效。
       accessBtn.click();
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      assert('Esc 能关掉小卡片', !visible(accessPop));
+      assert('按 Esc 可关闭小卡片', !visible(accessPop));
       accessBtn.click();
       document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-      assert('点别处也能关掉', !visible(accessPop));
+      assert('点击其它位置同样可关闭', !visible(accessPop));
 
-      // 换不了的时候（连的那台版本旧 / 没带权限设置）：按钮灰掉 + 说人话，
-      // 而且那句话挂在悬浮提示上（顶栏那行放不下长文，完整原因走对话流）。
-      // ⚠️ 这段文案里**不许有内部词**（门 / 包名 / 版本号）—— 用户提过意见，
-      // 这里就用扩展真的会发的那两句当素材（见 src/dsh/permission.js）。
+      // 内核将 custom 附在清单末尾时（当前取值不匹配任何预设）：它是**展示态**，
+      // 不是可切换的目标 —— 内核的 resolve() 对它直接抛出，桌面端也将其滤出可选行。
+      // 面板这边由扩展标记 selectable: false，界面据此渲染为灰色的当前项。
+      // 该项原本是一个可点击的按钮：点击会发出 setPermission('custom')，用户看到的是
+      // 「无法读取当前权限 / 请点击「重新连接」后重试」，而重新连接无法修复该状态。
+      window.__received.length = 0;
+      window.postMessage({ type: 'permissionState', currentValue: 'custom', label: '自定义',
+        options: [
+          { value: 'read-only', label: '仅可查看', selectable: true, needsConfirm: false, active: false },
+          { value: 'workspace-write', label: '工作区内修改', selectable: true, needsConfirm: false, active: false },
+          { value: 'danger-full-access', label: '完全权限', selectable: true, needsConfirm: true, active: false },
+          { value: 'custom', label: '自定义', selectable: false, needsConfirm: false, active: true }
+        ] }, '*');
+      await new Promise(function (resolve) { setTimeout(resolve, 150); });
+      assert('当前是展示态时顶栏跟着改（自定义）',
+        (accessBtn.textContent || '').indexOf('自定义') >= 0, accessBtn.textContent);
+      accessBtn.click();
+      var customRows = accessPop.querySelectorAll('.access-item');
+      assert('展示项同样列出（否则用户无法看出当前所处的档）',
+        customRows.length === 4, customRows.length + ' 行');
+      var customRow = null;
+      for (var ci = 0; ci < customRows.length; ci += 1) {
+        if (customRows[ci].dataset.value === 'custom') customRow = customRows[ci];
+      }
+      assert('找得到展示项那一行', !!customRow);
+      assert('展示项是灰的（点不了）', customRow.disabled === true);
+      assert('展示项打了勾（它就是当前状态）', customRow.classList.contains('active'));
+      assert('展示项标了 display-only（给样式和测试看）',
+        customRow.dataset.displayOnly === 'true', customRow.dataset.displayOnly);
+      assert('「共 N 种」只数能切的（不把展示项算进去）',
+        (document.getElementById('access-pop-note').textContent || '').indexOf('共 3 种') >= 0,
+        document.getElementById('access-pop-note').textContent);
+      window.__received.length = 0;
+      customRow.disabled = false;
+      customRow.click();
+      assert('展示项根本没有点击监听（就算硬点也不发一条消息）',
+        window.__received.length === 0, JSON.stringify(window.__received));
+      accessBtn.click();
+
+      // 无法切换时（所连版本较旧 / 未提供权限设置）：按钮置灰 + 给出可读说明，
+      // 并且该说明挂在悬浮提示上（顶栏该行容不下长文本，完整原因走对话流）。
+      // ⚠️ 这段文案里**不得含内部词**（插件简称 / 包名 / 版本号 / 档位名）—— 用户提过意见，
+      // 此处即用扩展实际会发送的那两句作为素材（见 src/dsh/permission.js）。
       window.postMessage({ type: 'permissionState', unavailable: {
         state: 'old-door',
-        text: '这个 DSH 版本旧，这里换不了权限',
-        detail: '在桌面端自己的界面上换，或把 DSH 升到最新版',
+        text: '该 DSH 版本过低，此处无法切换权限',
+        detail: '请在桌面端界面中切换，或将 DSH 升级到最新版',
       } }, '*');
       await new Promise(function (resolve) { setTimeout(resolve, 200); });
-      assert('切不了时按钮灰掉', accessBtn.disabled === true);
-      // 按钮上只写结论（「切不了」）—— 顶栏那一格很窄，写全就被切一半；
-      // 理由挂 data-why + 悬浮提示，完整说法在对话流里。
-      assert('按钮上只写结论「切不了」（不塞长句子）',
-        (accessBtn.textContent || '').trim() === '切不了', accessBtn.textContent);
-      assert('按钮记着是哪一种换不了', accessBtn.dataset.why === '版本旧', accessBtn.dataset.why);
-      assert('切不了时按钮没有被切字',
+      assert('无法切换时按钮置灰', accessBtn.disabled === true);
+      // 按钮上只写结论（「不可切换」）—— 顶栏该格很窄，写全会显示不全；
+      // 理由存放在 data-why 与悬浮提示中，完整说明在对话流里。
+      assert('按钮上只写结论「不可切换」（不放长句）',
+        (accessBtn.textContent || '').trim() === '不可切换', accessBtn.textContent);
+      assert('按钮记着是哪一种无法切换', accessBtn.dataset.why === '版本过低', accessBtn.dataset.why);
+      assert('无法切换时按钮文字未被截断',
         accessBtn.scrollWidth <= accessBtn.clientWidth + 2,
         accessBtn.scrollWidth + '>' + accessBtn.clientWidth);
-      assert('完整原因挂在悬浮提示里', /换不了权限/.test(accessBtn.title || ''), accessBtn.title);
+      assert('完整原因挂在悬浮提示里', /无法切换权限/.test(accessBtn.title || ''), accessBtn.title);
       assert('悬浮提示里没有内部词（门 / 包名 / 版本号）',
         !/门|dsh-acp-door|0\.0\.\d+|档/.test(accessBtn.title || ''), accessBtn.title);
       window.__received.length = 0;
       accessBtn.click();
-      assert('灰掉之后点它也不弹清单', !visible(accessPop));
+      assert('置灰后点击也不弹出清单', !visible(accessPop));
     }
 
-    // ── 8. 交互：发送 / 换行 / 空输入 / 忙碌时不许发 ──
+    // ── 8. 交互：发送 / 换行 / 空输入 / 忙碌时不得发送 ──
     var input = document.getElementById('input');
     var send = document.getElementById('send');
     var stop = document.getElementById('stop');
@@ -856,7 +895,7 @@ function assertionsScript(scene) {
       send.click();
       assert('空白输入不发送', !window.__received.some(function (m) { return m.type === 'send'; }));
     } else {
-      // 正在跑回合时，发送按钮应该让位给停止按钮。
+      // 回合执行期间，发送按钮应当让位于停止按钮。
       assert('忙碌时显示停止按钮、隐藏发送按钮', !stop.hidden && send.hidden);
       window.__received.length = 0;
       input.value = '忙碌时不该发出去';
@@ -869,9 +908,9 @@ function assertionsScript(scene) {
       assert('点停止会发中断请求', window.__received.some(function (m) { return m.type === 'stop'; }));
     }
 
-    // ── 9. Markdown 脚本是否真的加载上了 ────────────
-    // 这里只验「加载顺序 + CSP 放行」，因为**渲染耗时不能在这里量**：
-    // 无头浏览器的虚拟时钟会让同步 CPU 耗时恒为 0。耗时在 test/markdown.js 里测。
+    // ── 9. Markdown 脚本是否加载成功 ────────────
+    // 此处仅验证「加载顺序 + CSP 放行」，因为**渲染耗时不能在此处测量**：
+    // 无头浏览器的虚拟时钟会使同步 CPU 耗时恒为 0。耗时在 test/markdown.js 中测量。
     assert(
       'markdown.js 已加载且早于 main.js 生效',
       Boolean(window.DshMarkdown) && typeof window.DshMarkdown.renderMarkdown === 'function',
@@ -883,11 +922,11 @@ function assertionsScript(scene) {
       document.getElementById('status-text').textContent,
     );
 
-    // ── 10. 把攻击性文本真的塞进 DOM，让浏览器解析器来判 ──
-    // Node 里只能用正则猜；这里是真的 DOM 解析，结论最硬。
+    // ── 10. 将攻击性文本实际注入 DOM，由浏览器解析器判定 ──
+    // Node 中只能用正则推测；此处是真实 DOM 解析，结论可靠性最高。
     if (window.DshMarkdown) {
       var host = document.createElement('div');
-      // 反引号用 fromCharCode 拼出来：否则三连反引号会把 Node 这边的模板字符串截断。
+      // 反引号由 fromCharCode 拼接生成：否则三连反引号会截断 Node 侧的模板字符串。
       var ticks = String.fromCharCode(96) + String.fromCharCode(96) + String.fromCharCode(96);
       host.innerHTML = window.DshMarkdown.renderMarkdown(
         '<script>window.__pwned = 1;<\\/script>\\n\\n' +
@@ -912,10 +951,10 @@ function assertionsScript(scene) {
       host.remove();
     }
 
-    // ── 11. 通用视觉体检（每个场景都跑）────────────────
-    // 这一段替代"用眼睛扫一遍"里**能机器判**的部分：文字被截断、元素横着溢出、
-    // 点不到的按钮、跑到面板外面的浮层。丑不丑机器判不了（那要等样稿），
-    // 但"挤坏了"必须每次都能自动发现。
+    // ── 11. 通用视觉检查（每个场景都执行）────────────────
+    // 本段替代「人工目视检查」中**可机器判定**的部分：文字被截断、元素横向溢出、
+    // 无法点击的按钮、超出面板范围的浮层。外观是否美观无法机器判定（需等待样稿），
+    // 但「布局被挤坏」必须每次都能自动发现。
     var root = document.querySelector('.panel') || document.body;
     var clipped = [];
     var undersized = [];
@@ -934,19 +973,19 @@ function assertionsScript(scene) {
       var box = node.getBoundingClientRect();
       if (box.width === 0 && box.height === 0) return;
 
-      // 1) 文字被横向截断（允许本来就该横向滚动的：代码块、pre）。
+      // 1) 文字被横向截断（本来就应横向滚动的除外：代码块、pre）。
       var isText = !node.children.length && (node.textContent || '').trim().length > 0;
       var exempt = node.tagName === 'PRE' || scrollable(node) || scrollable(node.parentElement);
       if (isText && !exempt && node.scrollWidth > node.clientWidth + 1) {
         clipped.push(node.className || node.tagName);
       }
 
-      // 2) 能点的东西太小（按钮、关闭叉）：手指/鼠标都难点。
+      // 2) 可点击元素过小（按钮、关闭叉）：手指/鼠标均难以点中。
       if (node.tagName === 'BUTTON' && (box.height < 20 || box.width < 20)) {
         undersized.push((node.id || node.className || 'button') + ' ' + Math.round(box.width) + '×' + Math.round(box.height));
       }
 
-      // 3) 跑到面板外面的浮层（右边或下边露出去）。
+      // 3) 超出面板范围的浮层（向右或向下越界）。
       if (style.position === 'absolute' || style.position === 'fixed') {
         if (box.right > rootBox.right + 1 || box.bottom > rootBox.bottom + 1) {
           escaped.push(node.className || node.tagName);
@@ -958,9 +997,9 @@ function assertionsScript(scene) {
     assert('按钮都点得到（不小于 20×20）', undersized.length === 0, undersized.join(', '));
     assert('没有浮层跑到面板外面', escaped.length === 0, escaped.join(', '));
 
-    // 4) 相邻消息之间的间距应该一致（不一致会看起来"有的挤有的松"）。
-    // 注意门槛是 2：消息的类名是 'msg msg-user' / 'msg msg-assistant'，
-    // 一开始我写了 >= 3，结果大多数场景只有 2 条，这条检查从来没跑过（死代码）。
+    // 4) 相邻消息之间的间距应当一致（不一致会出现「有的挤有的松」的观感）。
+    // 注意判定阈值为 2：消息的类名是 'msg msg-user' / 'msg msg-assistant'，
+    // 最初写为 >= 3，而多数场景只有 2 条，该检查从未执行（死代码）。
     var bubbles = [].slice.call(document.querySelectorAll('.msg'));
     if (bubbles.length >= 2) {
       var gaps = [];
@@ -980,7 +1019,7 @@ function assertionsScript(scene) {
     if (finished) return;
     finished = true;
     var payload = JSON.stringify({ scene: EXPECT.__name || '', results: results });
-    // 强制 ASCII 转义：中间可能经过 PowerShell 管道，别让编码毁掉中文。
+    // 强制 ASCII 转义：中间可能经过 PowerShell 管道，避免编码破坏中文。
     var ascii = payload.replace(/[\\u0080-\\uffff]/g, function (ch) {
       return '\\\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0');
     });
@@ -990,9 +1029,9 @@ function assertionsScript(scene) {
     document.body.appendChild(pre);
   }
 
-  // 回放脚本最多跑到约 1.5s，这里等它跑完再断言。
-  // run() 是 async 的（压力那一段要让出事件循环等渲染落定），
-  // 所以这里接住异常 —— 不然一个错就变成"页面里没找到断言结果"，很难查。
+  // 回放脚本最长执行约 1.5s，此处等待其执行完毕后再断言。
+  // run() 是 async 的（压力那一段需要让出事件循环等待渲染落定），
+  // 因此此处捕获异常 —— 否则一处错误即表现为「页面里没找到断言结果」，难以定位。
   setTimeout(function () {
     run().catch(function (error) {
       results.push({ name: '断言脚本自己抛错了', ok: false, detail: String(error && error.message ? error.message : error) });
@@ -1006,8 +1045,8 @@ function assertionsScript(scene) {
 function runChrome(scene) {
   const html = buildHtml('dark');
   const steps = SCENARIOS[scene]().steps;
-  // 错误捕获器要放在**最前面**：这样后面任何一段内联脚本（包括断言脚本）
-  // 就算有语法错，也会被它接住、写进 DOM，我们能从 dump 里读到原因。
+  // 错误捕获器需置于**最前面**：此后任何一段内联脚本（包括断言脚本）
+  // 即使存在语法错误，也会被其捕获并写入 DOM，可从 dump 中读到原因。
   const catcher =
     '<script>window.addEventListener("error", function (e) {' +
     'var p = document.createElement("pre"); p.id = "__pageerror";' +
@@ -1034,9 +1073,9 @@ function runChrome(scene) {
   const dumped = fs.readFileSync(dom, 'utf8');
   const match = /<pre id="__results">([\s\S]*?)<\/pre>/.exec(dumped);
   if (!match) {
-    // 断言脚本没跑完（多半是生成出来的脚本有语法错）。
-    // 页面最前面装了错误捕获器，这里把它的内容带回来 —— 否则只有一句
-    // "没找到断言结果"，得手动开 Chrome 才查得到（踩过）。
+    // 断言脚本未执行完毕（多为生成出的脚本存在语法错误）。
+    // 页面最前面已安装错误捕获器，此处将其内容一并返回 —— 否则只得到一句
+    // 「没找到断言结果」，需要手动打开 Chrome 才能定位（曾出现该问题）。
     const pageError = /<pre id="__pageerror">([\s\S]*?)<\/pre>/.exec(dumped);
     return {
       error: `页面里没找到断言结果（脚本可能没跑起来）${pageError ? ` —— ${pageError[1]}` : ''}`,

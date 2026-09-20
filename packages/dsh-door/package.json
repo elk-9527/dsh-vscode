@@ -1,7 +1,7 @@
 {
   "name": "dsh-acp-door",
   "version": "0.0.12",
-  "description": "在正在运行的 DeepSeek Harness 内核上，额外开一扇只监听本机的 ACP 门（供 VS Code 面板等外部程序连接）。",
+  "description": "在正在运行的 DeepSeek Harness 内核上新增一个仅监听本机回环地址的 ACP 接入点，供 VS Code 面板等外部程序连接。",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",

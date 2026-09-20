@@ -1,22 +1,28 @@
 /*
- * 门的权限预设旁路方法（纯函数）。
+ * ACP 接入点插件（`dsh-acp-door`）的权限预设旁路方法（纯函数）。
  *
- * 为什么要单独一个套件：这一层是「内核 ↔ 面板」之间唯一的新协议面，
- * 而它的输入有一半来自**用户可配**的东西（`read-only` 那几个是内置的，
- * `auto-approval` 是插件加的，用户还能自己加预设）。所以这里焊住的是
- * 「不管内核给什么形状，回给客户端的形状都是定的」，以及
- * 「三种失败（门不认识的方法 / 没有权限服务 / 参数不对）各有各的话」。
+ * 单独设置一个套件的原因：这一层是「内核 ↔ 面板」之间唯一的新协议面，
+ * 且其输入有一半来自**用户可配**的内容（`read-only` 那几个是内置的，
+ * `auto-approval` 是插件加的，用户还能自行添加预设）。因此这里固定的是
+ * 「无论内核给出的形状如何，返回给客户端的形状都是确定的」，以及
+ * 「各类失败各有各的码、各有各的说明（该插件不支持的方法 / 没有权限服务 / 参数不对 /
+ * 选项名不存在 / 会话不存在）—— 客户端依照码处理，不依赖原始文本推测」。
  */
 import {
+  DOOR_ERR_NO_SESSION,
+  DOOR_ERR_OTHER,
+  DOOR_ERR_UNKNOWN_PRESET,
   DOOR_PERMISSION_PREFIX,
   MAX_PERMISSION_OPTIONS,
   PERMISSION_GET_METHOD,
   PERMISSION_SET_METHOD,
+  doorErrorCode,
   doorPermissionError,
   doorPermissionMethod,
   doorPermissionResult,
   isDoorPermissionRequest,
   normalizePermissionOptions,
+  permissionError,
   permissionPayload,
   permissionTarget,
   settledPermission,
@@ -39,13 +45,13 @@ function section(title) {
   console.log(`\n── ${title} ───────────────────────────────────────`);
 }
 
-section('1. 认出「这是门的权限方法」');
+section('1. 认出「这是该插件的权限方法」');
 {
   const get = { jsonrpc: '2.0', id: 1, method: PERMISSION_GET_METHOD, params: { id: 's1' } };
   const set = { jsonrpc: '2.0', id: 2, method: PERMISSION_SET_METHOD, params: { id: 's1', value: 'read-only' } };
   check('get 认出来了', isDoorPermissionRequest(get) && doorPermissionMethod(get) === 'get');
   check('set 认出来了', isDoorPermissionRequest(set) && doorPermissionMethod(set) === 'set');
-  check('通知（没有 id）不算请求 —— 门只应答请求',
+  check('通知（没有 id）不算请求 —— 该插件只应答请求',
     !isDoorPermissionRequest({ method: PERMISSION_GET_METHOD }));
   check('内核自己的方法不算（别抢人家的）',
     !isDoorPermissionRequest({ id: 3, method: 'session/set_config_option' }) &&
@@ -64,7 +70,7 @@ section('2. 参数：谁、切成什么');
     JSON.stringify(permissionTarget('set', { id: 'abc', value: 'danger-full-access' })) ===
       '{"sessionId":"abc","value":"danger-full-access"}');
   check('set 少一个就说少一个', permissionTarget('set', { id: 'abc' }).value === undefined);
-  check('空字符串不算（别拿 "" 去切）',
+  check('空字符串不算（不得用 "" 去切）',
     permissionTarget('set', { id: 'abc', value: '' }).value === undefined &&
       permissionTarget('get', { id: '' }).sessionId === undefined);
   check('params 整个缺失也不炸', JSON.stringify(permissionTarget('get', undefined)) === '{}');
@@ -85,7 +91,7 @@ section('3. 洗内核给的选项');
     { value: 42, name: 'value 不是字符串' },
   ]);
   check('只留能用的（有 value 的）', cleaned.length === 4, JSON.stringify(cleaned));
-  check('缺 name 用 value 顶上（跟内核一样的兜底）',
+  check('缺 name 用 value 顶上（与内核相同的后备行为）',
     cleaned[0].name === 'read-only' && cleaned[3].name === 'x',
     JSON.stringify(cleaned.map((item) => item.name)));
   check('description 空串不带上（空的不算说明）', !('description' in cleaned[2]));
@@ -93,7 +99,7 @@ section('3. 洗内核给的选项');
   check('不是数组 → 空清单（不抛）',
     normalizePermissionOptions(undefined).length === 0 &&
       normalizePermissionOptions({ value: 'x' }).length === 0);
-  check('离谱长的表会被截断（有个上限，别把 webview 撑爆）',
+  check('超长的表会被截断（有上限，避免 webview 负载过大）',
     normalizePermissionOptions(Array.from({ length: 200 }, (_, i) => ({ value: `p${i}` }))).length ===
       MAX_PERMISSION_OPTIONS);
 }
@@ -133,6 +139,33 @@ section('6. 应答帧的形状');
       '{"jsonrpc":"2.0","id":9,"error":{"code":-32601,"message":"没有"}}');
   check('错误码用 JSON-RPC 的约定（方法不存在 -32601 / 参数不对 -32602 / 其它 -32000）',
     doorPermissionError(1, -32602, '').error.code === -32602);
+}
+
+section('7. 失败要分档：客户端照着码说话，不去猜中文原话');
+{
+  /*
+   * 本节的由来：此前「选项名不存在」与「会话找不到」都返回 -32000，客户端只能对该插件的
+   * 中文原始文本做正则匹配来决定应答内容 —— 该插件改动措辞后，客户端即分档错误，用户
+   * 得到的原因说明也随之错误（表现见 2026-09-21 的 bug 清单：点 custom 报「读不到当前权限」）。
+   */
+  check('三个码齐了，而且是三个不同的数',
+    DOOR_ERR_OTHER === -32000 && DOOR_ERR_UNKNOWN_PRESET === -32002 && DOOR_ERR_NO_SESSION === -32003 &&
+      new Set([DOOR_ERR_OTHER, DOOR_ERR_UNKNOWN_PRESET, DOOR_ERR_NO_SESSION]).size === 3,
+    [DOOR_ERR_OTHER, DOOR_ERR_UNKNOWN_PRESET, DOOR_ERR_NO_SESSION].join(','));
+  check('不与 JSON-RPC 自身的约定冲突（-32601 / -32602 / -32700 那几个）',
+    ![DOOR_ERR_OTHER, DOOR_ERR_UNKNOWN_PRESET, DOOR_ERR_NO_SESSION].some((code) =>
+      [-32600, -32601, -32602, -32700, -32701].includes(code)));
+  const unknown = permissionError(DOOR_ERR_UNKNOWN_PRESET, 'permission: unknown preset "gone" (known: read-only)');
+  check('打标的异常带得走码', doorErrorCode(unknown) === DOOR_ERR_UNKNOWN_PRESET);
+  check('内核原话一个字不改地留着（可用清单就在里面，日志与排障要靠它）',
+    /unknown preset "gone"/.test(unknown.message) && /known: read-only/.test(unknown.message),
+    unknown.message);
+  check('未标记的异常落到 -32000（不猜测为别的档）',
+    doorErrorCode(new Error('别的问题')) === DOOR_ERR_OTHER);
+  check('垃圾输入不炸', doorErrorCode(undefined) === DOOR_ERR_OTHER &&
+    doorErrorCode(null) === DOOR_ERR_OTHER && doorErrorCode({}) === DOOR_ERR_OTHER);
+  check('错误帧带着这个码发出去',
+    doorPermissionError(1, DOOR_ERR_NO_SESSION, '').error.code === DOOR_ERR_NO_SESSION);
 }
 
 console.log(`\n${'═'.repeat(56)}`);

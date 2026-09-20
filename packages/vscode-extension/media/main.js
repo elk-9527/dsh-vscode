@@ -1,10 +1,10 @@
 /*
- * DSH Panel 的界面逻辑（跑在 webview 里）。
+ * DSH Panel 的界面逻辑（运行于 webview 中）。
  *
- * 三条自我约束：
- * 1. 零依赖 —— 包括 Markdown 渲染，自己写一个够用的小子集，不引第三方库；
- * 2. 只做增量更新 —— 流式吐字时只改当前那条消息，绝不整体重绘；
- * 3. 用户滚上去看历史时，**不要**把他拽回底部（很多聊天界面在这里很烦人）。
+ * 三条约束：
+ * 1. 零依赖：包括 Markdown 渲染在内，只实现满足需要的小型子集，不引入第三方库；
+ * 2. 只做增量更新：流式输出时只修改当前消息，不整体重绘；
+ * 3. 用户向上滚动查看历史时，不得将其拉回底部。
  */
 (function () {
   'use strict';
@@ -56,39 +56,39 @@
     /** @type {Map<string, object>} */
     messages: new Map(),
     busy: false,
-    /** 用户是否贴在底部（决定要不要自动滚动）。 */
+    /** 用户是否停留在底部（决定是否自动滚动）。 */
     pinned: true,
     configOptions: [],
-    /** 门报过来的预设清单有没有内容（决定配置行要不要露出来）。 */
+    /** 该插件提供的预设清单是否有内容（决定配置行是否显示）。 */
     hasPresets: false,
     /**
-     * 权限那一路有没有东西可显示（清单，或者一句「为什么切不了」）。
+     * 权限相关数据是否有内容可显示（清单，或一句「为什么无法切换」）。
      *
-     * 跟 hasPresets 一样只用来决定配置行露不露 —— 没权限信息时别在顶栏
-     * 挂一个空的「权限」按钮。
+     * 与 hasPresets 相同，仅用于决定配置行是否显示：无权限信息时不应在顶栏
+     * 显示空的「权限」按钮。
      */
     hasPermission: false,
     /**
-     * 当前权限与可选项（扩展那边已经翻好中文标签，见 src/dsh/permission.js）。
+     * 当前权限与可选项（扩展侧已完成中文标签转换，见 src/dsh/permission.js）。
      * @type {{currentValue: string, options: Array<object>}|undefined}
      */
     permission: undefined,
     /**
-     * 正在等用户确认的那一项（「完全权限」要先过一道确认门）。
+     * 等待用户确认的选项（「完全权限」需先经过一次确认）。
      * @type {object|undefined}
      */
     pendingAccess: undefined,
     /**
-     * 挂着的编辑器上下文（当前文件 / 选中的代码），随下一条消息一起发出去。
+     * 已挂载的编辑器上下文（当前文件 / 选中的代码），随下一条消息一并发送。
      *
-     * 这份清单由界面自己管：扩展只负责把编辑器里的东西送进来（`attach`），
-     * 摘掉、清空都在本地完成 —— 不需要为这种事来回通信。
+     * 该清单由界面自身维护：扩展只负责将编辑器中的内容送入（`attach`），
+     * 移除与清空均在本地完成，无需为此往返通信。
      * @type {Array<object>}
      */
     attachments: [],
   };
 
-  /** entry → 'body' | 'think'，攒着待渲染的内容。 */
+  /** entry → 'body' | 'think'，暂存待渲染的内容。 */
   const pendingRenders = new Map();
   let flushScheduled = false;
 
@@ -104,7 +104,7 @@
     try {
       handle(message);
     } catch (error) {
-      // 界面出错绝不能让消息循环停掉，否则后面全静默。
+      // 界面出错不得中断消息循环，否则后续处理将全部静默失败。
       showHint(`界面出错：${error && error.message ? error.message : error}`, true);
     }
   });
@@ -182,11 +182,11 @@
   // ── 顶部状态 ────────────────────────────────────────
 
   /**
-   * 顶栏状态只放**短状态**：它是一条很窄的行，塞进去的每个字都会挤掉别的东西。
+   * 顶栏状态只承载**短状态**：该行很窄，多出的字符会挤占其他内容。
    *
-   * 这里做一道防守：万一哪天又有一条长文案走到 status（报错、多行诊断），
-   * 也只显示第一行、并截到 24 个字 —— 完整内容挂在悬浮提示上，一个字都没丢。
-   * 报错本身应该走 `error` 消息进对话流（那才是能读长文的地方）。
+   * 此处设有防护：若有长文案进入 status（报错、多行诊断），
+   * 也只显示第一行并截断至 24 个字符；完整内容保留在悬浮提示中，不丢失任何字符。
+   * 报错本身应通过 `error` 消息进入对话流（对话流才是可阅读长文本的位置）。
    */
   function shortStatus(text) {
     const first = String(text || '').split('\n')[0].trim();
@@ -202,7 +202,7 @@
       el.statusText.textContent = shortStatus(text) || '就绪';
     } else if (kind === 'busy') {
       el.statusDot.classList.add('busy');
-      el.statusText.textContent = shortStatus(text) || '工作中…';
+      el.statusText.textContent = shortStatus(text) || '正在处理…';
     } else if (kind === 'error') {
       el.statusDot.classList.add('err');
       el.statusText.textContent = shortStatus(text) || '未连接';
@@ -213,7 +213,7 @@
     if (kind === 'ready' || kind === 'busy') syncConfigRow();
   }
 
-  /** 配置行只在真有东西可调时才露出来（有模型下拉，或有模式/权限）。 */
+  /** 配置行仅在存在可调项（模型下拉，或模式/权限）时显示。 */
   function syncConfigRow() {
     el.configRow.hidden =
       state.configOptions.length === 0 && !state.hasPresets && !state.hasPermission;
@@ -230,14 +230,14 @@
     el.stop.hidden = !busy;
     el.input.disabled = false;
     if (!busy) el.input.focus();
-    // 回合开始/结束驱动顶栏的时间戳和耗时。
+    // 回合开始与结束驱动顶栏的时间戳与耗时显示。
     if (busy) startTurnClock();
     else stopTurnClock();
   }
 
   // ── 顶栏元信息：工作目录、回合时间戳/耗时 ─────────────
 
-  /** 工作目录只显示尾部两段（太长的路径顶栏放不下），完整路径放在悬浮提示里。 */
+  /** 工作目录只显示末尾两段（过长的路径顶栏放不下），完整路径置于悬浮提示中。 */
   function setWorkdir(cwd) {
     if (!cwd || typeof cwd !== 'string') return;
     const parts = cwd.split(/[\\/]/).filter(Boolean);
@@ -249,7 +249,7 @@
 
   let turnClockTimer = 0;
 
-  /** 回合开始：记下起始时间，顶栏显示「开始时刻 · 已耗时」，每 200ms 刷新。 */
+  /** 回合开始：记录起始时间，顶栏显示「开始时刻 · 已耗时」，每 200ms 刷新一次。 */
   function startTurnClock() {
     stopTurnClock();
     const started = Date.now();
@@ -263,10 +263,10 @@
   }
 
   /**
-   * 停掉计时。
+   * 停止计时。
    *
-   * 回合正常结束时**保留**最后的显示 —— 「这个回合是什么时候开始、花了多久」
-   * 是回头看记录时有用的信息；只有新建对话（reset）才把显示清掉。
+   * 回合正常结束时**保留**最后的显示内容：「本回合何时开始、耗时多久」
+   * 在回看记录时有用；只有新建对话（reset）才清除该显示。
    */
   function stopTurnClock() {
     if (turnClockTimer) {
@@ -290,18 +290,18 @@
   // ── 历史会话 ────────────────────────────────────────
 
   /**
-   * 打开/关闭历史浮层。打开时总是重新拉清单 —— 会话记录随时在变，
-   * 缓存一份只会让人看到旧数据。
+   * 打开/关闭历史浮层。打开时始终重新获取清单：会话记录随时变化，
+   * 缓存会导致显示旧数据。
    *
-   * 焦点要跟着走：浮层盖住整个面板，打开后焦点若还留在底下那些**看不见**的
-   * 控件上，键盘用户按 Tab 就会在空气里游走。所以打开时把焦点交给关闭按钮
-   * （浮层里第一个能操作的东西），关掉时还回那个历史按钮 —— 不还的话焦点会
-   * 掉到 body 上，用户就"丢"了位置。
+   * 焦点需要随之移动：浮层覆盖整个面板，若打开后焦点仍停留在其下方**不可见**的
+   * 控件上，使用键盘的用户按 Tab 会在不可见区域之间移动。因此打开时将焦点交给
+   * 关闭按钮（浮层中第一个可操作元素），关闭时交回历史按钮；否则焦点会落到
+   * body 上，用户将失去当前位置。
    */
   function toggleHistory(open) {
     const show = open === undefined ? el.historyPanel.hidden : open;
-    // 藏之前先记住焦点在不在浮层里：元素一旦 hidden，焦点会自动掉到 body，
-    // 那时再查就永远是 false 了。
+    // 隐藏前先记录焦点是否位于浮层内：元素一旦 hidden，焦点会自动落到 body，
+    // 届时再查询将始终为 false。
     const focusWasInside = el.historyPanel.contains(document.activeElement);
     el.historyPanel.hidden = !show;
     el.historyBtn.setAttribute('aria-expanded', show ? 'true' : 'false');
@@ -319,7 +319,7 @@
     if (focusWasInside) el.historyBtn.focus();
   }
 
-  /** 会话时间显示：当年的只显示「月-日 时:分」，往年的带上年份。 */
+  /** 会话时间显示：当年的仅显示「月-日 时:分」，非当年的附带年份。 */
   function fmtSessionTime(ms) {
     if (!Number.isFinite(ms) || ms <= 0) return '';
     const d = new Date(ms);
@@ -329,7 +329,7 @@
     return d.getFullYear() === now.getFullYear() ? hm : `${d.getFullYear()}-${hm}`;
   }
 
-  /** 工作目录只留尾部一段，列表里够认就行。 */
+  /** 工作目录只保留末尾一段，在列表中足以辨认。 */
   function tailPath(cwd) {
     if (typeof cwd !== 'string' || !cwd) return '';
     const parts = cwd.split(/[\\/]/).filter(Boolean);
@@ -337,14 +337,14 @@
   }
 
   /**
-   * 渲染历史清单（或错误 —— 门太旧、读盘失败都要在这一层说清楚）。
+   * 渲染历史清单（或错误 —— 插件版本过低、读盘失败均需在此层说明）。
    */
   function renderHistory(message) {
-    if (el.historyPanel.hidden) return; // 用户已经关掉了，别又把浮层撑开
+    if (el.historyPanel.hidden) return; // 用户已关闭，不再重新展开浮层
     el.historyList.textContent = '';
     if (message.error) {
-      // 读失败**不用** .history-empty：那套居中灰字是"这里什么都没有"的语气，
-      // 拿它报错会被当成"没有历史会话"，而这两种情况的出路完全不一样。
+      // 读取失败**不使用** .history-empty：该套居中灰字表达「此处无内容」，
+      // 用于报错会被理解为「没有历史会话」，而这两种情况的处理方式完全不同。
       const box = document.createElement('div');
       box.className = 'history-error';
       box.setAttribute('role', 'alert');
@@ -354,14 +354,14 @@
     }
     const sessions = Array.isArray(message.sessions) ? message.sessions : [];
     if (message.skipped > 0) {
-      el.historyMeta.textContent = `最近 ${sessions.length} 段（更早的 ${message.skipped} 段没列出）`;
+      el.historyMeta.textContent = `最近 ${sessions.length} 段（更早的 ${message.skipped} 段未列出）`;
     } else {
       el.historyMeta.textContent = sessions.length ? `共 ${sessions.length} 段` : '';
     }
     if (sessions.length === 0) {
       const box = document.createElement('div');
       box.className = 'history-empty';
-      box.textContent = '还没有历史会话。';
+      box.textContent = '暂无历史会话。';
       el.historyList.appendChild(box);
       return;
     }
@@ -400,7 +400,7 @@
     const replayBtn = document.createElement('button');
     replayBtn.type = 'button';
     replayBtn.textContent = '回放';
-    replayBtn.title = '看这段对话的内容（不接回上下文）';
+    replayBtn.title = '查看这段对话的内容（不接回上下文）';
     replayBtn.addEventListener('click', () => {
       post({ type: 'historyOpen', id: card.id });
     });
@@ -408,7 +408,7 @@
     const resumeBtn = document.createElement('button');
     resumeBtn.type = 'button';
     resumeBtn.textContent = '接回';
-    resumeBtn.title = '回放这段对话，并试着把上下文接回来继续聊';
+    resumeBtn.title = '回放这段对话，并尝试接回上下文继续对话';
     resumeBtn.addEventListener('click', () => {
       post({ type: 'historyResume', id: card.id });
     });
@@ -418,17 +418,17 @@
   }
 
   /**
-   * 渲染回放：按当年发生的样子重建转录（用户消息、它的回答、工具卡）。
+   * 渲染回放：按当时的内容重建转录（用户消息、助手回答、工具卡片）。
    *
-   * 工具卡复用 upsertTool：它默认折叠、点开看详情，跟实时对话里一模一样。
-   * 回放是静态的 —— 没有流式光标，也不动画，一眼能看出「这是历史」。
+   * 工具卡片复用 upsertTool：默认折叠、展开后显示详情，与实时对话一致。
+   * 回放为静态内容：没有流式光标，也没有动画，可直接识别为历史内容。
    *
-   * 两处刻意的顺序选择：
-   * - **「这是回放」那句话放在开头**，不放结尾。它要防的是一件真会出事的事：
-   *   用户对着历史内容直接打字，以为在跟那段上下文说话。放在结尾意味着要先
-   *   滚到底才看得见 —— 而这句提示越早出现越好。它同时也是这份转录的标题。
-   * - **停在开头**，不滚到底。回放是拿来读的，读的顺序就是从第一句开始；
-   *   落在底部等于让人从最后一句倒着看。实时对话才需要跟到底部。
+   * 两处有意设定的顺序：
+   * - **「这是回放」一句置于开头**，而非结尾。它用于防止一种实际会发生的情况：
+   *   用户直接对历史内容输入，误以为在与该段上下文对话。置于结尾则需要先滚动
+   *   到底部才能看到，而该提示越早出现越好；它同时也是这份转录的标题。
+   * - **停留在开头**，不滚动到底部。回放用于阅读，阅读顺序自第一句开始；
+   *   停在底部等同于从最后一句倒序阅读。只有实时对话才需要跟随到底部。
    */
   function renderReplay(message) {
     toggleHistory(false);
@@ -436,7 +436,7 @@
     el.messages.textContent = '';
     el.permission.hidden = true;
     el.empty.hidden = true;
-    // 不复用 scrollToBottom：那个会把 pinned 设成 true 并拽到底部。
+    // 不复用 scrollToBottom：该函数会将 pinned 设为 true 并滚动到底部。
     state.pinned = false;
 
     const card = message.card || {};
@@ -465,14 +465,14 @@
         continue;
       }
       if (item.kind === 'tool') {
-        // 挂到最近一条助手消息里（跟实时对话同构：工具是回答的一部分），
-        // 而不是平铺在消息区顶层 —— 那样消息间距会被撑得忽大忽小。
+        // 挂到最近一条助手消息内（与实时对话结构一致：工具是回答的一部分），
+        // 而非平铺在消息区顶层，否则消息间距会大小不一。
         if (state.messages.has(lastAssistantId)) {
           upsertTool(lastAssistantId, {
             toolCallId: `replay-t${i}`,
             kind: 'other',
-            // 工具名在门给的条目里是单独一个字段（不在 args 里），
-            // 而 toolName 只认 rawInput.tool / rawInput.name —— 拼进去。
+            // 工具名在该插件提供的条目中是独立字段（不在 args 内），
+            // 而 toolName 只识别 rawInput.tool / rawInput.name，因此在此合并。
             rawInput: { tool: item.name, ...(item.args && typeof item.args === 'object' ? item.args : {}) },
             content: item.output ? [{ type: 'text', text: item.output }] : [],
             status: 'completed',
@@ -482,8 +482,8 @@
     }
 
     el.messages.scrollTop = 0;
-    // 焦点移到转录区（它本身 tabindex=0）：接着按 Tab 就从第一段内容开始，
-    // 而不是从面板顶栏的那个历史按钮开始。preventScroll 保住上面的"停在开头"。
+    // 焦点移至转录区（该元素 tabindex=0）：后续按 Tab 从第一段内容开始，
+    // 而非从面板顶栏的历史按钮开始。preventScroll 用于保持上述「停留在开头」。
     try {
       el.messages.focus({ preventScroll: true });
       el.messages.scrollTop = 0;
@@ -494,8 +494,8 @@
 
   function truncatedReplayNote(head, truncated) {
     return truncated
-      ? `${head}。这份转录太长，只回放了靠前的部分 —— 以下是回放，不是实时对话。`
-      : `${head}。以下是回放，不是实时对话；对着它打字不会回到那段上下文里。`;
+      ? `${head}。该转录过长，仅回放了靠前的部分 —— 以下为回放内容，非实时对话。`
+      : `${head}。以下为回放内容，非实时对话；在此输入不会接入该段上下文。`;
   }
 
   // ── 转录区 ──────────────────────────────────────────
@@ -510,7 +510,7 @@
     el.permission.hidden = true;
     el.meter.hidden = true;
     el.usageInline.textContent = '';
-    // 新对话是新的开始，上一回合的「开始时刻 · 耗时」不再有意义。
+    // 新建对话即新的开始，上一回合的「开始时刻 · 耗时」不再具有意义。
     stopTurnClock();
     el.barClock.hidden = true;
     state.pinned = true;
@@ -526,12 +526,12 @@
   }
 
   /**
-   * 无条件滚到底部 —— 只用在"用户自己刚做了动作"的地方。
+   * 无条件滚动到底部 —— 仅用于「用户刚刚执行了操作」的位置。
    *
-   * 为什么需要它：如果你正在往回翻记录，然后自己发了一句，光靠 scrollIfPinned
-   * 是**不会**跟下去的（那时 pinned 已经是 false），结果你既看不见自己刚发的话、
-   * 也看不见它开始回答 —— 得自己再滚到底。别的聊天界面在这种情况下都会跟着走，
-   * 因为这是你自己的动作。它自己的输出则继续守"别把人拽回去"的规矩。
+   * 需要该函数的原因：若用户正在向上翻阅记录，然后自行发送一条消息，
+   * 仅靠 scrollIfPinned **不会**跟随到底部（此时 pinned 已为 false），
+   * 结果是既看不到刚发送的消息，也看不到回答的开始，需要再次手动滚动到底部。
+   * 这是用户自身的操作，因此需要跟随。助手自身的输出仍遵守「不将用户拉回底部」。
    */
   function scrollToBottom() {
     state.pinned = true;
@@ -553,7 +553,7 @@
     wrap.className = 'msg msg-user';
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
-    // 这条消息带了哪些上下文，气泡里也要看得出 —— 否则回头看对话记录会莫名其妙。
+    // 该消息携带了哪些上下文需在气泡中可见，否则回看对话记录时无法判断。
     const list = Array.isArray(attachments) ? attachments.filter(Boolean) : [];
     if (list.length > 0) bubble.appendChild(chipRow(list, { removable: false }));
     if (text && text.trim()) {
@@ -564,17 +564,17 @@
     }
     wrap.appendChild(bubble);
     appendNode(wrap);
-    // 你自己发的消息，视图一定跟到底部（见上面 scrollToBottom 的说明）。
+    // 用户自身发送的消息，视图一定跟随到底部（见上文 scrollToBottom 的说明）。
     scrollToBottom();
   }
 
   // ── 编辑器上下文（附件）──────────────────────────────
 
   /**
-   * 挂上一批附件（扩展从编辑器那边送过来的）。
+   * 挂载一批附件（由扩展从编辑器侧送入）。
    *
-   * 同名的（同一个文件/同一段选区）只留一个：连按两次"把当前文件带进来"，
-   * 用户想要的是一个，不是两个。
+   * 同名项（同一文件/同一段选区）只保留一个：连续两次执行「把当前文件带进来」，
+   * 用户期望的结果是一个，而非两个。
    */
   function addAttachments(items) {
     const list = (Array.isArray(items) ? items : [items]).filter(Boolean);
@@ -590,7 +590,7 @@
     if (added > 0) {
       el.input.focus();
       const last = state.attachments[state.attachments.length - 1];
-      showHint(`已带上：${last.detail || last.name}`, false);
+      showHint(`已附加：${last.detail || last.name}`, false);
     }
   }
 
@@ -602,15 +602,15 @@
   function renderAttachments() {
     el.attachments.textContent = '';
     const list = state.attachments;
-    // 用 hidden 属性控制显示，同时靠 CSS 里的 [hidden] 规则压住 display:flex ——
-    // 这个坑踩过一次（空用量条常显），别再踩。
+    // 使用 hidden 属性控制显示，并依靠 CSS 中的 [hidden] 规则覆盖 display:flex：
+    // 该问题曾出现过一次（空的用量条常显），不应重复。
     el.attachments.hidden = list.length === 0;
     if (list.length === 0) return;
     el.attachments.appendChild(chipRow(list, { removable: true }));
   }
 
   /**
-   * 做一排"上下文小块"。
+   * 生成一排「上下文小块」。
    *
    * @param {Array<object>} list
    * @param {{removable: boolean}} options
@@ -625,7 +625,7 @@
 
       const icon = document.createElement('span');
       icon.className = 'chip-icon';
-      // 选区用一个"选中"的方块，文件用文件图标，一眼能分出这两类。
+      // 选区使用「选中」方块，文件使用文件图标，可直接区分这两类。
       icon.textContent = item.kind === 'selection' ? '❯' : '📄';
       icon.setAttribute('aria-hidden', 'true');
       chip.appendChild(icon);
@@ -646,8 +646,8 @@
         const close = document.createElement('button');
         close.type = 'button';
         close.className = 'chip-close';
-        close.title = '拿掉';
-        close.setAttribute('aria-label', `拿掉 ${item.name || ''}`);
+        close.title = '移除';
+        close.setAttribute('aria-label', `移除 ${item.name || ''}`);
         close.textContent = '×';
         close.addEventListener('click', () => removeAttachment(item.id));
         chip.appendChild(close);
@@ -689,7 +689,7 @@
   function textMessage(id) {
     const entry = state.messages.get(id);
     if (entry) return entry;
-    // 内核有可能在我们建好消息之前就吐字（极短的回合），兜一下。
+    // 内核可能在消息建立之前就开始输出（极短回合），因此在此回退。
     addAssistant(id);
     return state.messages.get(id);
   }
@@ -708,11 +708,12 @@
   }
 
   /**
-   * 攒到下一帧统一渲染：流式吐字时每个 chunk 都改 DOM 会卡。
+   * 累积到下一帧统一渲染：流式输出时逐个 chunk 修改 DOM 会造成卡顿。
    *
-   * 这里必须**双重兜底**：正常情况用 requestAnimationFrame（跟屏幕刷新对齐，
-   * 看着最顺滑），但面板被折叠或隐藏时浏览器会把 rAF 完全停掉 —— 只靠 rAF
-   * 的话，后台跑完的回合会一直不显示，要等用户切回来看才补上。定时器兜住它。
+   * 此处需要**双重后备**：正常情况下使用 requestAnimationFrame（与屏幕刷新对齐，
+   * 显示最平滑），但面板被折叠或隐藏时浏览器会完全停止 rAF；
+   * 仅依赖 rAF 时，后台完成的回合将一直不显示，直到用户切回才补上。
+   * 因此由定时器作为后备。
    */
   function scheduleRender(entry, which) {
     pendingRenders.set(entry, which);
@@ -729,7 +730,7 @@
     }
     flushScheduled = false;
     for (const [entry, which] of pendingRenders) {
-      // 已经收尾的条目不再补渲染，否则会把光标又画回去。
+      // 已结束的条目不再补充渲染，否则会重新绘制光标。
       if (entry.finished) continue;
       if (which === 'body') entry.body.innerHTML = renderMarkdown(entry.text) + caret();
       else if (which === 'think') entry.thinkBody.textContent = entry.thinkText;
@@ -765,18 +766,17 @@
   /**
    * 显示一条错误。
    *
-   * `human` 是扩展那边翻好的「人话」（`src/dsh/errors.js`）：一句话说清
-   * 发生了什么、一句话说你能做什么。**内核原文永远跟在后面显示**，一个字
-   * 都不删 —— 人话是为了让人一眼看懂，不是为了让信息消失；认不出来的错误
-   * 更是只能靠原文。
+   * `human` 是扩展侧生成的用户可读说明（`src/dsh/errors.js`）：一句说明发生了什么，
+   * 一句说明可以做什么。**内核原文始终跟随其后显示**，不删除任何字符：
+   * 说明用于让用户直接理解，而非让信息消失；无法识别的错误更只能依靠原文。
    *
-   * `human` 缺失时（例如消息来自别处）退回只显示原文，行为跟以前一样。
+   * `human` 缺失时（例如消息来自其他来源）退回为只显示原文，行为与之前一致。
    */
   function addError(text, human) {
     const div = document.createElement('div');
     div.className = 'msg msg-error';
     if (!human || !human.title) {
-      // 认不出来的错误：原文就是全部信息，直接摊开，不能藏在折叠里。
+      // 无法识别的错误：原文即为全部信息，直接展开显示，不放入折叠区。
       div.textContent = text;
       appendNode(div);
       return;
@@ -795,14 +795,14 @@
     const raw = document.createElement('pre');
     raw.className = 'err-raw';
     raw.textContent = rawText;
-    // 人话已经说清了「发生了什么 + 怎么办」时，内核原文收进折叠里：
-    // 它常常是几十行 JSON，摊开就把对话框变成日志窗口了。
-    // **一个字都没删** —— 点开就是原文，复制也用它。
+    // 说明已包含「发生了什么 + 如何处理」时，内核原文收进折叠区：
+    // 它通常是数十行 JSON，展开会使对话框等同于日志窗口。
+    // **未删除任何字符** —— 展开即为原文，复制也使用它。
     if (rawText && rawText.length > 120) {
       const fold = document.createElement('details');
       fold.className = 'err-raw-fold';
       const summary = document.createElement('summary');
-      summary.textContent = '原始报错（点开）';
+      summary.textContent = '原始报错（展开）';
       fold.appendChild(summary);
       fold.appendChild(raw);
       div.appendChild(fold);
@@ -815,9 +815,9 @@
   /**
    * 一条居中的系统提示。
    *
-   * 用在「有事发生了但不算错误」的地方，最要紧的一处是：断线后上下文
-   * 没能接回来时，必须让用户看见「上面那段它不记得了」—— 否则他会以为
-   * 它还记着，然后为它的「失忆」困惑半天。
+   * 用于「发生了事件但不属于错误」的场景，其中最重要的一处是：断线后上下文未能
+   * 接回时，必须让用户看到「上文内容已不被记住」的提示，否则用户会认为上下文
+   * 仍然保留，并对后续行为产生困惑。
    */
   function addNotice(text) {
     const wrapper = document.createElement('div');
@@ -854,7 +854,7 @@
       head.appendChild(status);
       const body = document.createElement('div');
       body.className = 'tool-body';
-      // 折叠动画包一层 grid（见 main.css 里 .tool-fold 的说明）。
+      // 折叠动画外包裹一层 grid（见 main.css 中 .tool-fold 的说明）。
       const fold = document.createElement('div');
       fold.className = 'tool-fold';
       fold.appendChild(body);
@@ -918,7 +918,7 @@
     }
   }
 
-  /** 把工具的输出（ACP 的 content 数组）拍成纯文本。 */
+  /** 将工具输出（ACP 的 content 数组）转换为纯文本。 */
   function contentToText(content) {
     if (!content) return '';
     if (typeof content === 'string') return content;
@@ -941,7 +941,7 @@
     const input = tool.rawInput || {};
     const chunks = [];
 
-    // 编辑类工具：把 old/new 渲染成一个紧凑的差异视图。
+    // 编辑类工具：将 old/new 渲染为紧凑的差异视图。
     if (typeof input.old_string === 'string' || typeof input.new_string === 'string') {
       chunks.push(renderDiff(input.old_string || '', input.new_string || ''));
     } else if (input && Object.keys(input).length) {
@@ -953,7 +953,7 @@
     return chunks.join('') || '<span class="msg-note">（暂无输出）</span>';
   }
 
-  /** 逐行差异：只标出「删掉的行」和「加上的行」，不做行内对齐（够用且快）。 */
+  /** 逐行差异：只标注「删除的行」与「新增的行」，不做行内对齐（满足需要且开销低）。 */
   function renderDiff(oldText, newText) {
     const oldLines = oldText ? oldText.split('\n') : [];
     const newLines = newText ? newText.split('\n') : [];
@@ -1023,11 +1023,11 @@
   }
 
   /**
-   * 渲染「模式」下拉（agent preset）。
+   * 渲染「模式」下拉框（agent preset）。
    *
-   * 这份清单不是扩展里写死的，是门问内核要来的（`agentPresets.list()`），
-   * 所以你在 $DSH_HOME/.agent-presets/ 里自己写的预设也会出现在这里。
-   * 换它的语义是「下一段新对话用哪个模式」—— 内核不允许一段对话中途换预设。
+   * 该清单并非在扩展中写死，而是由该插件向内核获取（`agentPresets.list()`），
+   * 因此用户在 $DSH_HOME/.agent-presets/ 中自行编写的预设也会出现在此处。
+   * 该项的语义是「下一段新对话使用哪个模式」：内核不允许在对话进行中更换预设。
    */
   function setPresets(message) {
     const presets = Array.isArray(message.presets) ? message.presets : [];
@@ -1048,7 +1048,7 @@
         }
         el.presetSelect.appendChild(opt);
       }
-      // 当前用的那个不在清单里（比如清单刚被改过）也要显示出来，不能显示成别的。
+      // 当前使用的项不在清单中时（例如清单刚被修改）也需显示，不得显示为其他项。
       if (!matched && current) {
         const opt = document.createElement('option');
         opt.value = current;
@@ -1075,11 +1075,11 @@
   // ── 权限选择器 ──────────────────────────────────────
 
   /**
-   * 权限那一路的新状态（清单 + 当前值，或一句「为什么切不了」）。
+   * 权限相关的新状态（清单 + 当前值，或一句「为什么无法切换」）。
    *
-   * 关键的一条：**清单不是我写死的**，是内核给的（门 0.0.12 转出来）。
-   * 所以用户装了 Auto Approval 那种插件、或者自己在档里加了预设，
-   * 这里会跟着多出来 —— 跟桌面端那份是同一个真源。
+   * 关键一条：**清单并非写死**，而是由内核提供（该插件 0.0.12 转出）。
+   * 因此用户安装 Auto Approval 等插件，或在档中添加预设后，此处会随之增加，
+   * 与桌面端使用同一数据源。
    */
   function setPermissionState(message) {
     if (message.unavailable) {
@@ -1088,9 +1088,9 @@
       state.hasPermission = true;
       closeAccessPop();
       const why = shortAccessReason(message.unavailable.state);
-      // 顶栏这一格很窄（旁边还有模型、模式、用量），写「切不了（门太旧）」会被
-      // 切掉一半 —— 理由放在悬浮提示和对话流里（那里一个字不少），这里只留结论。
-      el.accessBtn.textContent = '切不了';
+      // 顶栏该区域较窄（相邻还有模型、模式、用量），早期的「不可切换（门过旧）」
+      // 会被截断，因此只写入「不可切换」：原因置于悬浮提示与对话流中（内容完整）。
+      el.accessBtn.textContent = '不可切换';
       el.accessBtn.dataset.why = why;
       el.accessBtn.title = accessTitle(message.unavailable);
       el.accessBtn.disabled = true;
@@ -1100,7 +1100,7 @@
     }
     const options = Array.isArray(message.options) ? message.options : [];
     if (!message.currentValue && options.length === 0) {
-      // 内核没给任何权限信息（比如门干脆没这个服务）：别挂一个空按钮。
+      // 内核未提供任何权限信息（例如该插件没有该服务）：不显示空按钮。
       state.permission = undefined;
       state.permissionUnavailable = undefined;
       state.hasPermission = false;
@@ -1125,23 +1125,26 @@
   }
 
   /**
-   * 切不了的原因，压缩成几个字。
+   * 无法切换的原因，压缩为几个字。
    *
-   * 注意：**不再写在按钮上**（那一格只有 4 个字的地方，写了就被切一半），
-   * 而是挂在 `data-why` 上给测试看，人看悬浮提示与对话流里的完整说法。
-   * 这几个字同样不许出现「门」「档」这类内部词（用户提过意见）。
+   * 注意：**不再写在按钮上**（该处仅容得下约 4 个字，写入即被截断），
+   * 而是记录在 `data-why` 上供测试读取；用户通过悬浮提示与对话流查看完整说明。
+   * 这几个字同样不得出现「门」「档」等内部词（用户曾提出意见）。
    */
   function shortAccessReason(kind) {
-    if (kind === 'old-door') return '版本旧';
-    if (kind === 'no-service') return '没带权限设置';
-    return '读不到';
+    if (kind === 'old-door') return '版本过低';
+    if (kind === 'no-service') return '缺少权限设置';
+    // 会话本身已不存在（例如位于其他内核上，或已被关闭）：更换选项无效，
+    // 需要重新开启一段；因此该项不得与「无法读取」合并为同一句。
+    if (kind === 'no-session') return '会话不存在';
+    return '无法读取';
   }
 
   function accessTitle(info) {
     return info && info.detail ? `${info.text}\n${info.detail}` : (info && info.text) || '';
   }
 
-  /** 渲染可选项（每项：名字 + 一行说明，当前那项打勾）。 */
+  /** 渲染可选项（每项包含名称与一行说明，当前项带勾选标记）。 */
   function renderAccessList() {
     const permission = state.permission;
     el.accessList.textContent = '';
@@ -1149,7 +1152,11 @@
     state.pendingAccess = undefined;
     if (!permission) return;
     const options = permission.options;
-    el.accessPopNote.textContent = options.length > 1 ? `共 ${options.length} 种` : '';
+    // 「共 N 种」只统计**可切换的项**：内核会把 custom（当前沙箱与批准设置
+    // 不匹配任何预设）作为展示项附在清单末尾，计入后会显示「共 4 种」，
+    // 而实际仅有 3 种可点。
+    const selectable = options.filter((option) => option.selectable !== false);
+    el.accessPopNote.textContent = selectable.length > 1 ? `共 ${selectable.length} 种` : '';
     let active = undefined;
     for (const option of options) {
       const button = document.createElement('button');
@@ -1168,11 +1175,25 @@
         desc.textContent = option.description;
         button.appendChild(desc);
       }
-      button.addEventListener('click', () => chooseAccess(option));
+      /*
+       * 展示项（由扩展给出 selectable === false，目前仅内核的 custom）：
+       * 可用于显示「当前不在任何预设上」，但它**不是可切换的目标**：内核的
+       * resolve() 对它直接抛出异常。因此不为其绑定点击处理，并置为禁用状态。
+       *
+       * 判据是「明确为 false」而非「未标记为 true」：旧版扩展不发送该字段，
+       * 此时必须仍按可选项处理。
+       */
+      if (option.selectable === false) {
+        button.disabled = true;
+        button.dataset.displayOnly = 'true';
+        button.title = '当前不匹配任何预设，无法切换到该项';
+      } else {
+        button.addEventListener('click', () => chooseAccess(option));
+      }
       el.accessList.appendChild(button);
       if (option.active) active = button;
     }
-    // 选不中的当前值（清单被改过之类）也要显示出来，不能让用户以为没选。
+    // 无法匹配的当前值（例如清单被修改）也需显示，不得让用户误认为未选择。
     if (!active && permission.currentValue) {
       const button = document.createElement('button');
       button.type = 'button';
@@ -1191,10 +1212,19 @@
   /**
    * 选中一项。
    *
-   * 「完全权限」要过确认门（文案是扩展给的，见 src/dsh/permission.js 的 CONFIRM）：
-   * 那一档会让智能体不再逐条问你，点错的代价太大，所以多一步。
+   * 「完全权限」需要经过确认（文案由扩展提供，见 src/dsh/permission.js 的 CONFIRM）：
+   * 该档位会使智能体不再逐条请求确认，误操作代价较大，因此增加一步确认。
    */
   function chooseAccess(option) {
+    /*
+     * 展示项一律不得发送。渲染层已不为其绑定监听，此处防范其他入口：
+     * 键盘激活、使用陈旧的 DOM 节点再次点击，以及后续新增展示项时遗漏渲染分支。
+     *
+     * 此处**无法阻止**「扩展为新版本、webview 仍为旧 bundle」的混搭
+     * （两份产物来自同一版本，混搭需通过重载窗口消除）；反方向是安全的：
+     * 旧扩展不发送 selectable，新 webview 仍按可选项处理，行为与之前一致。
+     */
+    if (!option || option.selectable === false) return;
     if (option.needsConfirm && option.confirm) {
       state.pendingAccess = option;
       el.accessList.hidden = true;
@@ -1202,7 +1232,7 @@
       el.accessConfirmTitle.textContent = option.confirm.title;
       el.accessConfirmBody.textContent = option.confirm.body;
       el.accessConfirmAccept.textContent = option.confirm.accept;
-      el.accessConfirmCancel.textContent = option.confirm.cancel || '算了';
+      el.accessConfirmCancel.textContent = option.confirm.cancel || '取消';
       el.accessConfirmAccept.focus();
       positionAccessPop();
       return;
@@ -1231,7 +1261,7 @@
     el.accessBtn.setAttribute('aria-expanded', 'false');
   }
 
-  /** 小卡片贴着那个按钮放；下面放不下就翻到上面（侧边栏里高度很紧）。 */
+  /** 小卡片紧邻该按钮定位；下方空间不足时翻转到上方（侧边栏高度紧张）。 */
   function positionAccessPop() {
     const rect = el.accessBtn.getBoundingClientRect();
     const width = el.accessPop.offsetWidth;
@@ -1268,7 +1298,7 @@
     if (first) first.focus();
   });
 
-  // 点别处 / Esc 关掉：这两种是所有人的肌肉记忆，不能只有点按钮才关得上。
+  // 点击其他位置 / Esc 关闭：这两种方式已被普遍使用，不能只支持点击按钮关闭。
   document.addEventListener('mousedown', (event) => {
     if (el.accessPop.hidden) return;
     if (el.accessPop.contains(event.target) || el.accessBtn.contains(event.target)) return;
@@ -1296,7 +1326,7 @@
   function showPermission(message) {
     const params = message.params || {};
     const tool = params.toolCall || {};
-    el.permissionTitle.textContent = tool.title || 'DSH 需要你的许可';
+    el.permissionTitle.textContent = tool.title || 'DSH 需要许可';
     el.permissionBody.textContent = tool.rawInput ? JSON.stringify(tool.rawInput, null, 2) : '';
     el.permissionActions.textContent = '';
     const options = Array.isArray(params.options) ? params.options : [];
@@ -1341,7 +1371,7 @@
   function submit() {
     const text = el.input.value;
     const attachments = state.attachments.slice();
-    // 只有上下文、没有文字也允许发：用户可能就是想说"看看这个"。
+    // 只有上下文、没有文字时也允许发送：用户可能希望直接提供内容供查看。
     if ((!text.trim() && attachments.length === 0) || state.busy) return;
     el.input.value = '';
     state.attachments = [];
@@ -1356,16 +1386,17 @@
   el.historyBtn.addEventListener('click', () => toggleHistory());
   el.historyClose.addEventListener('click', () => toggleHistory(false));
 
-  // Esc 关掉历史浮层。它是盖住整个面板的浮层，而"按 Esc 退出"是浮层的通用约定 ——
-  // 少了它，键盘用户只能一路 Tab 找到右上角那个关闭按钮才能出去。
-  // 只处理浮层开着的情况，Esc 在别处（比如输入框里）不拦，免得抢掉 VS Code 的默认行为。
+  // Esc 关闭历史浮层。该浮层覆盖整个面板，而「按 Esc 退出」是浮层的通用约定；
+  // 缺少该处理时，使用键盘的用户只能通过 Tab 定位到右上角关闭按钮才能退出。
+  // 仅在浮层打开时处理，不拦截其他位置的 Esc（例如输入框内），
+  // 避免占用 VS Code 的默认行为。
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape' || el.historyPanel.hidden) return;
     event.preventDefault();
     toggleHistory(false);
   });
 
-  // 点击链接交给扩展去开外部浏览器（webview 里点链接默认没反应）。
+  // 链接点击交由扩展打开外部浏览器（webview 内点击链接默认无响应）。
   document.addEventListener('click', (event) => {
     const anchor = event.target && event.target.closest ? event.target.closest('a[data-href]') : null;
     if (!anchor) return;
@@ -1375,14 +1406,14 @@
 
   // ── Markdown ────────────────────────────────────────
   //
-  // 渲染器在 media/markdown.js 里，是纯函数、不碰 DOM —— 这样它能在 Node 里
-  // 被单测（正确性、注入安全、真实耗时）。无头浏览器里按帧计时受虚拟时钟影响，
-  // 量出来恒为 0，会掩盖真实的性能问题，所以那部分测试必须在 Node 里做。
+  // 渲染器位于 media/markdown.js，为纯函数、不访问 DOM，因此可在 Node 中
+  // 进行单元测试（正确性、注入安全、真实耗时）。无头浏览器中按帧计时受虚拟时钟影响，
+  // 测量结果恒为 0，会掩盖真实性能问题，因此该部分测试必须在 Node 中执行。
 
   const markdown = window.DshMarkdown;
   if (!markdown) {
-    // 脚本没加载上时要说人话，而不是让整个面板静默失效。
-    document.getElementById('status-text').textContent = '界面脚本缺失：markdown.js 没加载';
+    // 脚本未加载时需给出可读提示，而不是让整个面板静默失效。
+    document.getElementById('status-text').textContent = '界面脚本缺失：markdown.js 未加载';
   }
   const escapeHtml = markdown ? markdown.escapeHtml : (text) => String(text);
   const renderMarkdown = markdown ? markdown.renderMarkdown : (text) => escapeHtml(text);

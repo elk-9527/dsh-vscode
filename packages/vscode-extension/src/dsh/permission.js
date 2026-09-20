@@ -1,104 +1,137 @@
 'use strict';
 
 /**
- * 权限预设（面板这一侧）：把内核给的清单翻译成中文界面要的东西。
+ * 权限预设（面板侧）：将内核返回的清单转换为中文界面所需的字段。
  *
- * 这个文件是**纯函数**：不碰 vscode、不碰网络，能单独测。
+ * 本文件为纯函数模块：不访问 vscode，不访问网络，可单独测试。
  *
- * ## 为什么要和内核「同步」而不是自己写死一张表
+ * ## 与内核保持同步、而不内置固定清单的原因
  *
- * 桌面端那个选择器里的东西（仅可查看 / 工作区内修改 / Auto Approval /
- * 完全权限）不是写死的，而是内核 `@deepseek-ai/dsh-permission-presets`
- * 服务读**档里配的预设表**：
+ * 桌面端选择器中的选项（仅可查看 / 工作区内修改 / Auto Approval /
+ * 完全权限）并非固定值，而是由内核 `@deepseek-ai/dsh-permission-presets`
+ * 服务读取档中配置的预设表得到的：
  *
  *   - `read-only` / `workspace-write` / `danger-full-access` 来自
  *     `@deepseek-ai/dsh-base`；
- *   - `auto-approval` 是 `dsh-auto-approval-plugin` 这个插件往表里加的
- *     （它把整张表重述一遍再加自己那一项）；
- *   - 用户还能在自己的 `cordis.patch.yml` 里加自定义预设。
+ *   - `auto-approval` 由 `dsh-auto-approval-plugin` 插件加入该表
+ *     （该插件先重述整张表，再追加自身对应的一项）；
+ *   - 用户也可在 `cordis.patch.yml` 中添加自定义预设。
  *
- * 所以面板**不许硬编码清单** —— 那样用户装了插件、加了预设，面板里就少一项
- * 或者多一项，跟桌面端对不上。清单一律从门（也就是内核）读。
- * 这里只做两件事：**给内置的几项配上中文标签**（桌面端也是这么做的：
- * 内核给 `read-only`，客户端本地化成「仅可查看」），以及把失败翻译成人话。
+ * 因此面板不得硬编码清单：一旦硬编码，用户安装插件或添加预设后，面板中会缺少
+ * 或多出选项，与桌面端不一致。清单一律从该插件（即内核）读取。
+ * 此处只做两件事：为内置选项配置中文标签（桌面端同样如此：内核返回
+ * `read-only`，客户端将其本地化为「仅可查看」），
+ * 以及将失败原因转换为面向用户的说明。
  */
 
 /**
  * 内置预设的中文标签与说明。
  *
- * 标签跟桌面端逐字一致（`access.preset.readOnly` 那三个 i18n key）。
- * **说明是我写的中文**：内核给的那几段是英文（`Read files anywhere; no
- * modifications allowed.`），桌面端中文界面里也是英文 —— 那是它没翻。
- * 这个面板整屏都是中文，留着英文说明对用户没好处，所以这里翻成人话。
- * 自定义预设（含 `auto-approval` 这种插件加的）一律**原样用内核给的
- * name/description**：别人起的名我不替他改。
+ * 标签与桌面端逐字一致（对应 `access.preset.readOnly` 等三个 i18n key）。
+ * 说明为本仓库撰写的中文：内核返回的说明是英文（例如 `Read files anywhere; no
+ * modifications allowed.`），桌面端中文界面中也保留该英文，即桌面端未作翻译。
+ * 本面板界面全部为中文，英文说明与整体语言不一致，因此在此翻译为中文。
+ * 自定义预设（含 `auto-approval` 等由插件添加的预设）一律原样使用内核给出的
+ * name/description：由他人命名的内容不作改动。
  */
 const BUILTIN = {
   'read-only': {
     label: '仅可查看',
-    description: '可以读任何位置的文件，不能改任何东西。',
+    description: '可读取任意位置的文件，不允许修改。',
   },
   'workspace-write': {
     label: '工作区内修改',
-    description: '可以在工作区和允许的临时目录里写；越界的操作会先问你。',
+    description: '可在工作区与允许的临时目录内写入；越界操作会先请求确认。',
   },
   'danger-full-access': {
     label: '完全权限',
-    description: '读写任何文件都不再问你。只在你信任当前这件事的时候用。',
+    description: '读写任意文件均不再请求确认，仅应在信任当前任务时使用。',
   },
   custom: {
     label: '自定义',
-    description: '当前这套沙箱与批准设置不对应任何预设。',
+    description: '当前的沙箱与批准设置不对应任何预设。',
   },
 };
 
 /**
- * 切到「完全权限」要过一道确认（桌面端也有这道风险门）。
+ * 切换到「完全权限」前需要经过一次确认（桌面端同样设有这道风险确认）。
  *
- * 为什么在这里做而不是等内核给：内核的选项里没有确认载荷，桌面端的确认是
- * **客户端**按预设名加的（`access.confirm.*` 那一组 i18n 就在客户端包里）。
- * 名字硬编码 `danger-full-access` 是刻意的：它不是一个展示用的字符串，
- * 而是 `@deepseek-ai/dsh-base` 里那个「无批准的全盘访问」预设的 id ——
- * 换名字就等于换语义，那时这里也该跟着改。
+ * 在此实现而不等待内核提供的原因：内核返回的选项中没有确认载荷，桌面端的确认
+ * 由客户端按预设名附加（`access.confirm.*` 这组 i18n 位于客户端包中）。
+ * `danger-full-access` 在此硬编码属于有意为之：它不是展示用字符串，
+ * 而是 `@deepseek-ai/dsh-base` 中「无批准的全盘访问」预设的 id；
+ * 改名即改变语义，届时此处也应同步修改。
  */
 const NEEDS_CONFIRM = new Set(['danger-full-access']);
 
-/** 确认门上的文案（跟桌面端一个意思）。 */
-const CONFIRM = {
-  title: '确认启用完全权限？',
-  body: '启用后不再逐条问你：改文件、跑命令、访问工作区外都会直接做。',
-  accept: '启用完全权限',
-  cancel: '算了',
+/**
+ * 仅用于展示、不可作为切换目标的值。
+ *
+ * `custom` 不属于内核预设表中的预设，而是由内核推导出的状态（当前沙箱与批准
+ * 设置不匹配任何一项），并会附加在清单末尾一并发送，供客户端显示
+ * 「当前不在任何预设上」。该值无法切换：内核的 `resolve()` 对它直接抛出异常
+ * （`permission: unknown preset "custom"`）。桌面端同样将其滤出可选行
+ * （dsh-client-ui-permission-presets 的 optionsOf：custom is display state,
+ * never a target）。
+ *
+ * 因此在此标注，由界面将其渲染为灰色的当前项，点击不发送消息。
+ * 不得改为「从清单中删除」：删除后当前值不在清单内，弹出卡片将没有任何勾选项，
+ * 只能显示内核返回的英文 `Custom`（见 media/main.js 中的后备分支）。
+ */
+const DISPLAY_ONLY = new Set(['custom']);
+
+/**
+ * 该插件为「无法切换」划分的错误码，与 `packages/dsh-door/lib/permission.js` 中的
+ * 三个常量属于同一份契约（test/static.js 逐个数值核对，任一数值不同即会分错类别）。
+ *
+ * 不依赖原始文本判断的原因：这几种失败对用户而言是三件不同的事（选择一个仍
+ * 存在的选项 / 重新打开该段会话 / 原因不明），若全部归入 -32000，客户端只能对
+ * 中文原文做正则匹配；插件侧改动一个词，此处即会分错类别，
+ * 用户看到的原因与应执行的操作均为错误。
+ */
+const DOOR_CODES = {
+  UNKNOWN_PRESET: -32002,
+  NO_SESSION: -32003,
 };
 
-/** 未知预设的兜底标签（内核没给 name 时用）。 */
+/** 确认对话框中的文案（与桌面端语义一致）。 */
+const CONFIRM = {
+  title: '启用完全权限前需确认',
+  body: '启用后不再逐条询问：修改文件、执行命令、访问工作区外均直接执行。',
+  accept: '启用完全权限',
+  cancel: '取消',
+};
+
+/** 未知预设的后备标签（内核未提供 name 时使用）。 */
 function fallbackLabel(value) {
   return typeof value === 'string' && value ? value : '（未知）';
 }
 
 /**
- * 把内核的选项翻成界面用的选项。
+ * 将内核提供的选项转换为界面使用的选项。
  *
- * 需要确认的那一项会**带上确认文案**（`confirm`）：文案归扩展管，
- * webview 里不另存一份 —— 两处各写一遍迟早会不一致。
+ * 需要确认的选项会附带确认文案（`confirm`）：文案由扩展维护，
+ * webview 中不另存一份，避免两处各写一份导致不一致。
  *
- * @param {Array<{value: string, name?: string, description?: string}>} options 门给的清单。
+ * @param {Array<{value: string, name?: string, description?: string}>} options 该插件给出的清单。
  * @param {string} currentValue 当前生效的预设名。
- * @returns {Array<{value: string, label: string, description?: string, needsConfirm: boolean, confirm?: object, active: boolean}>}
+ * @returns {Array<{value: string, label: string, description?: string, selectable: boolean, needsConfirm: boolean, confirm?: object, active: boolean}>}
  */
 function decorateOptions(options, currentValue) {
   const list = Array.isArray(options) ? options : [];
   const decorated = [];
   for (const option of list) {
     const value = option && typeof option.value === 'string' ? option.value : '';
-    // 没有 value 的条目直接丢掉：UI 上点它什么也切不了，留着就是一行死按钮。
-    // （门那边也洗过一遍 —— 这里是第二道，因为这份数据最终要进 webview。）
+    // 缺失 value 的条目直接丢弃：界面上点击该条无法切换任何内容，保留即为死按钮。
+    // （插件侧也过滤过一次；此处为第二道，因为这份数据最终会进入 webview。）
     if (!value) continue;
     const builtin = BUILTIN[value];
     const item = {
       value,
-      // 内置的用中文标签；别人加的（auto-approval 之类）原样用内核给的 name。
+      // 内置项使用中文标签；其他来源（如 auto-approval）原样使用内核提供的 name。
       label: builtin ? builtin.label : option.name ? option.name : fallbackLabel(value),
+      // 展示项（custom）保留在清单中，但界面不得为其绑定点击处理。
+      selectable: !DISPLAY_ONLY.has(value),
       needsConfirm: NEEDS_CONFIRM.has(value),
       active: value === currentValue,
     };
@@ -115,11 +148,11 @@ function decorateOptions(options, currentValue) {
 }
 
 /**
- * 当前权限那一行怎么显示。
+ * 当前权限一行的显示文本。
  *
- * @param {string} currentValue 门的 `currentValue`。
- * @param {Array<object>} options 门给的清单（用来查中文标签）。
- * @returns {string} 比如「工作区内修改」。
+ * @param {string} currentValue 该插件返回的 `currentValue`。
+ * @param {Array<object>} options 该插件返回的清单（用于查询中文标签）。
+ * @returns {string} 例如「工作区内修改」。
  */
 function currentLabel(currentValue, options) {
   const list = Array.isArray(options) ? options : [];
@@ -135,46 +168,71 @@ function currentLabel(currentValue, options) {
 }
 
 /**
- * 选不了的时候（连的 DSH 版本旧 / 那个 DSH 没带权限服务 / 拿不到会话）该怎么跟用户说。
+ * 无法选择权限时的面向用户说明（所连 DSH 版本过低 /
+ * 该 DSH 未提供权限服务 / 无法取得会话）。
  *
- * ⚠️ **对外一律说人话**（用户 2026-09-19 第二次提意见的原话：「『门』都出来了，
- * 别人能知道是什么意思？」）：不出现「门」「dsh-acp-door」「0.0.12」「档」这些内部词，
- * 也不出现设置项名。三种情形的话仍然要**不一样**（测试盯着），但区别体现在
- * 「这个 DSH 旧」「这个 DSH 没带这个功能」这种用户看得懂的说法上。
- * 版本号、包名、旁路方法名这些只在日志里（见 panel/view.js 那行 log）。
+ * ⚠️ 对外文案一律使用用户可理解的表述：不出现「门」「dsh-acp-door」「0.0.12」
+ * 「档」等内部词汇，也不出现设置项名。依据为用户 2026-09-19 第二次反馈的原话
+ * （「『门』都出来了，别人能知道是什么意思？」）。各情形的文案仍需互不相同
+ * （有测试校验），差异体现在「该 DSH 版本过低」「该选项已不存在」
+ * 「该会话已不存在」等用户可理解的表述上。
+ * 版本号、包名、旁路方法名只写入日志（见 panel/view.js 中相应的 log 调用）。
+ *
+ * 判断顺序为有意设定：先依据错误码（新版插件会区分失败类型），
+ * 错误码无法识别时才回退到原文判断。相反的顺序会退回按中文原文推测的旧方式，
+ * 插件侧改动一个词即会分错类别。
  *
  * @param {object} input
- * @param {number} [input.code] JSON-RPC 错误码（-32601 = 方法不存在）。
+ * @param {number} [input.code] JSON-RPC 错误码（-32601 = 方法不存在；见 DOOR_CODES）。
  * @param {string} [input.message] 内核/连接层的原话（只用于判断，不直接给用户看）。
- * @returns {{state: 'old-door'|'no-service'|'error'|'no-session', text: string, detail?: string}}
+ * @returns {{state: 'no-such-preset'|'no-session'|'old-door'|'no-service'|'error', text: string, detail?: string}}
  */
 function explainPermissionFailure({ code, message } = {}) {
   const raw = typeof message === 'string' ? message : '';
-  if (code === -32601 || /门不支持|Method not found|不认识权限方法/i.test(raw)) {
-    // 两种「服务缺席」都回 -32601，靠原话区分（新门那句里带「没有权限预设服务」）。
+  // 1) 新版插件已区分失败类型：直接按错误码给出结论，无需推断原文。
+  if (code === DOOR_CODES.UNKNOWN_PRESET) {
+    return {
+      state: 'no-such-preset',
+      text: '该权限选项已不存在',
+      detail: '列表将重新读取，可选择仍可用的选项',
+    };
+  }
+  if (code === DOOR_CODES.NO_SESSION) {
+    return {
+      state: 'no-session',
+      text: '该会话在目标 DSH 上已不存在',
+      detail: '发送一条消息会重新连接；也可从历史会话中重新打开',
+    };
+  }
+  // 2) 旧版插件（0.0.12 之前）只返回 -32601，两种「服务缺席」依靠原文区分 ——
+  //    此分支用于兼容，新版插件不应再进入。
+  if (code === -32601 || /门不支持|该插件不支持|Method not found|不认识权限方法/i.test(raw)) {
+    // 两种「服务缺席」都返回 -32601，依靠原文区分（新版插件该句中含「没有权限预设服务」）。
     if (/没有权限预设服务|permission-presets/i.test(raw)) {
       return {
         state: 'no-service',
-        text: '这个 DSH 没带权限设置，这里换不了',
-        detail: '可以在桌面端自己的界面上换',
+        text: '该 DSH 未提供权限设置，此处无法切换',
+        detail: '可在桌面端界面中切换',
       };
     }
     return {
       state: 'old-door',
-      text: '这个 DSH 版本旧，这里换不了权限',
-      detail: '在桌面端自己的界面上换，或把 DSH 升到最新版',
+      text: '该 DSH 版本过低，此处无法切换权限',
+      detail: '请在桌面端界面中切换，或将 DSH 升级到最新版',
     };
   }
   return {
     state: 'error',
-    text: '读不到当前权限',
-    detail: '点「重新连接」再试一次；详细原因在日志里',
+    text: '无法读取当前权限',
+    detail: '请点击「重新连接」后重试；详细原因见日志',
   };
 }
 
 module.exports = {
   BUILTIN,
   CONFIRM,
+  DISPLAY_ONLY,
+  DOOR_CODES,
   NEEDS_CONFIRM,
   decorateOptions,
   currentLabel,

@@ -1,18 +1,18 @@
 'use strict';
 
 /**
- * 一次跑完所有测试。
+ * 一次运行全部测试套件。
  *
  * 用法：
  *   node test/run-all.js           # 快速套件（不需要 DSH，不需要浏览器）
- *   node test/run-all.js --ui      # 再加上真浏览器里的界面断言
- *   node test/run-all.js --all     # 再加上需要真 DSH 进程的测试
+ *   node test/run-all.js --ui      # 追加真实浏览器中的界面断言
+ *   node test/run-all.js --all     # 追加需要真实 DSH 进程的测试
  *
- * 分层是刻意的：静态与单测秒级、随时能跑；需要外部依赖的放后面，
- * 这样改一行代码能马上知道有没有踩坏东西。
+ * 分层结构为有意设计：静态检查与单元测试耗时在秒级，可随时运行；需要外部依赖的
+ * 套件排在后面，因此修改一行代码即可立即确认是否破坏其他部分。
  *
- * 顺序也有讲究：兜底测试要求 47821 是空着的，所以它排在会自己拉起内核的
- * 面板层/端到端之前 —— 那两组用完会把内核收干净，不留孤儿进程。
+ * 套件顺序同样存在约束：后备启动测试要求 47821 处于空闲状态，因此该套件排在会自行启动
+ * 内核的面板层与端到端套件之前 —— 后两组套件结束后会回收内核，不留孤儿进程。
  */
 
 const path = require('node:path');
@@ -25,26 +25,26 @@ const withDsh = args.includes('--all');
 
 const suites = [
   { name: '静态契约', file: 'test/static.js', always: true },
-  { name: '门的看帧判断（纯函数）', file: '../dsh-door/test/frames.js', always: true },
-  { name: '门的会话读取（纯函数）', file: '../dsh-door/test/sessions.js', always: true },
-  { name: '门的端口判定（纯函数）', file: '../dsh-door/test/port.js', always: true },
-  // 权限预设那条旁路方法（门 0.0.12）：清单来自用户可配的档，形状不能假设。
-  { name: '门的权限预设方法（纯函数）', file: '../dsh-door/test/permission.js', always: true },
-  // 面板侧把内核的清单翻成中文界面（标签跟桌面端逐字一致）。
+  { name: '该插件的帧解析（纯函数）', file: '../dsh-door/test/frames.js', always: true },
+  { name: '该插件的会话读取（纯函数）', file: '../dsh-door/test/sessions.js', always: true },
+  { name: '该插件的端口判定（纯函数）', file: '../dsh-door/test/port.js', always: true },
+  // ACP 接入点插件（dsh-acp-door）的权限预设旁路方法（0.0.12 版）：清单来自用户可配置的档，形状不能假设。
+  { name: '该插件的权限预设方法（纯函数）', file: '../dsh-door/test/permission.js', always: true },
+  // 面板侧把内核的清单转换为中文界面（标签与桌面端逐字一致）。
   { name: '权限预设的界面翻译（纯函数）', file: 'test/permission.js', always: true },
-  // 两份「历史会话读取」实现（门的 ESM + 面板的 CJS）必须逐项一致 ——
-  // 见 test/sessions-parity.js 的说明：改了一边忘另一边，这条先炸。
+  // 两份「历史会话读取」实现（该插件的 ESM 版 + 面板的 CJS 版）必须逐项一致 ——
+  // 见 test/sessions-parity.js 的说明：只修改其中一边，该断言首先失败。
   { name: '两份会话读取实现是否一致', file: 'test/sessions-parity.js', always: true },
   { name: 'Markdown 渲染器', file: 'test/markdown.js', always: true },
   { name: '编辑器上下文拼块（纯函数）', file: 'test/blocks.js', always: true },
   { name: '会话层边界（假客户端）', file: 'test/session.js', always: true },
   { name: '后台内核的归属与回收（假进程）', file: 'test/kernel-manager.js', always: true },
-  // 「命令路径里有空格」的那两个坑只在真进程里暴露（拼出来的字符串看着是对的），
-  // 所以它必须真的 spawn 一次 —— 见 test/spawn-quote.js 的说明。
+  // 「命令路径里有空格」的两个缺陷只在真实进程中暴露（拼接出的字符串表面上正确），
+  // 因此必须实际执行一次 spawn —— 见 test/spawn-quote.js 的说明。
   { name: '带空格的命令路径（真进程）', file: 'test/spawn-quote.js', always: true },
   { name: '界面（真浏览器）', file: 'tools/uitest.js', always: false, needs: withUi, hint: '加 --ui 才跑' },
-  // 自启内核：这是**最常见的路径**（刚开机、没开桌面端）。它自己换个空端口跑，
-  // 不必去抢 47821 —— 桌面端开着的时候那上面本来就有门，抢也抢不到。
+  // 自启动内核：这是最常见的路径（刚开机、未启动桌面端）。该套件自行选择一个空闲端口，
+  // 不需要占用 47821 —— 桌面端运行时该端口上已有该插件，无法占用。
   {
     name: '自启内核（真进程）',
     file: 'test/fallback.js',
@@ -63,7 +63,7 @@ const suites = [
     env: { DSH_PANEL_TEST_PORT: '47832' },
     hint: '加 --all 才跑（自己挑端口，不抢 47821）',
   },
-  { name: '面板层（假 vscode + 真门）', file: 'test/panel.js', always: true },
+  { name: '面板层（模拟 vscode + 真实运行的该插件）', file: 'test/panel.js', always: true },
   { name: '端到端（真 DSH）', file: 'test/smoke.js', always: false, needs: withDsh, hint: '加 --all 才跑' },
 ];
 
@@ -82,8 +82,8 @@ for (const suite of suites) {
     env: suite.env ? { ...process.env, ...suite.env } : process.env,
   });
   const ms = Date.now() - started;
-  // 退出码 2 = 套件自己说「现在没法测」（例如端口被占），不算失败，
-  // 但要在汇总里单独列出来，不能假装它通过了。
+  // 退出码 2 表示套件自身报告「当前无法测试」（例如端口被占用），不计为失败，
+  // 但需在汇总中单独列出，不得记为通过。
   results.push({ name: suite.name, code: result.status, ms });
 }
 

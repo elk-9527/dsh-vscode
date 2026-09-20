@@ -1,19 +1,19 @@
 'use strict';
 
 /**
- * 自启内核的集成测试：端口上什么都没有时，扩展要自己把内核拉起来。
+ * 自启动内核的集成测试：端口上没有服务时，扩展需要自行启动内核。
  *
- * 这是**最常见的路径**（刚开机、或者用户根本没开桌面端），所以必须单独测：
- * 拉起 → 等到门开 → 握手 → 建会话 → 跑一个真回合 →
- * 收摊时把内核进程真的杀干净（不留孤儿进程占着端口）。
+ * 这是最常见的路径（刚开机，或用户未启动桌面端），因此需要单独测试：
+ * 启动 → 等待 ACP 接入点插件（dsh-acp-door）就绪 → 握手 → 建立会话 → 运行一个真实回合 →
+ * 收尾时把内核进程彻底终止（不留孤儿进程占用端口）。
  *
- * 端口：默认 47821（和面板默认一致）。但桌面端开着的时候那个端口上已经有门了，
- * 这个测试就没法做「从零拉起」。所以端口可以用环境变量换：
+ * 端口：默认 47821（与面板默认值一致）。桌面端运行时该端口上已存在该插件，
+ * 因此该测试无法验证「从零启动」。端口可通过环境变量更换：
  *
  *     $env:DSH_PANEL_TEST_PORT = '47830'; node test/fallback.js
  *
- * 换了端口之后测试会给内核挂一个 `--patch`，把门**钉**到那个端口上
- * （门那一行的 config 是整段替换的，所以 patch 里必须把每个字段都写全）。
+ * 更换端口后测试会给内核附加一个 `--patch`，把该插件固定到那个端口上
+ * （该插件所在行的 config 是整段替换的，因此 patch 中必须写全每个字段）。
  */
 
 const path = require('node:path');
@@ -23,22 +23,22 @@ const Module = require('node:module');
 
 const SCRATCH = path.resolve(__dirname, '..', '..', '..', 'spike', 'scratch');
 
-/** 测哪个端口：默认跟面板默认一致，可用 DSH_PANEL_TEST_PORT 换一个空的。 */
+/** 测试使用哪个端口：默认与面板默认值一致，可用 DSH_PANEL_TEST_PORT 指定一个空闲端口。 */
 const PORT = Number(process.env.DSH_PANEL_TEST_PORT || 47821);
 
 /**
- * 把门钉到 PORT 上的那个 `--patch` 文件。
+ * 把该插件固定到 PORT 上的那个 `--patch` 文件。
  *
- * 只在换了端口时才需要：门那一行的 config 是**整段替换**的（实测：
- * 只写 port 的话 host/provider/model/preset 会一起消失），所以这里把
- * 每个字段都照抄一遍。47821 时返回 null —— 档里本来就是那个端口，不用补。
+ * 仅在更换端口时需要：该插件所在行的 config 是整段替换的（实测：
+ * 只写 port 时 host/provider/model/preset 会一并消失），因此此处把
+ * 每个字段都完整写出。PORT 为 47821 时返回 null —— 档中本已配置该端口，无需补充。
  */
 function writeDoorPortPatch() {
   if (PORT === 47821) return null;
   const file = path.join(os.tmpdir(), `dsh-panel-test-door-${PORT}.yml`);
   const body = [
-    '# 测试用：把门钉到这个端口上（test/fallback.js 生成，可随时删）。',
-    '# 门那一行的 config 是整段替换的，所以每个字段都要写全。',
+    '# 测试用：把该插件固定到这个端口上（test/fallback.js 生成，可随时删）。',
+    '# 该插件那一行的 config 是整段替换的，所以每个字段都要写全。',
     '- id: acp-door',
     '  config:',
     '    host: 127.0.0.1',
@@ -57,18 +57,18 @@ const PATCH = writeDoorPortPatch();
 const configValues = {
   host: '127.0.0.1',
   port: PORT,
-  // 面板自启的内核把门钉在这个端口上（环境变量 DSH_ACP_DOOR_PORT）。
-  // 这里让它和 PORT 一致：前面的 --patch 也钉同一个端口，两条路不打架。
+  // 面板自启动的内核把该插件固定在这个端口上（环境变量 DSH_ACP_DOOR_PORT）。
+  // 此处令其与 PORT 一致：前面的 --patch 也固定同一个端口，两条路径不冲突。
   selfStartPort: PORT,
-  autoStart: true, // ← 本次测试的主角
-  // 生产默认是 desktop（用户自己那一档）。测试里刻意用 dshdoor：
-  // 让测试去拉起用户的真实配置，会往他的档和记忆里写东西 —— 测试不该有这个权力。
+  autoStart: true, // ← 本套件验证的配置项
+  // 生产默认值是 desktop（用户自身的档）。测试中刻意改用 dshdoor：
+  // 以测试身份启动用户的真实配置会写入该用户的档与记忆 —— 测试不应具有该权限。
   fallbackProfile: 'dshdoor',
   dshCommand: 'dsh',
   provider: '',
   model: '',
-  // 前几节测的是"收摊要收干净"，所以这里一律"面板一关就收"（老行为）。
-  // 宽限期那条路（销毁不杀、重开继续用）在 §6 单独把它调大再验。
+  // 前几节验证的是"收尾必须彻底"，因此此处统一为"面板关闭即回收"（旧行为）。
+  // 宽限期路径（销毁不终止、重新打开继续使用）在 §6 单独调大后再验证。
   kernelIdleMinutes: 0,
   cwd: SCRATCH,
 };
@@ -166,7 +166,7 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
 }
 
 (async () => {
-  /** 所有日志行（给测试自己看：失败时能看出它到底试了哪几条路）。 */
+  /** 全部日志行（供测试自身使用：失败时可确认实际尝试了哪些路径）。 */
   const logLines = [];
   const log = (level, message) => {
     logLines.push(`[${level}] ${message}`);
@@ -177,23 +177,23 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
   section('0. 前置：端口必须是空的');
   const alreadyUp = await probePort('127.0.0.1', PORT, 800);
   if (alreadyUp) {
-    // 这不是失败，是「现在没法测」：这个测试要验证「从零拉起一个内核」，
-    // 而这个端口上已经有一个在跑了（比如桌面端 DSH，或者你的 VS Code 正开着）。
-    // 用退出码 2 表示跳过，让上层能和真失败区分开。
-    console.log(`  ⏭  ${PORT} 上已经有一个 DSH 在跑，这个测试现在没法做。`);
-    console.log('     它验证的是「从零拉起」，需要端口空着。两个办法：');
-    console.log('     ① 关掉桌面端 DSH（或手工起的试验台）再跑；');
-    console.log(`     ② 换个空端口跑：$env:DSH_PANEL_TEST_PORT = '47830'; node test/fallback.js`);
-    console.log('     —— 按「跳过」处理，不算失败。');
+    // 这不属于失败，而是「当前无法测试」：该测试要验证「从零启动一个内核」，
+    // 而该端口上已有进程在运行（例如桌面端 DSH，或用户正在使用的 VS Code）。
+    // 用退出码 2 表示跳过，使上层能与真实失败区分。
+    console.log(`  ⏭  ${PORT} 上已有一个 DSH 在运行，当前无法执行该测试。`);
+    console.log('     该套件验证的是「从零启动」，要求端口空闲。两种处理方式：');
+    console.log('     ① 关闭桌面端 DSH（或手工启动的试验实例）后重新运行；');
+    console.log(`     ② 换一个空闲端口：$env:DSH_PANEL_TEST_PORT = '47830'; node test/fallback.js`);
+    console.log('     —— 按「跳过」处理，不计为失败。');
     process.exit(2);
   }
-  console.log(`  ✅ ${PORT} 是空的，可以测自启内核这条路了${PATCH ? `（门钉在 ${PORT}，patch：${PATCH}）` : ''}`);
+  console.log(`  ✅ ${PORT} 是空的，可以测自启内核这条路了${PATCH ? `（该插件固定在 ${PORT}，patch：${PATCH}）` : ''}`);
 
   section('1. 打开面板 → 应该自己把内核拉起来');
   const panel = new DshPanelView({
     extensionUri: { fsPath: path.resolve(__dirname, '..') },
     log,
-    // 换了端口时，把门也指过去（生产路径不传这个）。
+    // 更换端口时，把该插件也指向该端口（生产路径不传此参数）。
     spawnArgs: PATCH ? ['--patch', PATCH] : [],
   });
   const view = makeFakeView();
@@ -213,7 +213,7 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
   console.log(`     对话流提示：${notices.join(' ｜ ') || '（无）'}`);
 
   check(
-    '顶栏说的是短状态（没有把「正在后台启动 DSH（档：…）」塞进顶栏）',
+    '顶栏说的是短状态（没有把「正在后台启动 DSH（档：…）」放进顶栏）',
     statuses.every((s) => String(s.detail || '').length <= 24 && !/\n/.test(String(s.detail || ''))),
     JSON.stringify(statuses.map((s) => s.detail)),
   );
@@ -222,9 +222,9 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
     notices.some((text) => /正在启动 DSH/.test(text)),
     JSON.stringify(notices),
   );
-  // 用户对这条路径上的文案专门提过意见（原话是嫌"没有现成的内核，正在启动一个
-  // （档：vscode-panel）。第一次会慢一点…"太长）。自启这条路正是长句最容易
-  // 长出来的地方，所以在这里钉一条：给自己的话短、引用行可以长一点。
+  // 用户曾对这条路径上的文案提出意见（原话：认为"没有现成的内核，正在启动一个
+  // （档：vscode-panel）。第一次会慢一点…"过长）。自启动路径最容易产生长句，
+  // 因此在此固定一条约束：自身生成的文案要短，引用行可略长。
   check(
     '自启这条路上的提示也都短（第一行 ≤32 字，引用行 ≤80 字，最多三行）',
     notices.every((text) => {
@@ -255,15 +255,15 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
 
   section('3. 自己拉起来的那个内核要能复用，不能每连一次就多起一个');
   {
-    // 目标里写的是"内核由插件自己按需拉起**并可复用**"。复用有两种：
-    //   ① 桌面端已经开着 → 直接接它的（vscode-check 的接入模式那 11 项验的就是这条）；
-    //   ② 自己拉起来的那个还在跑 → 断线重连时**接着用它**，别再拉一个。
-    // ② 以前没有测试盯着，而它最容易坏的地方是「重连时又 spawn 一个」——
-    // 那种 bug 在界面上看不出来（照样能用），只会在进程列表里越堆越多。
+    // 目标中写明"内核由插件按需启动并可复用"。复用有两种情形：
+    //   ① 桌面端已启动 → 直接连接该内核（vscode-check 的接入模式那 11 项验证的就是这条）；
+    //   ② 自行启动的内核仍在运行 → 断线重连时继续使用它，不再启动新的内核。
+    // 情形 ② 此前没有测试覆盖，而它最容易出现的缺陷是「重连时再次 spawn」——
+    // 该类缺陷在界面上无法观察（功能仍可用），只会在进程列表中不断累积。
     const pidBefore = panel.background && panel.background.child && panel.background.child.pid;
     const backgroundBefore = panel.background;
 
-    // 掐断客户端连接，等价于内核那边网络抖了一下 / DSH 重启了。
+    // 断开客户端连接，等价于内核侧网络抖动或 DSH 重启。
     panel.client.close();
     await new Promise((resolve) => setTimeout(resolve, 600));
     check('断线后会话被放掉了（下次发送会重连）', !panel.session, String(panel.session));
@@ -277,13 +277,13 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
     check('重连时复用了同一个内核（没有另起一个）',
       pidBefore === pidAfter && panel.background === backgroundBefore,
       `pid ${pidBefore} → ${pidAfter}`);
-    check('重连后照样能干活', resumeMessages.some((item) => item.type === 'done'),
+    check('重连后仍可正常工作', resumeMessages.some((item) => item.type === 'done'),
       JSON.stringify(resumeMessages.map((i) => i.type)));
     check('重连过程没有报错', !resumeMessages.some((item) => item.type === 'error'),
       JSON.stringify(resumeMessages.filter((i) => i.type === 'error').map((i) => i.message)));
   }
 
-  section('4. 收摊必须杀干净（Windows 上最容易漏）');
+  section('4. 关闭面板必须回收干净（Windows 上最容易漏）');
   const childPid = panel.background && panel.background.child && panel.background.child.pid;
   console.log(`     后台 DSH 的 pid：${childPid}`);
   panel.dispose();
@@ -315,16 +315,16 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
   section('5. 设置里那个档起不来时，要自己换一个（2026-09-19 用户就是这么挂的）');
   {
     /*
-     * 用户当天的原话：面板报「没能启动 DSH 内核」，档是 desktop。
-     * 真因是内核回了 `profile "desktop" is managed exclusively by the Electron
-     * application` —— **那个档命令行起不来**（桌面端独占），而它恰好是当时的默认值。
-     * 结果就是：桌面端没开的时候面板必然起不来，而面板自己起来恰恰是那时候最需要的。
+     * 用户当日报告：面板提示「没能启动 DSH 内核」，档为 desktop。
+     * 实际原因是内核返回 `profile "desktop" is managed exclusively by the Electron
+     * application` —— 该档无法通过命令行启动（桌面端独占），而它恰好是当时的默认值。
+     * 结果是：桌面端未启动时面板必然无法启动，而面板自行启动恰恰是此时最需要的。
      *
-     * 这一节用**真的** desktop 档跑一遍（它秒退、不改任何状态），验证：
-     *   ① 设置里那个档排第一（尊重用户）；
-     *   ② 扫出来的备选里有能用的档；
-     *   ③ 真的换过去、并且连上了、建出了会话；
-     *   ④ 全程没有把错误甩到对话流里（因为最后成功了）。
+     * 本节使用真实的 desktop 档运行一遍（该档立即退出、不改变任何状态），验证：
+     *   ① 设置中的档排在首位（尊重用户配置）；
+     *   ② 扫描出的备选档中存在可用档；
+     *   ③ 确实切换过去、连接成功并建立会话；
+     *   ④ 全程未向对话流输出错误（因为最终成功）。
      */
     const { panelProfileCandidates } = require('../src/door/locate');
     const realProfiles = panelProfileCandidates({ configured: 'desktop', homedir: os.homedir() });
@@ -339,16 +339,16 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
       const savedProfile = configValues.fallbackProfile;
       const savedCommand = configValues.dshCommand;
       /*
-       * 逼它走「普通命令行」这条路：`dshCommand` 指到 bin.js，不碰 PATH 上那个
-       * `dsh`。为什么必须这样（2026-09-19 查清楚的）：
+       * 强制其走「普通命令行」路径：`dshCommand` 指向 bin.js，不使用 PATH 上的
+       * `dsh`。采用该方式的依据（2026-09-19 查明）：
        *
-       * PATH 上的 `dsh` 是**桌面端自己的垫片**（DSH Desktop.exe 带
-       * ELECTRON_RUN_AS_NODE 跑 desktop-cli.js），它反而**能**把 desktop 档跑起来。
-       * 但那个垫片住在 `…\host-commands\desktop\generations\<哈希>\bin\` 这种
-       * 一次性的目录里 —— 桌面端每次换代都换路径。所以一个**开得早**的 VS Code
-       * 进程，PATH 里可能还指着已经被删掉的那一代：`dsh` 找不到，而 `node bin.js`
+       * PATH 上的 `dsh` 是桌面端自身的垫片（DSH Desktop.exe 带
+       * ELECTRON_RUN_AS_NODE 运行 desktop-cli.js），该垫片能够启动 desktop 档。
+       * 但该垫片位于 `…\host-commands\desktop\generations\<哈希>\bin\` 这类
+       * 一次性目录中 —— 桌面端每次换代都会更换路径。因此启动较早的 VS Code
+       * 进程，其 PATH 可能仍指向已被删除的那一代：`dsh` 无法找到，而 `node bin.js`
        * 又会拒绝 desktop 档（"managed exclusively by the Electron application"）。
-       * **两条路一起死**，就是用户当天看到的样子。
+       * 两条路径同时失败，即为用户当日观察到的现象。
        */
       const realBin = path.join(
         os.homedir(), '.dsh', 'profiles', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js',
@@ -364,7 +364,7 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
       const view2 = makeFakeView();
       panel2.resolveWebviewView(view2);
 
-      // 记住它到底用了哪个档（spawnFallback 的返回值里带着）。
+      // 记录实际使用的档（spawnFallback 的返回值中包含该信息）。
       let chosen = null;
       const realSpawnFallback = panel2.spawnFallback.bind(panel2);
       panel2.spawnFallback = async (cfg) => {
@@ -378,7 +378,7 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
       const took = Date.now() - startedAt;
       console.log(`     从零到可用耗时 ${(took / 1000).toFixed(1)}s（这里含一次注定失败的 desktop 尝试）`);
       const mine = logLines.slice(logFrom);
-      const attempts = mine.filter((line) => /试着启动/.test(line)).map((line) => line.replace(/^\[info\] /, ''));
+      const attempts = mine.filter((line) => /尝试启动/.test(line)).map((line) => line.replace(/^\[info\] /, ''));
       console.log(`     试过的路：${attempts.join(' ｜ ')}`);
       const said = mine.filter((line) => /内核退出原因/.test(line)).map((line) => line.replace(/^\[warn\] /, ''));
       if (said.length) console.log(`     内核自己说的：${said.join(' ｜ ')}`);
@@ -390,11 +390,11 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
       if (haveBin) {
         check('内核拒绝 desktop 档的原话被读到了（不再靠猜）',
           said.some((line) => /managed exclusively/i.test(line)) ||
-            attempts.filter((line) => /档：desktop/.test(line)).length === 0,
+            attempts.filter((line) => /配置集：desktop/.test(line)).length === 0,
           JSON.stringify(said));
-        check('它先试了 desktop，然后才换档',
-          attempts.some((line) => /档：desktop/.test(line)) &&
-            attempts.some((line) => !/档：desktop/.test(line)),
+        check('先尝试 desktop 配置集，失败后换用其它配置集',
+          attempts.some((line) => /配置集：desktop/.test(line)) &&
+            attempts.some((line) => !/配置集：desktop/.test(line)),
           attempts.join(' | '));
       }
       check('拿到会话了', Boolean(panel2.session && panel2.session.sessionId),
@@ -425,11 +425,11 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
   }
 
   /*
-   * §6 视图销毁 ≠ 内核死亡（2026-09-19 那次"聊两句就断"的结构性修复）。
+   * §6 视图销毁不等于内核死亡（2026-09-19 "聊两句就断" 的结构性修复）。
    *
-   * 用真进程验：起一个内核 → **销毁面板视图** → 断言内核还活着
-   * （旧代码这里就是 killTree，用户看到的就是"断线"）→ 再建一个面板 →
-   * 断言它**复用同一个 pid**、没有再拉一个进程，而且会话直接就绪。
+   * 使用真实进程验证：启动一个内核 → 销毁面板视图 → 断言内核仍在运行
+   * （旧代码在此处执行 killTree，用户观察到的现象是"断线"）→ 再建立面板 →
+   * 断言其复用同一个 pid、未启动新进程，且会话直接可用。
    */
   if (!alreadyUp) {
     section('6. 视图销毁不等于内核死亡（重开面板继续用同一个内核）');
@@ -441,17 +441,17 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
       fallbackProfile: configValues.fallbackProfile,
       dshCommand: configValues.dshCommand,
     };
-    // 自启的内核开在 PORT（§5 末尾刚腾空），attach 目标指到一个空端口上，
-    // 逼它走"自己拉起"这条路。
+    // 自启动的内核运行在 PORT（§5 末尾刚释放），attach 目标指向一个空闲端口，
+    // 强制其走"自行启动"路径。
     //
-    // ⚠️ attach 目标**不能**用 PORT + 1：面板默认的自启端口正好是 47831，
-    // 而用户自己开着 VS Code 面板时那上面就有个真在用的内核 —— 于是这里会
-    // "接上别人的内核"，A/B 两段（销毁不杀内核、重开复用同一个）整段失去意义
-    // （实测踩到）。往远处挑一个没人用的端口。
+    // ⚠️ attach 目标不得使用 PORT + 1：面板默认的自启动端口正是 47831，
+    // 而用户使用 VS Code 面板时该端口上存在正在使用的内核 —— 此时会
+    // "连接到其他内核"，使 A/B 两段（销毁不终止内核、重新打开复用同一个）失去意义
+    // （实测已出现）。应选择较远的、未被使用的端口。
     configValues.autoStart = true;
     configValues.port = PORT + 4;
     configValues.selfStartPort = PORT;
-    configValues.kernelIdleMinutes = 5; // 宽限 5 分钟：销毁之后内核必须还活着
+    configValues.kernelIdleMinutes = 5; // 宽限 5 分钟：销毁之后内核必须仍在运行
     configValues.fallbackProfile = 'dshdoor';
     if (!configValues.dshCommand || configValues.dshCommand === 'dsh') {
       const realBin = path.join(
@@ -470,19 +470,19 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
     const childA = panelA.background && panelA.background.child;
     const pidA = childA && childA.pid;
     check('A：面板自己把内核拉起来了', Boolean(pidA), String(pidA));
-    check('A：门开在"面板自己的端口"上（不是桌面端那个 47821）',
+    check('A：该插件监听在"面板自己的端口"上（不是桌面端那个 47821）',
       panelA.targetPort === PORT, `targetPort=${panelA.targetPort}，期望 ${PORT}`);
     check('A：拿到会话了', Boolean(panelA.session && panelA.session.sessionId));
 
-    panelA.dispose(); // ← 就是这一步：以前这里会把内核杀掉
+    panelA.dispose(); // ← 该步骤：旧实现会在此处终止内核
     await new Promise((resolve) => setTimeout(resolve, 2500));
     const alive = childA && childA.exitCode === null && childA.signalCode === null;
-    check('销毁面板之后，内核**还活着**（旧代码这里就断了）', Boolean(alive),
+    check('销毁面板之后，内核**仍在运行**（旧代码至此即中断）', Boolean(alive),
       `pid ${pidA} exitCode=${childA && childA.exitCode}`);
     check('端口还开着', await probePort('127.0.0.1', PORT, 800));
     check('它还在 manager 的表里（等着被复用）', panelA.kernels.size() === 1, String(panelA.kernels.size()));
 
-    // 用户又把面板打开了 —— 应该接着用同一个内核，而不是再拉一个。
+    // 用户再次打开面板 —— 应继续使用同一个内核，而不是启动新的内核。
     const logFromB = logLines.length;
     const panelB = new DshPanelView({
       extensionUri: { fsPath: path.resolve(__dirname, '..') },
@@ -493,9 +493,9 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
     await panelB.onWebviewMessage({ type: 'ready' });
     const childB = panelB.background && panelB.background.child;
     /*
-     * B 走的是"接上去"而不是"重新起"：它先探测 selfStartPort，门还开着就直接接。
-     * 这时 panelB.background 指向的仍然是**A 那个内核**的句柄（拿来报错/诊断用），
-     * 并没有新进程 —— 所以判据是 pid 和表里的那个一模一样。
+     * B 走的是"连接"而不是"重新启动"：先探测 selfStartPort，该插件仍在监听则直接连接。
+     * 此时 panelB.background 指向的仍是 A 那个内核的句柄（用于报错与诊断），
+     * 并未产生新进程 —— 因此判据是 pid 与表中的那个完全一致。
      */
     const pidB = childB ? childB.pid : panelB.kernels.pidOf(configValues.host, PORT);
     check('B：复用了同一个内核（pid 一样，没有第二个进程）', pidB === pidA, `A=${pidA} B=${pidB}`);
@@ -509,13 +509,13 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
       linesB.some((line) => /计时取消|又用上/.test(line)), JSON.stringify(linesB));
 
     panelB.dispose();
-    check('用户显式收摊 → 真收掉（不留孤儿）', panelB.kernels.disposeAll('测试收尾') === 1);
+    check('用户显式关闭 → 确实回收（不留孤儿）', panelB.kernels.disposeAll('测试收尾') === 1);
     let freed = false;
     try {
       await waitFor(async () => !(await probePort('127.0.0.1', PORT, 400)), { totalMs: 30000, intervalMs: 600 });
       freed = true;
     } catch { freed = false; }
-    check('收摊后端口释放了', freed);
+    check('关闭后端口已释放', freed);
 
     Object.assign(configValues, saved);
   }
@@ -528,6 +528,6 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
   }
   process.exit(failed === 0 ? 0 : 1);
 })().catch((error) => {
-  console.error('💥 测试崩了：', error.stack || error.message);
+  console.error('💥 测试发生异常：', error.stack || error.message);
   process.exit(1);
 });

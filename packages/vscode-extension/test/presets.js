@@ -1,17 +1,17 @@
 'use strict';
 
 /**
- * 「模式」（agent preset）的集成测试：起一个真内核，走真的门，验到底。
+ * 「模式」（agent preset）的集成测试：启动真实内核，经由 ACP 接入点插件（dsh-acp-door）执行完整验证。
  *
- * 为什么值得单独一个套件：预设不是 ACP 的概念，是门替内核接出来的
- * （桌面端把工具改成「按会话挂预设」，而 ACP 建 agent 时从不点名预设）。
- * 这条链路横跨：客户端 `_meta` → 门拦帧 → 内核 agentPresets.select() →
- * 门改回复 → 客户端读出清单。任何一段断了，面板上的「模式」下拉就是假的。
+ * 该套件单独设立的原因：预设不是 ACP 的概念，而是由该插件为内核接出的
+ * （桌面端把工具改为「按会话挂载预设」，而 ACP 建立 agent 时不指定预设）。
+ * 该链路横跨：客户端 `_meta` → 该插件拦截帧 → 内核 agentPresets.select() →
+ * 该插件修改回复 → 客户端读出清单。任一段中断，面板上的「模式」下拉即无效。
  *
- * 这个套件**自己起内核、自己收**，而且自己挑一个空闲端口：
- * 不去抢 47821，所以它可以和别的测试同时存在，也不受你正开着的 VS Code 影响。
+ * 该套件自行启动内核、自行回收，并自行选择一个空闲端口：
+ * 不占用 47821，因此可与其他测试同时运行，也不受用户正在使用的 VS Code 影响。
  *
- * 跑法：node test/presets.js
+ * 运行方式：node test/presets.js
  */
 
 const fs = require('node:fs');
@@ -43,7 +43,7 @@ function check(name, ok, detail) {
   }
 }
 
-/** 让系统给一个当前空闲的端口（拿到就立刻放掉，紧接着用）。 */
+/** 由系统分配一个当前空闲的端口（取得后立即释放，随后使用）。 */
 function freePort() {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -56,13 +56,13 @@ function freePort() {
 }
 
 /**
- * 写一份「把门指到指定端口、并打开诊断日志」的覆盖文件。
+ * 生成一份「把该插件指向指定端口、并开启诊断日志」的覆盖文件。
  *
- * 为什么用 --patch 覆盖而不是改 profile：不能为了跑测试去动用户的档。
- * 注意覆盖是**整体替换**门那份配置（实测：只写 port 会把 preset 冲掉），
- * 所以这里把要用的键全写齐 —— 尤其是 provider/model：缺了它们，会话能建起来
- * 但一发消息就失败（内核原文 `agent "…" has no provider/model`），
- * 那这个测试就会变成「验证一个不能说话的模式」。
+ * 采用 --patch 覆盖而不修改 profile 的原因：不得为运行测试而改动用户的档。
+ * 覆盖是整体替换该插件的配置（实测：只写 port 会使 preset 被清除），
+ * 因此此处写出全部需要的键 —— 尤其是 provider/model：缺少它们时会话可以建立，
+ * 但发送消息即失败（内核原文 `agent "…" has no provider/model`），
+ * 该测试将退化为「验证一个无法应答的模式」。
  */
 function writeOverlay(port) {
   fs.mkdirSync(BUILD, { recursive: true });
@@ -82,7 +82,7 @@ function writeOverlay(port) {
   return OVERLAY;
 }
 
-/** 读诊断日志（门写的，能看见内核侧到底挂没挂上预设）。 */
+/** 读取诊断日志（由该插件写入，可确认内核侧是否成功挂载预设）。 */
 function readDiag() {
   try {
     return fs.readFileSync(DIAG, 'utf8');
@@ -91,15 +91,15 @@ function readDiag() {
   }
 }
 
-/** 清单项只该有这几个字段 —— 内核内部字段不许漏给客户端。 */
+/** 清单项应仅包含以下字段 —— 内核内部字段不得暴露给客户端。 */
 const ALLOWED_KEYS = ['id', 'name', 'description', 'order'];
 
 /**
- * 从门自带的 bundle 补丁里读 provider/model，而不是在这里再写死一份。
+ * 从该插件自带的 bundle 补丁中读取 provider/model，不在此处另写一份固定值。
  *
- * 为什么：生产上的门用的是那份配置，这里要是抄错或抄漏，测试就会「通过」
- * 而生产是哑的。顺便也当成一条检查：那份补丁必须写明 provider/model
- * （缺了的话会话建得起来却发不出消息，是个很隐蔽的坑）。
+ * 原因：生产环境中的该插件使用那份配置，此处若抄录错误或遗漏，测试会「通过」
+ * 而生产环境无响应。该读取同时作为一项检查：那份补丁必须写明 provider/model
+ * （缺少时会话可以建立但无法发送消息，该缺陷不易发现）。
  */
 function readDoorDefaults() {
   const file = path.join(ROOT, '..', 'dsh-door', 'cordis.patch.yml');
@@ -121,45 +121,45 @@ async function main() {
   try {
     fs.unlinkSync(DIAG);
   } catch {
-    // 本来就没有，正常。
+    // 文件本就不存在，属正常情况。
   }
 
   const port = await freePort();
   const overlay = writeOverlay(port);
   console.log(`\n用 profile=${PROFILE}、端口 ${port}、覆盖文件 ${path.relative(ROOT, overlay)}`);
-  console.log(`（这样不用去抢 ${PORT}，也不会碰你桌面上那一个）`);
+  console.log(`（这样无需占用 ${PORT}，也不会碰桌面端那一个）`);
 
-  section('0. 前置：门自带的配置里必须写明 provider/model');
+  section('0. 前置：该插件自带的配置里必须写明 provider/model');
   check(
-    '门补丁里有 provider',
+    '该插件补丁里有 provider',
     typeof PROVIDER === 'string' && PROVIDER.length > 0,
     JSON.stringify(PROVIDER),
   );
   check(
-    '门补丁里有 model',
+    '该插件补丁里有 model',
     typeof MODEL === 'string' && MODEL.length > 0,
     JSON.stringify(MODEL),
   );
   if (!PROVIDER || !MODEL) {
-    console.log('  ❌ 缺了它们，走门的会话能建起来却发不出消息（内核原文 agent has no provider/model）。');
+    console.log('  ❌ 缺了它们，经该插件建立的会话能建立却发不出消息（内核原文 agent has no provider/model）。');
     console.log('     先修 packages/dsh-door/cordis.patch.yml，再跑这个测试。');
     process.exit(1);
   }
 
-  // 装的那份门必须跟源码一致 —— 否则这个套件就是在测旧代码（pnpm 对
-  // `file:` 依赖有缓存，改了源码它可能压根不重装，实测踩过）。
+  // 已安装的该插件必须与源码一致 —— 否则该套件测试的是旧代码（pnpm 对
+  // `file:` 依赖存在缓存，修改源码后可能不会重新安装，实测已出现）。
   //
-  // 但**只有测试档才自动重装**。用 `DSH_PANEL_PROFILE=desktop` 跑这个套件，
-  // 是为了在生产档上验一遍真实路径；那种时候绝不能顺手改用户的档，
-  // 只检查、只报告。（这条规矩是真踩出来的：早先它会拿 desktop 去装、
-  // 却对着 dshdoor 的路径比对，把生产档的依赖形态都换掉了。）
+  // 仅测试档会自动重新安装。使用 `DSH_PANEL_PROFILE=desktop` 运行该套件
+  // 是为了在生产档上验证真实路径；此时不得改动用户的档，
+  // 只检查、只报告。（该规则来自实际经验：早期实现会向 desktop 安装，
+  // 却按 dshdoor 的路径比对，导致生产档的依赖形态被改变。）
   if (PROFILE === TEST_PROFILE) {
     const sync = syncDoor({ log: (level, text) => console.log(`  [${level}] ${text}`) });
-    check('测试档里装的门跟源码一致（不一致会自动重装）', sync.drift.length === 0 || sync.synced, sync.drift.join('、'));
+    check('测试档里装的该插件与源码一致（不一致时自动重新安装）', sync.drift.length === 0 || sync.synced, sync.drift.join('、'));
   } else {
     const info = inspectDoor(PROFILE);
     console.log(`  [info] 跑的是 ${PROFILE} 档：按规矩**不自动改**它，只检查`);
-    check(`生产档 ${PROFILE} 里装上了门`, info.installed, info.path);
+    check(`生产档 ${PROFILE} 里已安装该插件`, info.installed, info.path);
     if (info.installed) {
       console.log(`  [info] 装的是 ${info.version}；跟当前源码${info.drift.length ? `不一致（${info.drift.join('、')}）—— 源码比装的新，属于开发中的正常情况` : '逐字节一致'}`);
     }
@@ -177,9 +177,9 @@ async function main() {
     section('1. 握手');
     client = new DoorClient({ host: '127.0.0.1', port, log: () => {} });
     const init = await client.connect();
-    check('连上了自己起的门', init && init.protocolVersion === 1, JSON.stringify(init));
+    check('已连接到自行启动的该插件', init && init.protocolVersion === 1, JSON.stringify(init));
 
-    section('2. 不点名：用门配置里的默认预设');
+    section('2. 不点名：使用该插件配置里的默认预设');
     const plain = await client.newSession(cwd);
     const plainMeta = readDoorMeta(plain);
     check('回复里带了预设清单', Array.isArray(plainMeta?.presets), JSON.stringify(plainMeta));
@@ -216,7 +216,7 @@ async function main() {
     check('拿到了 sessionId', typeof minimal?.sessionId === 'string' && minimal.sessionId.length > 0);
     const diagAfterMinimal = readDiag();
     check(
-      '门的内核日志里有「挂预设成功 preset=minimal」',
+      '该插件的内核日志里有「挂预设成功 preset=minimal」',
       diagAfterMinimal.includes(`挂预设成功（select）会话=${minimal.sessionId} preset=minimal`),
       diagAfterMinimal
         .split('\n')
@@ -247,14 +247,14 @@ async function main() {
     );
     check('没有把不存在的预设当成成功挂上去', !diagAll.includes('preset=no-such-preset'));
 
-    section('7. 真跑一个回合：极简模式下它照样有手（预设真的生效了）');
-    // 为什么用「回合里有没有真调工具」当证据，而不是去读会话记录：
-    // 实测确认，内核只在**桌面端那种建会话方式**下才把 agentPreset 写进
-    // 会话记录；走 ACP 门建的会话，记录里根本没有这个字段（建完就读、
-    // 跑完回合再读都没有）。所以记录当不了证据，行为才能。
-    // 而预设的整个意义就是「这个会话手里有哪些工具」—— 极简模式也带 shell，
-    // 所以它必须能调工具。模型在没有工具时会**把工具调用当文本写出来**
-    // （`<｜｜DSML｜｜invoke …>`），那正是这个检查要抓的症状。
+    section('7. 真跑一个回合：极简模式下同样可调用工具（预设确实生效）');
+    // 采用「回合中是否实际调用工具」作为证据，而不读取会话记录：
+    // 实测确认，内核仅在桌面端的会话建立方式下才会把 agentPreset 写入
+    // 会话记录；经 ACP 接入点插件建立的会话，记录中不含该字段（建立后读取、
+    // 运行回合后读取均如此）。因此记录不能作为证据，行为可以。
+    // 预设的意义在于「该会话可使用哪些工具」—— 极简模式同样包含 shell，
+    // 因此必须能够调用工具。模型在无工具时会把工具调用作为文本输出
+    // （`<｜｜DSML｜｜invoke …>`），该现象正是本检查要捕获的症状。
     const turn = await runTurn(client, minimal.sessionId, '用 shell 跑一下 echo dsh-door-minimal，把输出原样告我，别做别的。');
     check('极简模式下的回合跑通了', turn.ok, turn.error ?? '');
     check('回合里真的调了工具（不是只会说话）', turn.tools.length > 0, `工具调用 ${turn.tools.length} 次`);
@@ -265,14 +265,14 @@ async function main() {
     );
 
     section('8. 断线接回：预设要补回来，手不能丢（这里真出过 bug）');
-    // 这条是回归护栏。实测抓到过的真 bug：resume 出来的会话**一个工具都没有**，
-    // 模型只能把工具调用当文本写出来。原因是恢复时 agent 的作用域是重新组装的，
-    // 而内核只在会话记录里认预设 —— 走门建的会话记录里没有（见第 7 节的说明）。
-    // 门现在的做法是：select 被锁就改用 mount()（工厂期那个入口，不看锁）。
+    // 本条为回归保护措施。实测捕获的缺陷：resume 得到的会话不含任何工具，
+    // 模型只能把工具调用作为文本输出。原因是恢复时 agent 的作用域被重新组装，
+    // 而内核仅在会话记录中识别预设 —— 经该插件建立的会话记录中没有该字段（见第 7 节的说明）。
+    // 该插件当前的做法是：select 被锁定时改用 mount()（工厂期的入口，不检查锁）。
     //
-    // 故意复用第 7 节那段**已经跑过回合**的会话：只有跑过回合的会话，
-    // select 才会被内核锁住，从而真正走到 mount 那条路。刚建好没说过话的会话
-    // 走的是 select，测不到这个 bug（第一版就是这么写的，绿得毫无意义）。
+    // 此处故意复用第 7 节中已运行过回合的会话：只有运行过回合的会话，
+    // select 才会被内核锁定，从而真正进入 mount 路径。刚建立且未发送消息的会话
+    // 走的是 select，无法覆盖该缺陷（第一版即如此编写，测试通过但未验证任何内容）。
     const resumeId = minimal.sessionId;
     const diagBeforeResume = readDiag().length;
     client.close();
@@ -286,7 +286,7 @@ async function main() {
       check('接回来的当前预设还是 minimal', meta?.current === 'minimal', String(meta?.current));
       const diagResume = readDiag().slice(diagBeforeResume);
       check(
-        '门用 mount 把预设补回去了',
+        '该插件用 mount 把预设补回去了',
         diagResume.includes(`恢复会话补挂预设成功（mount）会话=${resumeId}`),
         diagResume
           .split('\n')
@@ -295,9 +295,9 @@ async function main() {
       );
       check('没有出现补挂失败', !diagResume.includes('补挂预设失败'), diagResume.split('\n').filter((l) => l.includes('失败')).join(' | '));
 
-      // 再断一次，这次**不点名**预设：门应该凭自己记得的（内核级记忆）补挂 minimal。
-      // 为什么要单独验：这份记忆要是跟着连接一起丢了，重连就会退回默认的
-      // standard —— 用户的会话会莫名其妙换模式。
+      // 再次断开，此次不指定预设：该插件应依据自身记录（内核级记忆）补挂 minimal。
+      // 单独验证的原因：该记忆若随连接一同丢失，重连会退回默认的
+      // standard —— 用户会话的模式会被无提示地改变。
       client2.close();
       await new Promise((resolve) => setTimeout(resolve, 500));
       const mark = readDiag().length;
@@ -305,9 +305,9 @@ async function main() {
       await client3.connect();
       try {
         const again = await client3.resumeSession(resumeId, cwd);
-        check('不点名时，门凭记忆补的还是 minimal', readDoorMeta(again)?.current === 'minimal', String(readDoorMeta(again)?.current));
+        check('不点名时，该插件按自身记录补回的仍是 minimal', readDoorMeta(again)?.current === 'minimal', String(readDoorMeta(again)?.current));
         const diag3 = readDiag().slice(mark);
-        check('日志里能看到它「记得」这个会话的预设', diag3.includes('记得=minimal'), diag3.split('\n').filter((l) => l.includes('记得=')).join(' | '));
+        check('日志里能看到它「记录」了这个会话的预设', diag3.includes('记录=minimal'), diag3.split('\n').filter((l) => l.includes('记录=')).join(' | '));
       } finally {
         client3.close();
       }
@@ -316,12 +316,12 @@ async function main() {
     }
   } finally {
     if (client) client.close();
-    // 只收自己拉起来的那个内核；本来就是别人开着的，stop() 是空操作。
+    // 仅回收自身启动的内核；若内核由其他进程启动，stop() 为空操作。
     door.stop();
     try {
       fs.unlinkSync(OVERLAY);
     } catch {
-      // 删不掉也不影响结果。
+      // 删除失败不影响结果。
     }
   }
 
@@ -335,12 +335,12 @@ async function main() {
 }
 
 /**
- * 跑一个回合，把这段时间里的工具调用与正文都收下来。
+ * 运行一个回合，收集该时间段内的工具调用与正文。
  *
- * 为什么直接听 DoorClient 的原始事件、而不套一层 DshSession：本套件测的是
- * **门**（协议那一段），不该把面板那一层的解析也拉进来背锅。ACP 的通知形状
- * 是内核定的：`session/update` 里 `update.sessionUpdate` 是 `tool_call` /
- * `tool_call_update` / `agent_message_chunk`（跟 DshSession 里的判断一致）。
+ * 直接监听 DoorClient 的原始事件、不封装一层 DshSession 的原因：本套件测试的是
+ * 协议部分（ACP 接入点插件 dsh-acp-door），不应把面板层的解析一并纳入。ACP 的通知形状
+ * 由内核定义：`session/update` 中的 `update.sessionUpdate` 为 `tool_call` /
+ * `tool_call_update` / `agent_message_chunk`（与 DshSession 中的判断一致）。
  *
  * @returns {Promise<{ok: boolean, tools: object[], answer: string, error?: string}>}
  */
@@ -367,6 +367,6 @@ async function runTurn(client, sessionId, text) {
 }
 
 main().catch((error) => {
-  console.log(`\n❌ 测试自己崩了：${error && error.stack ? error.stack : error}`);
+  console.log(`\n❌ 测试自身发生异常：${error && error.stack ? error.stack : error}`);
   process.exit(1);
 });

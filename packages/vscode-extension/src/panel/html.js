@@ -3,10 +3,10 @@
 /**
  * 生成 webview 的 HTML 骨架。
  *
- * 刻意不依赖 vscode：入参都是已经算好的 URI 字符串，
- * 这样这个函数可以在命令行里直接调用、把产物存下来看。
+ * 有意不依赖 vscode：入参均为已计算完成的 URI 字符串，
+ * 因此该函数可以在命令行中直接调用，并将产物保存后查看。
  *
- * 安全：严格的 CSP + nonce；不允许内联脚本、不允许外部资源。
+ * 安全：使用严格的 CSP 与 nonce；不允许内联脚本，不允许外部资源。
  */
 
 /** 生成一个一次性 nonce。 */
@@ -63,7 +63,7 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
       </label>
       <label class="field" id="preset-field" hidden>
         <span class="field-label">模式</span>
-        <select id="preset-select" class="select" title="换模式要在新建对话时（一段对话中途换不了）"></select>
+        <select id="preset-select" class="select" title="换模式需在新建对话时进行（会话进行中无法更换）"></select>
       </label>
       <div class="field" id="access-field" hidden>
         <span class="field-label">权限</span>
@@ -79,14 +79,14 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
   <main id="messages" class="messages" tabindex="0" aria-live="polite">
     <div class="empty" id="empty">
       <p class="empty-title">DSH Panel</p>
-      <p class="empty-hint">直接提问就行 —— DSH 会按需启动，不用先开桌面端。</p>
-      <p class="empty-note">记忆、历史、插件都在本机，跟桌面端是同一份。</p>
+      <p class="empty-hint">直接提问即可 —— DSH 会按需启动，不需要先启动桌面端。</p>
+      <p class="empty-note">记忆、历史与插件均位于本机，与桌面端为同一份数据。</p>
     </div>
   </main>
 
-  <!-- 历史会话浮层：盖住整个面板；列表内容由 main.js 填。
-       role/aria-modal：它确实盖住了底下所有东西（不只是视觉上），
-       所以要告诉读屏软件「现在只在这个框里」，别让它继续念底下的输入框。 -->
+  <!-- 历史会话浮层：覆盖整个面板；列表内容由 main.js 填充。
+       role/aria-modal：该浮层覆盖其下方的全部内容（不仅是视觉层面），
+       因此需告知读屏软件当前焦点仅位于该浮层内，避免其继续朗读下方的输入框。 -->
   <div id="history" class="history" role="dialog" aria-modal="true" aria-label="历史会话" hidden>
     <div class="history-head">
       <span class="history-title">历史会话</span>
@@ -102,7 +102,7 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
   <footer class="composer">
     <div class="attachments" id="attachments" hidden></div>
     <div class="composer-box">
-      <textarea id="input" class="input" rows="1" placeholder="给 DSH 发条消息…（Enter 发送，Shift+Enter 换行）"></textarea>
+      <textarea id="input" class="input" rows="1" placeholder="向 DSH 发送消息…（Enter 发送，Shift+Enter 换行）"></textarea>
       <button id="send" class="send" type="button" title="发送" aria-label="发送">
         <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M2.2 7.3 13 2.2c.5-.2 1 .2.8.7l-5.1 10.8c-.2.5-1 .5-1.2 0L6 10.4a.8.8 0 0 0-.4-.4L2.2 8.5c-.5-.2-.5-1 0-1.2Z"/></svg>
       </button>
@@ -116,9 +116,9 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
     </div>
   </footer>
 
-  <!-- 权限选择器：点顶栏那个「权限」按钮弹出的小卡片。
-       清单与当前值都由内核给（门 0.0.12 的 dsh-door/permission/*），
-       这个壳子里只放容器 —— 选项、说明、确认门全由 main.js 渲染。 -->
+  <!-- 权限选择器：点击顶栏「权限」按钮后弹出的卡片。
+       清单与当前值均由内核提供（dsh-door/permission/*，需要该插件 0.0.12 及以上版本），
+       此处仅放置容器 —— 选项、说明与确认区域均由 main.js 渲染。 -->
   <div id="access-pop" class="access-pop" role="dialog" aria-label="选择权限" hidden>
     <div class="access-pop-head">
       <span class="access-pop-title">权限</span>
@@ -130,18 +130,18 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
       <p id="access-confirm-body" class="access-confirm-body"></p>
       <div class="access-confirm-actions">
         <button id="access-confirm-accept" class="access-confirm-accept" type="button"></button>
-        <button id="access-confirm-cancel" class="access-confirm-cancel" type="button">算了</button>
+        <button id="access-confirm-cancel" class="access-confirm-cancel" type="button">取消</button>
       </div>
     </div>
   </div>
 
   <div id="permission" class="permission" hidden>
-    <div class="permission-title" id="permission-title">DSH 需要你的许可</div>
+    <div class="permission-title" id="permission-title">DSH 需要授权</div>
     <div class="permission-body" id="permission-body"></div>
     <div class="permission-actions" id="permission-actions"></div>
   </div>
 
-  <!-- markdown.js 必须在 main.js 之前：main.js 启动时就要用到它 -->
+  <!-- markdown.js 必须位于 main.js 之前：main.js 启动时即会使用它 -->
   <script nonce="${nonce}" src="${markdownUri}"></script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
