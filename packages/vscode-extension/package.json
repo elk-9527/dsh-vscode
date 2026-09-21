@@ -2,12 +2,12 @@
   "name": "dsh-panel",
   "displayName": "DSH Panel",
   "description": "在 VS Code 侧边栏中直接使用 DeepSeek Harness：桌面端运行时直接接入；未运行时使用同一份 $DSH_HOME 中已准备的配置集启动。",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "publisher": "Elk-ydy",
   "license": "MIT",
   "icon": "media/icon.png",
   "galleryBanner": {
-    "color": "#0e639c",
+    "color": "#4d6bfe",
     "theme": "dark"
   },
   "keywords": [

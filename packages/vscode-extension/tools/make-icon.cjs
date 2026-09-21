@@ -2,9 +2,9 @@
 /*
  * 生成市场使用的扩展图标 media/icon.png（128×128，VS Code 市场的要求）。
  *
- * 采用该实现方式的原因：仓库中唯一的图形资源是 media/dsh.svg，而该文件是**活动栏图标** ——
- * 24×24、单色、以 currentColor 着色（随主题变化）。市场图标必须为**自带颜色**的
- * 位图：市场页面不在 VS Code 内，没有可继承的主题变量，灰色描边在页面上不可见。
+ * 图形使用与活动栏一致的 DeepSeek 鲸鱼；市场版本增加品牌蓝渐变底与一个小型终端提示符，
+ * 用于区分“DeepSeek 本体”与“连接 DSH 的 VS Code 面板”。活动栏版本仍保持 currentColor，
+ * 市场图标则必须为自带颜色的位图。
  *
  * 因此此处将同一图形置于品牌色底上，使用**本机已安装的无头 Chrome** 渲染为
  * PNG（与 tools/shots.js 采用同一方式，不额外引入图形库，也不联网）。
@@ -20,33 +20,77 @@ const ROOT = path.join(__dirname, '..');
 const CHROME = findChrome();
 const OUT = path.join(ROOT, 'media', 'icon.png');
 const STAGE = path.join(ROOT, 'build', 'icon');
-/** 底色的选择：VS Code 深色主题中的主按钮蓝，在市场页面上具有足够辨识度且不造成视觉干扰。 */
-const BG = '#0e639c';
+/** DeepSeek 品牌蓝；由深至浅的渐变保证白色鲸鱼在小尺寸下仍有稳定对比度。 */
+const BG = '#4d6bfe';
 
 if (!fs.existsSync(CHROME)) {
   console.error(missingChromeMessage());
   process.exit(1);
 }
 
-// 活动栏图形（24×24 的 viewBox），原样嵌入，仅替换颜色与尺寸。
+// 活动栏的单色鲸鱼原样嵌入，只在市场图标中替换为白色并放大。
 const GLYPH = fs
   .readFileSync(path.join(ROOT, 'media', 'dsh.svg'), 'utf8')
   .replace(/<!--[\s\S]*?-->/g, '')
   .replace(/currentColor/g, '#ffffff')
-  .replace('<svg ', '<svg width="94" height="94" ');
+  .replace('<svg ', '<svg class="whale" width="108" height="92" ');
 
 const html = `<!doctype html>
 <meta charset="utf-8">
 <style>
-  html, body { margin: 0; padding: 0; width: 128px; height: 128px; overflow: hidden; }
+  html, body { margin: 0; padding: 0; width: 128px; height: 128px; overflow: hidden; background: transparent; }
   body {
-    background: ${BG};
     display: flex;
     align-items: center;
     justify-content: center;
   }
+  .tile {
+    position: relative;
+    width: 128px;
+    height: 128px;
+    overflow: hidden;
+    border-radius: 26px;
+    background: linear-gradient(145deg, #263eb8 0%, ${BG} 58%, #79a7ff 100%);
+  }
+  .whale {
+    position: absolute;
+    left: 8px;
+    top: 16px;
+    filter: drop-shadow(0 3px 4px rgba(13, 31, 96, 0.22));
+  }
+  .terminal {
+    position: absolute;
+    right: 9px;
+    bottom: 9px;
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
+    background: #ffffff;
+    box-shadow: 0 3px 8px rgba(13, 31, 96, 0.28);
+  }
+  .terminal::before {
+    content: '';
+    position: absolute;
+    left: 9px;
+    top: 9px;
+    width: 9px;
+    height: 9px;
+    border-top: 4px solid #3d5ce7;
+    border-right: 4px solid #3d5ce7;
+    transform: rotate(45deg);
+  }
+  .terminal::after {
+    content: '';
+    position: absolute;
+    left: 9px;
+    right: 7px;
+    bottom: 7px;
+    height: 3px;
+    border-radius: 2px;
+    background: #35c8ee;
+  }
 </style>
-${GLYPH}
+<div class="tile">${GLYPH}<span class="terminal"></span></div>
 `;
 
 fs.mkdirSync(STAGE, { recursive: true });
@@ -88,4 +132,4 @@ if (png.subarray(1, 4).toString() !== 'PNG') {
   process.exit(1);
 }
 
-console.log(`✅ media/icon.png：128×128，${(png.length / 1024).toFixed(1)} KB，底色 ${BG}`);
+console.log(`✅ media/icon.png：128×128，${(png.length / 1024).toFixed(1)} KB，DeepSeek 鲸鱼 + 终端标记，底色 ${BG}`);
