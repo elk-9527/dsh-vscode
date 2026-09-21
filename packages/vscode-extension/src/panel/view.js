@@ -774,8 +774,16 @@ class DshPanelView {
       });
     } catch (error) {
       const text = error && error.message ? error.message : String(error);
+      // 连接若已在等待 session/new 期间断开，wire() 的 close 处理已经展示过一次
+      // 断线说明并清空引用；这里不得再追加一张“新建失败”错误卡片。
+      const alreadyClosed = this.session !== session || this.client !== client;
+      if (alreadyClosed) return undefined;
       this.postError(`新建对话失败：${text}`);
       this.post({ type: 'status', state: 'error', detail: '未连接' });
+      // TCP/ACP 已经接通并不代表会话已经可用。若 session/new 失败却保留
+      // this.session，下一次发送会把这个“没有 sessionId 的半成品”当作正常连接，
+      // 因而既不重连，也无法自行恢复。主动拆除本次连接，使下一次操作重新走完整建连流程。
+      this.teardown();
       return undefined;
     }
 

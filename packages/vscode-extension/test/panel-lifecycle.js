@@ -4,6 +4,7 @@
 
 const Module = require('node:module');
 const { EventEmitter } = require('node:events');
+const net = require('node:net');
 
 const config = {
   host: '127.0.0.1',
@@ -23,7 +24,10 @@ const mockVscode = {
   env: { openExternal: async () => true },
   workspace: {
     workspaceFolders: [],
-    getConfiguration: () => ({ get: (key) => config[key], inspect: () => undefined }),
+    getConfiguration: () => ({
+      get: (key) => config[key],
+      inspect: (key) => ({ globalValue: config[key] }),
+    }),
   },
   commands: { executeCommand: async () => undefined },
 };
@@ -292,10 +296,101 @@ section('7. 旁路操作失败时保持真实的忙碌状态');
   check('模型回合仍在执行时停止按钮不会被误关', busy && busy.busy === true, JSON.stringify(posted));
 }
 
-console.log(`\n${'═'.repeat(56)}`);
-if (failures.length === 0) console.log(`✅ 全部通过：${passed} 项检查`);
-else {
-  console.log(`❌ 通过 ${passed} 项，失败 ${failures.length} 项：`);
-  for (const failure of failures) console.log(`   - ${failure}`);
-  process.exitCode = 1;
+/** ACP 已握手但 session/new 失败：不得把未初始化会话留给下一次发送。 */
+async function checkFailedSessionStart() {
+  section('8. 新建会话失败后清掉半成品，下一次操作能够重连');
+  let newAttempts = 0;
+  const sockets = new Set();
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+    socket.setEncoding('utf8');
+    let buffer = '';
+    socket.on('data', (chunk) => {
+      buffer += chunk;
+      let at;
+      while ((at = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, at).trim();
+        buffer = buffer.slice(at + 1);
+        if (!line) continue;
+        const frame = JSON.parse(line);
+        if (frame.method === 'initialize') {
+          socket.write(`${JSON.stringify({
+            jsonrpc: '2.0',
+            id: frame.id,
+            result: { protocolVersion: 1, agentInfo: { name: 'test' }, agentCapabilities: {} },
+          })}\n`);
+        } else if (frame.method === 'dsh-door/status') {
+          socket.write(`${JSON.stringify({
+            jsonrpc: '2.0',
+            id: frame.id,
+            error: { code: -32601, message: 'Method not found' },
+          })}\n`);
+        } else if (frame.method === 'session/new') {
+          newAttempts += 1;
+          if (newAttempts >= 3) {
+            socket.destroy();
+            continue;
+          }
+          socket.write(`${JSON.stringify({
+            jsonrpc: '2.0',
+            id: frame.id,
+            error: { code: -32000, message: '测试：新建失败' },
+          })}\n`);
+        }
+      }
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+
+  const previous = { port: config.port, selfStartPort: config.selfStartPort, autoStart: config.autoStart };
+  const port = server.address().port;
+  config.port = port;
+  config.selfStartPort = port + 1;
+  config.autoStart = false;
+  try {
+    const panel = new DshPanelView({ extensionUri: { fsPath: 'D:/extension' }, log: () => {}, kernels: fakeKernels() });
+    panel.post = () => {};
+    const first = await panel.ensureConnection();
+    check('建会话失败会向调用方返回未连接', first === undefined);
+    check('失败后不保留未初始化的会话和客户端', panel.session === undefined && panel.client === undefined);
+    await panel.ensureConnection();
+    check('下一次操作会重新建连并再次尝试 session/new', newAttempts === 2, String(newAttempts));
+    panel.teardown();
+
+    const disconnected = new DshPanelView({ extensionUri: { fsPath: 'D:/extension' }, log: () => {}, kernels: fakeKernels() });
+    const posted = [];
+    disconnected.post = (message) => posted.push(message);
+    await disconnected.ensureConnection();
+    check(
+      '建会话途中断线只显示一张错误卡片',
+      posted.filter((message) => message.type === 'error').length === 1,
+      JSON.stringify(posted),
+    );
+    check('建会话途中断线同样清空半成品', disconnected.session === undefined && disconnected.client === undefined);
+  } finally {
+    config.port = previous.port;
+    config.selfStartPort = previous.selfStartPort;
+    config.autoStart = previous.autoStart;
+    for (const socket of sockets) socket.destroy();
+    await new Promise((resolve) => server.close(resolve));
+  }
 }
+
+function finish() {
+  console.log(`\n${'═'.repeat(56)}`);
+  if (failures.length === 0) console.log(`✅ 全部通过：${passed} 项检查`);
+  else {
+    console.log(`❌ 通过 ${passed} 项，失败 ${failures.length} 项：`);
+    for (const failure of failures) console.log(`   - ${failure}`);
+    process.exitCode = 1;
+  }
+}
+
+checkFailedSessionStart().then(finish, (error) => {
+  failures.push(`新建会话失败回归自身异常（${error && error.stack ? error.stack : error}）`);
+  finish();
+});
