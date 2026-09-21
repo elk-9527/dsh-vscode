@@ -172,6 +172,12 @@ class DshPanelView {
     this.historyVia = undefined;
     /** 每个客户端在面板层注册的 close 处理器；主动拆除前需要先移除。 */
     this.clientCloseHandlers = new WeakMap();
+    /**
+     * 等待用户作答的反向权限请求。面板被关闭时必须主动回“取消”，否则内核会一直
+     * 等待一个已经不存在的 webview，当前模型回合也就永远无法结束。
+     * @type {Map<number|string, {client: DoorClient, session: DshSession}>}
+     */
+    this.pendingPermissionRequests = new Map();
   }
 
   // ── 视图 ────────────────────────────────────────────
@@ -198,6 +204,7 @@ class DshPanelView {
     webviewView.onDidDispose(() => {
       if (this.view !== webviewView) return;
       this.view = undefined;
+      this.cancelPendingPermissionRequests(undefined, '面板已关闭');
       // 视图不再存在时释放“正在使用后台内核”的引用。会话连接本身暂时保留：
       // 宽限期内重新打开面板可以继续同一会话；宽限期到期后 manager 回收内核，
       // 正常的 close 处理会记录 resumeTarget，之后可恢复上下文。
@@ -273,7 +280,7 @@ class DshPanelView {
           await this.refreshPermission();
           break;
         case 'permission':
-          if (this.session) this.session.answerPermission(message.requestId, message.optionId);
+          this.answerPendingPermission(message.requestId, message.optionId);
           break;
         case 'historyList':
           await this.sendHistoryList();
@@ -815,12 +822,21 @@ class DshPanelView {
       void this.refreshPermission();
     });
 
-    client.on('permission', (requestId, params) =>
-      this.post({ type: 'permission', requestId, params }),
-    );
+    client.on('permission', (requestId, params) => {
+      // 视图可能在模型发出权限请求之前被折叠/销毁。此时没有人能够点击选项，
+      // 必须立即回“取消”；仅把消息 post() 给不存在的视图会使内核永久等待。
+      if (!this.view) {
+        session.answerPermission(requestId, undefined);
+        this.log('info', `面板未打开，已取消权限请求 #${requestId}`);
+        return;
+      }
+      this.pendingPermissionRequests.set(requestId, { client, session });
+      this.post({ type: 'permission', requestId, params });
+    });
     const onClose = (reason) => {
       this.clientCloseHandlers.delete(client);
       client.off('close', onClose);
+      this.dropPendingPermissionRequests(client);
       session.dispose();
       // 断开原因可能很长（内核原文），写入对话流；顶栏只显示"未连接"。
       this.postError(this.disconnectText(reason));
@@ -1374,7 +1390,44 @@ class DshPanelView {
     return clip(text, max);
   }
 
+  /** 回答仍在等待的权限请求；未知或已回答的 id 不得写回当前连接。 */
+  answerPendingPermission(requestId, optionId) {
+    const pending = this.pendingPermissionRequests.get(requestId);
+    if (!pending || pending.session !== this.session) {
+      this.log('warn', `忽略不存在或已经结束的权限请求 #${requestId}`);
+      return false;
+    }
+    this.pendingPermissionRequests.delete(requestId);
+    pending.session.answerPermission(requestId, optionId);
+    return true;
+  }
+
+  /**
+   * 取消指定客户端（或全部客户端）尚未回答的权限请求。
+   * 删除记录先于写回，确保连接恰在此刻断开时也不会重复作答。
+   */
+  cancelPendingPermissionRequests(client, reason) {
+    for (const [requestId, pending] of [...this.pendingPermissionRequests]) {
+      if (client && pending.client !== client) continue;
+      this.pendingPermissionRequests.delete(requestId);
+      try {
+        pending.session.answerPermission(requestId, undefined);
+        this.log('info', `${reason || '连接结束'}，已取消权限请求 #${requestId}`);
+      } catch (error) {
+        this.log('warn', `取消权限请求 #${requestId} 失败：${this.errText(error)}`);
+      }
+    }
+  }
+
+  /** 连接已经关闭时只清理本地记录，不再向失效 socket 写回复。 */
+  dropPendingPermissionRequests(client) {
+    for (const [requestId, pending] of [...this.pendingPermissionRequests]) {
+      if (pending.client === client) this.pendingPermissionRequests.delete(requestId);
+    }
+  }
+
   teardown() {
+    this.cancelPendingPermissionRequests(undefined, '连接正在关闭');
     if (this.session) {
       this.session.dispose();
       this.session = undefined;

@@ -94,7 +94,11 @@ function fakeSession(id = 's-1') {
   const session = new EventEmitter();
   session.sessionId = id;
   session.disposed = 0;
+  session.answers = [];
   session.dispose = () => { session.disposed += 1; };
+  session.answerPermission = (requestId, optionId) => {
+    session.answers.push({ requestId, optionId });
+  };
   return session;
 }
 
@@ -159,6 +163,44 @@ section('3. 异常断开只显示一次，并记录恢复目标');
   check('异常断开记录原会话用于恢复', panel.resumeTarget === 'unexpected', String(panel.resumeTarget));
   check('关闭后的会话与客户端引用已清空', panel.session === undefined && panel.client === undefined);
   check('异常断开同样清理会话监听', session.disposed === 1, String(session.disposed));
+}
+
+section('4. 面板关闭时取消无人能够回答的权限请求');
+{
+  const panel = new DshPanelView({ extensionUri: { fsPath: 'D:/extension' }, log: () => {}, kernels: fakeKernels() });
+  const view = fakeView();
+  const session = fakeSession('permission-wait');
+  const client = fakeClient();
+  const posted = [];
+  panel.post = (message) => posted.push(message);
+  panel.resolveWebviewView(view);
+  panel.session = session;
+  panel.client = client;
+  panel.wire(session, client);
+
+  client.emit('permission', 41, { toolCall: { title: '需要确认' }, options: [] });
+  check(
+    '视图存在时把权限问题交给界面',
+    posted.some((item) => item.type === 'permission' && item.requestId === 41),
+    JSON.stringify(posted),
+  );
+  check('等待作答的请求被记录', panel.pendingPermissionRequests.size === 1);
+
+  view.disposeView();
+  check(
+    '视图销毁时主动回答取消（内核不会永久等待）',
+    session.answers.some((item) => item.requestId === 41 && item.optionId === undefined),
+    JSON.stringify(session.answers),
+  );
+  check('取消后不保留过期请求', panel.pendingPermissionRequests.size === 0);
+
+  client.emit('permission', 42, { toolCall: { title: '视图已不存在' }, options: [] });
+  check(
+    '视图已经不存在时新权限请求立即取消',
+    session.answers.some((item) => item.requestId === 42 && item.optionId === undefined),
+    JSON.stringify(session.answers),
+  );
+  check('未知请求 id 不会被误写回连接', panel.answerPendingPermission(999, 'allow') === false);
 }
 
 console.log(`\n${'═'.repeat(56)}`);
