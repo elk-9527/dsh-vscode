@@ -87,6 +87,13 @@ export function isNewSessionRequest(frame) {
   return Boolean(frame) && frame.method === 'session/new' && frame.id !== undefined;
 }
 
+/** 若为合法的 `session/close` 请求，返回其目标会话 id。 */
+export function sessionCloseTarget(frame) {
+  if (!frame || frame.method !== 'session/close' || frame.id === undefined) return undefined;
+  const sessionId = frame.params?.sessionId;
+  return typeof sessionId === 'string' && sessionId ? sessionId : undefined;
+}
+
 /** 判断是否为针对某个已跟踪请求 id 的回复。 */
 export function isResponseTo(frame, ids) {
   return Boolean(frame) && frame.id !== undefined && frame.method === undefined && ids.has(frame.id);
@@ -225,9 +232,24 @@ export async function waitForMount(pending, ms = MOUNT_WAIT_MS) {
  * @returns {Promise<string>} 要写进 socket 的行。
  */
 export async function decorateLine(line, state, diag) {
-  // 低成本预筛：没有跟踪中的请求时，无需解析该行。
-  if (state.replies.size === 0) return line;
+  // 低成本预筛：没有跟踪中的建会话/恢复/关闭请求时，无需解析该行。
+  if (state.replies.size === 0 && (!state.closes || state.closes.size === 0)) return line;
   const frame = parseLine(line);
+  // session/close 成功后，ACP 桥已释放该 agent；连接内的挂载状态也必须同步释放。
+  // 跨连接的 sessionPresets 刻意保留：已关闭的持久会话之后仍可能被恢复，届时需要原预设。
+  if (state.closes && isResponseTo(frame, state.closes)) {
+    const sessionId = state.closes.get(frame.id);
+    state.closes.delete(frame.id);
+    if (frame.error === undefined) {
+      state.applied.delete(sessionId);
+      state.pending.delete(sessionId);
+      state.resumes.delete(sessionId);
+      diag(`会话 ${sessionId} 已关闭：清理本连接的临时挂载状态`);
+    } else {
+      diag(`关闭会话 ${sessionId} 失败：保留本连接状态`);
+    }
+    return line;
+  }
   // 此处把 state.replies（Map）当作 id 集合使用：Map 同样提供 has()。
   if (!isResponseTo(frame, state.replies)) return line;
   const asked = state.replies.get(frame.id);
@@ -236,15 +258,23 @@ export async function decorateLine(line, state, diag) {
   // 出错的回复：没有 result 可补充，但需要把本次的点名移除干净（见上文说明）。
   if (!frame.result || typeof frame.result !== 'object') {
     if (asked) {
-      const at = state.queue.indexOf(asked);
+      const at = Array.isArray(state.queue) ? state.queue.indexOf(asked) : -1;
       if (at >= 0) state.queue.splice(at, 1);
-      if (typeof asked.sessionId === 'string' && asked.sessionId) state.resumes.delete(asked.sessionId);
+      if (typeof asked.sessionId === 'string' && asked.sessionId) state.resumes?.delete(asked.sessionId);
       diag(
         `请求 ${frame.id} 失败：将该请求的指定从队列中移除` +
           `（${asked.preset ?? '(未指定)'}），避免下一次建会话时被取用`,
       );
     }
     return line;
+  }
+
+  // 成功回复同样要清理请求期索引。通常 agent/created 已经取走 queue/resumes 中的值；
+  // 此处作为最终兜底，防止事件形状变化或异常时序让过期指定长期残留并污染下一次请求。
+  if (asked) {
+    const at = Array.isArray(state.queue) ? state.queue.indexOf(asked) : -1;
+    if (at >= 0) state.queue.splice(at, 1);
+    if (typeof asked.sessionId === 'string' && asked.sessionId) state.resumes?.delete(asked.sessionId);
   }
 
   const sessionId = frame.result?.sessionId ?? asked?.sessionId;

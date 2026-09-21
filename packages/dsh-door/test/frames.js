@@ -19,6 +19,7 @@ import {
   parseLine,
   readPresetMeta,
   requestedPreset,
+  sessionCloseTarget,
   waitForMount,
   withPresetMeta,
 } from '../lib/frames.js';
@@ -66,6 +67,10 @@ check('id 是 0 也算（0 是合法 id）', isNewSessionRequest({ id: 0, method
 check('别的 method 不算', !isNewSessionRequest({ id: 1, method: 'session/prompt' }));
 check('回复（没有 method）不算', !isNewSessionRequest({ id: 1, result: {} }));
 check('undefined 不算', !isNewSessionRequest(undefined));
+
+equal('session/close 取出目标 id', sessionCloseTarget({ id: 2, method: 'session/close', params: { sessionId: 's1' } }), 's1');
+equal('session/close 缺请求 id 时不跟踪', sessionCloseTarget({ method: 'session/close', params: { sessionId: 's1' } }), undefined);
+equal('session/close 缺会话 id 时不跟踪', sessionCloseTarget({ id: 2, method: 'session/close', params: {} }), undefined);
 check('null 不算', !isNewSessionRequest(null));
 
 // ─────────────────────────────────────────────────────────────
@@ -198,6 +203,7 @@ async function relayTests() {
     return {
       pending: new Map(),
       replies: new Map(),
+      closes: new Map(),
       applied: new Map(),
       sessionPresets: new Map(),
       defaultPreset: 'standard',
@@ -295,8 +301,8 @@ async function relayTests() {
   const lastLine = parseLine(text(sink3Chunks).split('\n').filter(Boolean).pop());
   equal('下一次建会话没有被上一次失败的点名污染',
     readPresetMeta(lastLine).requested, undefined);
-  check('队里剩下的是它自己那一条（不是上一次失败的那条）',
-    state3.queue.length === 1 && state3.queue[0] === nextAsk,
+  check('成功回复后请求期队列也已清空',
+    state3.queue.length === 0,
     `队列 ${state3.queue.map((item) => `${item.request}:${item.preset ?? '-'}`).join(',') || '(空)'}`);
 
   // session/resume 失败时同理：resumes 中的对应条目同样需要移除。
@@ -306,6 +312,35 @@ async function relayTests() {
   await writer3.write(encoder.encode('{"jsonrpc":"2.0","id":23,"error":{"code":-32000,"message":"恢复失败"}}\n'));
   await flushRelay();
   check('恢复失败时 resumes 里那条也摘掉了', !state3.resumes.has('s9'));
+
+  // session/resume 成功时也要清理请求期索引，不能让每次恢复都在连接内永久留一条。
+  const successfulResume = { request: 24, preset: 'minimal', sessionId: 's10' };
+  state3.resumes.set('s10', successfulResume);
+  state3.replies.set(24, successfulResume);
+  state3.applied.set('s10', 'minimal');
+  await writer3.write(encoder.encode('{"jsonrpc":"2.0","id":24,"result":{"sessionId":"s10"}}\n'));
+  await flushRelay();
+  check('恢复成功时 resumes 中的请求期索引已清理', !state3.resumes.has('s10'));
+
+  // session/close 成功：释放仅属于当前连接的状态，但保留跨连接的预设记忆（以后仍可 resume）。
+  state3.closes.set(25, 's10');
+  state3.applied.set('s10', 'minimal');
+  state3.pending.set('s10', Promise.resolve());
+  state3.resumes.set('s10', successfulResume);
+  state3.sessionPresets.set('s10', 'minimal');
+  await writer3.write(encoder.encode('{"jsonrpc":"2.0","id":25,"result":{}}\n'));
+  await flushRelay();
+  check('关闭成功后删除关闭请求索引', !state3.closes.has(25));
+  check('关闭成功后释放本连接的会话临时状态',
+    !state3.applied.has('s10') && !state3.pending.has('s10') && !state3.resumes.has('s10'));
+  equal('关闭成功后保留跨连接预设记忆', state3.sessionPresets.get('s10'), 'minimal');
+
+  // 关闭失败意味着会话仍然有效，不可提前删掉它的状态。
+  state3.closes.set(26, 's11');
+  state3.applied.set('s11', 'ptc');
+  await writer3.write(encoder.encode('{"jsonrpc":"2.0","id":26,"error":{"code":-32000,"message":"关闭失败"}}\n'));
+  await flushRelay();
+  check('关闭失败只移除请求索引并保留会话状态', !state3.closes.has(26) && state3.applied.get('s11') === 'ptc');
 
   // 未跟踪过的 id 出错：不改变任何状态，也不产生额外输出。
   state3.replies.clear();

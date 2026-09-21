@@ -42,6 +42,7 @@ import {
   normalizePresets,
   parseLine,
   requestedPreset,
+  sessionCloseTarget,
   waitForMount,
 } from './frames.js';
 import { DEFAULT_LIST_LIMIT, getSession, listSessions, resolveSessionsRoot } from './sessions.js';
@@ -360,9 +361,15 @@ function handleDoorStatus(line, state, diag) {
 /** 遇到 `session/new` 或 `session/resume` 时记录该请求（以及客户端在其上指定的预设）。 */
 function rememberSessionRequest(line, state, diag) {
   // 低成本预筛：绝大多数入站帧都不是建会话 / 恢复会话的请求。
-  if (!line.includes('session/new') && !line.includes('session/resume')) return;
+  if (!line.includes('session/new') && !line.includes('session/resume') && !line.includes('session/close')) return;
   const frame = parseLine(line);
   if (!frame || frame.id === undefined) return;
+  const closing = sessionCloseTarget(frame);
+  if (closing) {
+    state.closes.set(frame.id, closing);
+    diag(`收到 session/close（请求 ${frame.id} 会话 ${closing}）`);
+    return;
+  }
   const preset = requestedPreset(frame);
 
   if (isNewSessionRequest(frame)) {
@@ -764,6 +771,8 @@ export function apply(ctx, config = {}) {
       queue: [],
       /** 建会话 / 恢复会话的请求 id → 该次点名；出站时按 id 对应回来（Map 同时作为 id 集合使用）。 */
       replies: new Map(),
+      /** 关闭请求 id → sessionId；成功回复后释放本连接的挂载临时状态。 */
+      closes: new Map(),
       /** sessionId → 该次 session/resume 的点名（恢复时 sessionId 已知）。 */
       resumes: new Map(),
       /** sessionId → 实际挂载的预设（在本连接内使用，回复中需要报告当前值）。 */
