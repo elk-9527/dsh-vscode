@@ -175,9 +175,13 @@ class DshPanelView {
     /**
      * 等待用户作答的反向权限请求。面板被关闭时必须主动回“取消”，否则内核会一直
      * 等待一个已经不存在的 webview，当前模型回合也就永远无法结束。
-     * @type {Map<number|string, {client: DoorClient, session: DshSession}>}
+     * 多个工具可能同时发来确认请求，因此这里还负责排队：界面一次只显示一个，
+     * 回答当前项后再显示下一项，不能用后来的请求覆盖先来的请求。
+     * @type {Map<number|string, {client: DoorClient, session: DshSession, params: object}>}
      */
     this.pendingPermissionRequests = new Map();
+    /** 当前已经显示在 webview 中的权限请求 id；undefined 表示没有。 */
+    this.visiblePermissionRequestId = undefined;
   }
 
   // ── 视图 ────────────────────────────────────────────
@@ -262,6 +266,9 @@ class DshPanelView {
           await this.send(message.text, message.attachments);
           break;
         case 'stop':
+          // 停止当前回合也必须撤销权限弹窗；只取消主请求会留下一个已经过期、
+          // 但仍可点击的确认框，并可能让内核继续等待反向请求的回答。
+          this.cancelPendingPermissionRequests(undefined, '用户停止了当前回合');
           this.session ? this.session.stop() : undefined;
           break;
         case 'newSession':
@@ -830,8 +837,8 @@ class DshPanelView {
         this.log('info', `面板未打开，已取消权限请求 #${requestId}`);
         return;
       }
-      this.pendingPermissionRequests.set(requestId, { client, session });
-      this.post({ type: 'permission', requestId, params });
+      this.pendingPermissionRequests.set(requestId, { client, session, params });
+      this.showNextPendingPermissionRequest();
     });
     const onClose = (reason) => {
       this.clientCloseHandlers.delete(client);
@@ -1393,13 +1400,37 @@ class DshPanelView {
   /** 回答仍在等待的权限请求；未知或已回答的 id 不得写回当前连接。 */
   answerPendingPermission(requestId, optionId) {
     const pending = this.pendingPermissionRequests.get(requestId);
-    if (!pending || pending.session !== this.session) {
+    if (
+      !pending
+      || pending.session !== this.session
+      || this.visiblePermissionRequestId !== requestId
+    ) {
       this.log('warn', `忽略不存在或已经结束的权限请求 #${requestId}`);
       return false;
     }
     this.pendingPermissionRequests.delete(requestId);
-    pending.session.answerPermission(requestId, optionId);
+    this.visiblePermissionRequestId = undefined;
+    try {
+      pending.session.answerPermission(requestId, optionId);
+    } finally {
+      this.showNextPendingPermissionRequest();
+    }
     return true;
+  }
+
+  /** 按到达顺序只展示一个权限请求；其余请求保留在 Map 中等待。 */
+  showNextPendingPermissionRequest() {
+    if (this.visiblePermissionRequestId !== undefined) {
+      if (this.pendingPermissionRequests.has(this.visiblePermissionRequestId)) return;
+      this.visiblePermissionRequestId = undefined;
+    }
+    for (const [requestId, pending] of this.pendingPermissionRequests) {
+      if (pending.session !== this.session) continue;
+      this.visiblePermissionRequestId = requestId;
+      this.post({ type: 'permission', requestId, params: pending.params });
+      return;
+    }
+    this.post({ type: 'permissionClear' });
   }
 
   /**
@@ -1407,9 +1438,11 @@ class DshPanelView {
    * 删除记录先于写回，确保连接恰在此刻断开时也不会重复作答。
    */
   cancelPendingPermissionRequests(client, reason) {
+    let visibleRemoved = false;
     for (const [requestId, pending] of [...this.pendingPermissionRequests]) {
       if (client && pending.client !== client) continue;
       this.pendingPermissionRequests.delete(requestId);
+      if (requestId === this.visiblePermissionRequestId) visibleRemoved = true;
       try {
         pending.session.answerPermission(requestId, undefined);
         this.log('info', `${reason || '连接结束'}，已取消权限请求 #${requestId}`);
@@ -1417,12 +1450,21 @@ class DshPanelView {
         this.log('warn', `取消权限请求 #${requestId} 失败：${this.errText(error)}`);
       }
     }
+    if (visibleRemoved) this.visiblePermissionRequestId = undefined;
+    if (visibleRemoved || !client) this.showNextPendingPermissionRequest();
   }
 
   /** 连接已经关闭时只清理本地记录，不再向失效 socket 写回复。 */
   dropPendingPermissionRequests(client) {
+    let visibleRemoved = false;
     for (const [requestId, pending] of [...this.pendingPermissionRequests]) {
-      if (pending.client === client) this.pendingPermissionRequests.delete(requestId);
+      if (pending.client !== client) continue;
+      this.pendingPermissionRequests.delete(requestId);
+      if (requestId === this.visiblePermissionRequestId) visibleRemoved = true;
+    }
+    if (visibleRemoved) {
+      this.visiblePermissionRequestId = undefined;
+      this.showNextPendingPermissionRequest();
     }
   }
 

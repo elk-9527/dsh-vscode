@@ -94,8 +94,10 @@ function fakeSession(id = 's-1') {
   const session = new EventEmitter();
   session.sessionId = id;
   session.disposed = 0;
+  session.stopped = 0;
   session.answers = [];
   session.dispose = () => { session.disposed += 1; };
+  session.stop = () => { session.stopped += 1; };
   session.answerPermission = (requestId, optionId) => {
     session.answers.push({ requestId, optionId });
   };
@@ -201,6 +203,49 @@ section('4. 面板关闭时取消无人能够回答的权限请求');
     JSON.stringify(session.answers),
   );
   check('未知请求 id 不会被误写回连接', panel.answerPendingPermission(999, 'allow') === false);
+}
+
+section('5. 多个权限请求依次显示；停止回合会取消并清空弹窗');
+{
+  const panel = new DshPanelView({ extensionUri: { fsPath: 'D:/extension' }, log: () => {}, kernels: fakeKernels() });
+  const session = fakeSession('permission-queue');
+  const client = fakeClient();
+  const posted = [];
+  panel.post = (message) => posted.push(message);
+  panel.view = fakeView();
+  panel.session = session;
+  panel.client = client;
+  panel.wire(session, client);
+
+  client.emit('permission', 51, { toolCall: { title: '第一项' }, options: [{ optionId: 'once' }] });
+  client.emit('permission', 52, { toolCall: { title: '第二项' }, options: [{ optionId: 'once' }] });
+  const shownBeforeAnswer = posted.filter((item) => item.type === 'permission');
+  check(
+    '并发到达时只显示第一项（第二项不会覆盖它）',
+    shownBeforeAnswer.length === 1 && shownBeforeAnswer[0].requestId === 51,
+    JSON.stringify(shownBeforeAnswer),
+  );
+  check('两个请求都进入等待队列', panel.pendingPermissionRequests.size === 2);
+  check('尚未显示的请求不能被过期界面提前回答', panel.answerPendingPermission(52, 'once') === false);
+
+  check('回答当前请求成功', panel.answerPendingPermission(51, 'once') === true);
+  const shownAfterAnswer = posted.filter((item) => item.type === 'permission');
+  check(
+    '回答第一项后再显示第二项',
+    shownAfterAnswer.length === 2 && shownAfterAnswer[1].requestId === 52,
+    JSON.stringify(shownAfterAnswer),
+  );
+
+  void panel.onWebviewMessage({ type: 'stop' });
+  check('停止按钮确实中止当前会话', session.stopped === 1, String(session.stopped));
+  check(
+    '停止时把仍等待的第二项回答为取消',
+    session.answers.some((item) => item.requestId === 52 && item.optionId === undefined),
+    JSON.stringify(session.answers),
+  );
+  check('停止后权限队列为空', panel.pendingPermissionRequests.size === 0);
+  check('停止后通知界面清空权限弹窗', posted.some((item) => item.type === 'permissionClear'));
+  check('弹窗清空后的迟到回答被忽略', panel.answerPendingPermission(52, 'once') === false);
 }
 
 console.log(`\n${'═'.repeat(56)}`);

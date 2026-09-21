@@ -259,6 +259,30 @@ function assertionsScript(scene) {
       var buttons = permission.querySelectorAll('button');
       assert('权限选项数量正确', buttons.length === (EXPECT.needsOptions || 3), buttons.length + ' 个');
       assert('权限区有工具描述', permission.querySelector('#permission-body').textContent.trim().length > 0);
+
+      // 停止回合、断线或面板侧取消队列时会发 permissionClear。这里在真实浏览器中
+      // 验证它不只是改 hidden 属性，还会移除旧按钮，避免迟到点击回答上一轮请求。
+      window.postMessage({ type: 'permissionClear' }, '*');
+      await new Promise(function (resolve) { setTimeout(resolve, 100); });
+      assert('取消权限请求后弹窗立即隐藏', !visible(permission));
+      assert('取消权限请求后旧按钮已移除', permission.querySelectorAll('button').length === 0);
+
+      // 清理后仍须能显示队列中的下一项；恢复三按钮也让场景截图保持原有内容。
+      window.postMessage({
+        type: 'permission',
+        requestId: 8,
+        params: {
+          toolCall: { title: '执行命令：Remove-Item -Recurse build', rawInput: { command: 'Remove-Item -Recurse -Force build' } },
+          options: [
+            { optionId: 'allow_once', name: '允许这一次' },
+            { optionId: 'allow_always', name: '以后都允许' },
+            { optionId: 'reject_once', name: '拒绝' },
+          ],
+        },
+      }, '*');
+      await new Promise(function (resolve) { setTimeout(resolve, 100); });
+      assert('清理后可以正常显示下一项权限请求',
+        visible(permission) && permission.querySelectorAll('button').length === 3);
     }
 
     // ── 6. 溢出与重叠 ────────────────────────────────

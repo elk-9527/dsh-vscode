@@ -159,6 +159,9 @@
       case 'permission':
         showPermission(message);
         break;
+      case 'permissionClear':
+        hidePermission();
+        break;
       case 'error':
         addError(message.message, message.human);
         break;
@@ -1323,6 +1326,12 @@
 
   // ── 权限询问 ────────────────────────────────────────
 
+  function hidePermission() {
+    el.permission.hidden = true;
+    el.permissionActions.textContent = '';
+    el.permissionBody.textContent = '';
+  }
+
   function showPermission(message) {
     const params = message.params || {};
     const tool = params.toolCall || {};
@@ -1335,7 +1344,7 @@
       button.type = 'button';
       button.textContent = option.name || option.optionId;
       button.addEventListener('click', () => {
-        el.permission.hidden = true;
+        hidePermission();
         post({ type: 'permission', requestId: message.requestId, optionId: option.optionId });
       });
       el.permissionActions.appendChild(button);
@@ -1345,7 +1354,7 @@
       button.type = 'button';
       button.textContent = '拒绝';
       button.addEventListener('click', () => {
-        el.permission.hidden = true;
+        hidePermission();
         post({ type: 'permission', requestId: message.requestId, optionId: null });
       });
       el.permissionActions.appendChild(button);
