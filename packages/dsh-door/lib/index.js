@@ -48,6 +48,7 @@ import { DEFAULT_LIST_LIMIT, getSession, listSessions, resolveSessionsRoot } fro
 // 端口判定单独构成一个纯模块：否则必须载入整个插件（需 import 内核）才能测试该判定。
 import { LOOPBACK_HOST, resolveDoorHost, resolveDoorPort } from './port.js';
 import { resolveInitialModel } from './model.js';
+import { disposeLiveConnections } from './lifecycle.js';
 import {
   DOOR_STATUS_METHOD,
   doorStatusPayload,
@@ -867,8 +868,12 @@ export function apply(ctx, config = {}) {
   ctx.on('dispose', () => {
     disposed = true;
     diag('该插件已被卸载');
-    for (const entry of [...live]) entry.teardown();
-    live.clear();
+    const closed = disposeLiveConnections(live, (phase, error) => {
+      const text = `acp-door: 卸载时清理${phase === 'socket' ? '连接' : '连接桥'}失败：${String(error)}`;
+      diag(text);
+      ctx.logger?.warn?.(text);
+    });
+    if (closed > 0) diag(`卸载时已关闭 ${closed} 个客户端连接`);
     if (server.listening) server.close();
   });
 }

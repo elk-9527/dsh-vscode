@@ -1,5 +1,5 @@
 /** 该版本同时作为客户端兼容诊断信息；测试会核对它与 package.json 一致。 */
-export const DOOR_VERSION = '0.0.14';
+export const DOOR_VERSION = '0.0.15';
 
 /** 该插件自定义的只读状态方法。 */
 export const DOOR_STATUS_METHOD = 'dsh-door/status';
@@ -35,4 +35,3 @@ export function doorStatusPayload({ model, permissionAvailable = false } = {}) {
 export function doorStatusResult(id, result) {
   return { jsonrpc: '2.0', id, result };
 }
-

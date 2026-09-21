@@ -31,6 +31,7 @@ const suites = [
   { name: '该插件的模型选择与状态（纯函数）', file: '../dsh-door/test/model-status.js', always: true },
   // ACP 接入点插件（dsh-acp-door）的权限预设旁路方法（0.0.12 版）：清单来自用户可配置的档，形状不能假设。
   { name: '该插件的权限预设方法（纯函数）', file: '../dsh-door/test/permission.js', always: true },
+  { name: '该插件的连接生命周期（纯函数）', file: '../dsh-door/test/lifecycle.js', always: true },
   // 面板侧把内核的清单转换为中文界面（标签与桌面端逐字一致）。
   { name: '权限预设的界面翻译（纯函数）', file: 'test/permission.js', always: true },
   // 两份「历史会话读取」实现（该插件的 ESM 版 + 面板的 CJS 版）必须逐项一致 ——

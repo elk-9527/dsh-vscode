@@ -138,7 +138,8 @@ async function main() {
     const init = await client.connect();
     check('已连接到自行启动的该插件', init && init.protocolVersion === 1, JSON.stringify(init));
     const status = await client.doorStatus();
-    check('接入点报告的版本与源码一致', status?.version === '0.0.14', JSON.stringify(status));
+    const expectedVersion = require('../../dsh-door/package.json').version;
+    check('接入点报告的版本与源码一致', status?.version === expectedVersion, JSON.stringify(status));
     check('从 DSH 当前设置取得了完整模型', status?.model?.ready === true, JSON.stringify(status?.model));
     check('模型来源确实是 DSH 默认设置（测试没有偷偷写回固定值）', status?.model?.source === 'dsh-default', JSON.stringify(status?.model));
 

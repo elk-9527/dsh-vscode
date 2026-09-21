@@ -220,6 +220,7 @@ DSH 冷启动时，插件会先等待用户设置加载完成再开放端口，�
 
 | 版本 | 改了什么 |
 | --- | --- |
+| 0.0.15 | 卸载、重载或退出时完整关闭所有客户端连接；单条连接清理失败不再阻断其余连接。 |
 | 0.0.14 | 默认跟随 DSH 当前模型；新增安全状态接口；修复冷启动时用户设置尚未加载导致首次连接选错模型。 |
 | 0.0.13 | 固定接入点监听 `127.0.0.1`，配置中的其它监听地址会被忽略。 |
 | 0.0.12 | 新增 `dsh-door/permission/get` 与 `dsh-door/permission/set` 两个旁路方法：将内核 `@deepseek-ai/dsh-permission-presets` 的权限预设**清单与切换**透传给客户端（ACP 仅暴露模型与推理强度两个 config option，权限选择器属于其「刻意不提供」的 DSH 专用 UI 类别）。清单**不写死** —— 内核配置了什么就返回什么（`read-only`/`workspace-write`/`danger-full-access` 来自 `dsh-base`，`auto-approval` 由 `dsh-auto-approval-plugin` 添加，用户也可自行添加），因此客户端一侧与桌面端始终为同一真源。`permissionPresets` 是**可选**依赖（`ctx.inject`），档中未挂载该服务时该插件照常工作、仅返回「这个内核没有权限预设」。回归测试：`test/permission.js`（纯函数 29 项）+ 扩展一侧的 `test/permission-live.js`（真内核，四档全切一遍 24 项）。 |
