@@ -17,8 +17,8 @@
  *   'busy'             {busy}
  *   'config'           {configOptions}
  *   'permission'       {requestId, params}
- *   'error'            {message}
  *   'session'          {sessionId}
+ *   'disconnect'       {reason}         仅供非面板调用方观察连接结束；不当作回合错误
  */
 
 const { EventEmitter } = require('node:events');
@@ -63,7 +63,9 @@ class DshSession extends EventEmitter {
 
     this._onUpdate = (sessionId, update) => this._handleUpdate(sessionId, update);
     this.client.on('update', this._onUpdate);
-    this._onClose = (reason) => this.emit('error', { message: `与 DSH 的连接断了：${reason}` });
+    // 连接结束不是“回合错误”：面板层掌握内核来源、退出码与恢复策略，能够给出更准确的
+    // 说明。若这里同时发 error，面板会为同一次断线显示两张错误卡片。
+    this._onClose = (reason) => this.emit('disconnect', { reason });
     this.client.on('close', this._onClose);
   }
 
@@ -178,9 +180,9 @@ class DshSession extends EventEmitter {
       return { stopReason };
     } catch (error) {
       entry.status = 'error';
-      const message = error && error.message ? error.message : String(error);
-      this.emit('error', { message: `回合失败：${message}` });
       this.emit('done', { id, status: 'error', stopReason: 'error' });
+      // 只抛给调用方，由最外层界面统一展示一次。不得在此处 emit('error') 后再抛，
+      // 否则同一个失败会产生两张错误卡片。
       throw error;
     } finally {
       this.#current = null;

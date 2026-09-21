@@ -71,16 +71,6 @@ function freePort() {
   });
 }
 
-/** 从该插件自带的 bundle 补丁中读取 provider/model（见 test/presets.js 的说明）。 */
-function readDoorDefaults() {
-  const text = fs.readFileSync(path.join(ROOT, '..', 'dsh-door', 'cordis.patch.yml'), 'utf8');
-  const pick = (key) => {
-    const hit = text.match(new RegExp(`^\\s*${key}:\\s*(\\S+)\\s*$`, 'm'));
-    return hit ? hit[1] : '';
-  };
-  return { provider: pick('provider'), model: pick('model') };
-}
-
 /**
  * 覆盖文件：把该插件指向测试端口，并将权限预设表按用户机器的配置写入。
  *
@@ -90,15 +80,12 @@ function readDoorDefaults() {
  */
 function writeOverlay(port) {
   fs.mkdirSync(BUILD, { recursive: true });
-  const { provider, model } = readDoorDefaults();
   const yaml = [
     '# 测试自动生成，别手改（test/permission-live.js）',
     '- id: acp-door',
     '  config:',
     '    host: 127.0.0.1',
     `    port: ${port}`,
-    `    provider: ${provider}`,
-    `    model: ${model}`,
     '    preset: standard',
     `    diagLog: '${DIAG}'`,
     '',
@@ -149,12 +136,6 @@ async function main() {
     // 文件本就不存在，属正常情况。
   }
 
-  const defaults = readDoorDefaults();
-  if (!defaults.provider || !defaults.model) {
-    console.log('  ❌ 该插件补丁里缺 provider/model，先修 packages/dsh-door/cordis.patch.yml');
-    process.exit(1);
-  }
-
   const port = await freePort();
   const overlay = writeOverlay(port);
   console.log(`\n用 profile=${PROFILE}、端口 ${port}、覆盖文件 ${path.relative(ROOT, overlay)}`);
@@ -186,6 +167,9 @@ async function main() {
     client = new DoorClient({ host: '127.0.0.1', port, log: () => {} });
     const init = await client.connect();
     check('已连接到自行启动的该插件', init && init.protocolVersion === 1, JSON.stringify(init));
+    const status = await client.doorStatus();
+    check('接入点从 DSH 当前设置取得了完整模型', status?.model?.ready === true, JSON.stringify(status?.model));
+    check('权限测试同样走动态默认模型路径', status?.model?.source === 'dsh-default', JSON.stringify(status?.model));
 
     section('2. 建两段会话（权限是每段会话的事，得能对比）');
     const a = await client.newSession(cwd);

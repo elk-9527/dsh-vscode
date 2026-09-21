@@ -494,14 +494,26 @@ function typesOf(items) {
     check('无法识别的错误原文照旧保留', other.raw === weird);
     check('无法识别时提示查看日志或提供原文', /日志|提供/.test(other.advice), other.advice);
 
-    // 端到端：错误从会话层产生时，界面必须同时收到「可读说明 + 原文」。
+    // 端到端：会话发送失败后，错误由最外层消息处理器统一展示一次，并且
+    // 同时带上「可读说明 + 原文」。会话层不再额外 emit('error')，否则同一次
+    // 失败会产生两张错误卡片。
     const fake = cases[0].text;
     const before = view.messages.length;
-    panel.session.emit('error', { message: fake });
-    const posted = view.messages
+    const realSend = panel.session.send;
+    panel.session.send = async () => {
+      throw new Error(fake);
+    };
+    try {
+      await panel.onWebviewMessage({ type: 'send', text: '触发一次模拟错误' });
+    } finally {
+      panel.session.send = realSend;
+    }
+    const postedErrors = view.messages
       .slice(before)
       .map((item) => item.message)
-      .find((item) => item.type === 'error');
+      .filter((item) => item.type === 'error');
+    const posted = postedErrors[0];
+    check('同一次失败只显示一张错误卡片', postedErrors.length === 1, JSON.stringify(postedErrors));
     check('错误经过面板时附带了可读说明', Boolean(posted && posted.human && posted.human.title), JSON.stringify(posted));
     check(
       '说明的分类也传到了界面',

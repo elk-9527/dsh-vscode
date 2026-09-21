@@ -75,6 +75,8 @@ class DshPanelView {
     this.view = undefined;
     /** @type {DoorClient|undefined} */
     this.client = undefined;
+    /** @type {object|undefined} 0.0.14+ 接入点返回的不含凭据的诊断状态。 */
+    this.doorStatus = undefined;
     /** @type {DshSession|undefined} */
     this.session = undefined;
     /** @type {{dispose: () => void}|undefined} 本扩展启动的后台 DSH。 */
@@ -168,6 +170,8 @@ class DshPanelView {
      * @type {'door'|'local'|undefined}
      */
     this.historyVia = undefined;
+    /** 每个客户端在面板层注册的 close 处理器；主动拆除前需要先移除。 */
+    this.clientCloseHandlers = new WeakMap();
   }
 
   // ── 视图 ────────────────────────────────────────────
@@ -192,8 +196,20 @@ class DshPanelView {
     });
     webview.onDidReceiveMessage((message) => this.onWebviewMessage(message));
     webviewView.onDidDispose(() => {
-      if (this.view === webviewView) this.view = undefined;
+      if (this.view !== webviewView) return;
+      this.view = undefined;
+      // 视图不再存在时释放“正在使用后台内核”的引用。会话连接本身暂时保留：
+      // 宽限期内重新打开面板可以继续同一会话；宽限期到期后 manager 回收内核，
+      // 正常的 close 处理会记录 resumeTarget，之后可恢复上下文。
+      this.kernels.release(this);
+      this.log('info', '面板视图已销毁，已释放后台 DSH 的使用引用');
     });
+    // 宽限期内重新建立视图：重新声明正在使用该后台内核，取消原定回收计时。
+    if (this.background) {
+      const cfg = this.config();
+      const owned = this.kernels.live(cfg.host, cfg.selfStartPort);
+      if (owned && owned.background === this.background) this.kernels.acquire(this, owned);
+    }
     this.log('info', '面板已打开');
   }
 
@@ -669,6 +685,44 @@ class DshPanelView {
       return undefined;
     }
 
+    // 新版接入点会明确报告它准备给新会话使用哪个模型。旧版没有此方法时继续兼容；
+    // 新版明确报告“没有模型”时则在建会话之前停止并给出可执行提示，避免用户直到
+    // 发送第一条消息才看到晦涩的 `agent has no provider/model`。
+    try {
+      const status = await client.doorStatus();
+      this.doorStatus = status;
+      if (status?.version) this.log('info', `接入点插件版本 ${status.version}`);
+      if (status?.model?.ready === false) {
+        client.close();
+        this.postError('DSH 还没有可供新对话使用的模型。', {
+          title: '尚未选择模型',
+          advice: '请先在 DSH 的模型设置中选择一个默认模型，再重新连接。',
+          raw:
+            '接入点插件已正常连接，但未能从 DSH 读取完整的 provider/model。' +
+            (status.model.partialConfig
+              ? '该插件配置中只填写了其中一项，这组不完整配置已被忽略。'
+              : ''),
+        });
+        this.post({ type: 'status', state: 'error', detail: '未选择模型' });
+        return undefined;
+      }
+      if (status?.model?.ready) {
+        this.log(
+          'info',
+          `新会话初始模型 ${status.model.provider}/${status.model.model}` +
+            `（来源=${status.model.source || 'unknown'}）`,
+        );
+      }
+    } catch (error) {
+      const text = this.errText(error);
+      if (isMissingMethod(error, text)) {
+        this.log('info', '接入点插件版本较旧，不提供状态诊断；继续使用兼容路径');
+      } else {
+        // 状态方法只是诊断增强，读取失败不应使一个原本可用的旧接入点失效。
+        this.log('warn', `读取接入点状态失败，继续建会话：${text}`);
+      }
+    }
+
     this.client = client;
     const session = new DshSession({ client, log: this.log });
     this.session = session;
@@ -754,7 +808,6 @@ class DshPanelView {
         detail: payload.busy ? '工作中…' : '就绪',
       });
     });
-    session.on('error', (payload) => this.postError(payload.message));
     session.on('session', (payload) => {
       this.log('info', `当前会话 ${payload.sessionId}`);
       // 会话确定后（新建/恢复/切换内核）读取一次权限：权限属于内核状态，
@@ -765,7 +818,10 @@ class DshPanelView {
     client.on('permission', (requestId, params) =>
       this.post({ type: 'permission', requestId, params }),
     );
-    client.on('close', (reason) => {
+    const onClose = (reason) => {
+      this.clientCloseHandlers.delete(client);
+      client.off('close', onClose);
+      session.dispose();
       // 断开原因可能很长（内核原文），写入对话流；顶栏只显示"未连接"。
       this.postError(this.disconnectText(reason));
       this.post({ type: 'status', state: 'error', detail: '未连接' });
@@ -774,8 +830,13 @@ class DshPanelView {
       if (session.sessionId) this.resumeTarget = session.sessionId;
       // 使面板在下次执行「发送」时自动重连，而不是停留在无连接状态。
       if (this.session === session) this.session = undefined;
-      if (this.client === client) this.client = undefined;
-    });
+      if (this.client === client) {
+        this.client = undefined;
+        this.doorStatus = undefined;
+      }
+    };
+    this.clientCloseHandlers.set(client, onClose);
+    client.on('close', onClose);
   }
 
   /**
@@ -1319,9 +1380,14 @@ class DshPanelView {
       this.session = undefined;
     }
     if (this.client) {
-      this.client.close();
+      const client = this.client;
+      const onClose = this.clientCloseHandlers.get(client);
+      if (onClose) client.off('close', onClose);
+      this.clientCloseHandlers.delete(client);
+      client.close();
       this.client = undefined;
     }
+    this.doorStatus = undefined;
     // 下一轮连接重新判定历史会话的读取来源（用户可能在此期间升级了接入点插件）。
     this.historyVia = undefined;
     // 权限相关说明也重新输出一次（接入点插件可能已升级）。

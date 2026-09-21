@@ -40,7 +40,7 @@ function section(title) {
  * @param {object} options.newSessionReply session/new 的回复。
  * @param {Function} [options.setConfigReply] 收到 setConfigOption 时返回什么 / 执行什么。
  */
-function fakeClient({ newSessionReply, setConfigReply } = {}) {
+function fakeClient({ newSessionReply, setConfigReply, promptReply } = {}) {
   const client = new EventEmitter();
   client.calls = { newSession: [], prompt: [], setConfigOption: [], respond: [], close: [] };
   client.newSession = async (cwd, options) => {
@@ -49,6 +49,7 @@ function fakeClient({ newSessionReply, setConfigReply } = {}) {
   };
   client.prompt = async (sessionId, blocks, options) => {
     client.calls.prompt.push({ sessionId, blocks, options });
+    if (typeof promptReply === 'function') return promptReply(sessionId, blocks, options);
     return { stopReason: 'end_turn' };
   };
   client.setConfigOption = async (sessionId, configId, value) => {
@@ -248,6 +249,26 @@ async function main() {
     const stopped = session.stop();
     check('没有回合可中断时返回 false，不抛错', stopped === false, String(stopped));
   }
+  {
+    const client = fakeClient({
+      newSessionReply: { sessionId: 's-1', configOptions: [] },
+      promptReply: async () => { throw new Error('模拟回合失败'); },
+    });
+    const session = new DshSession({ client, log: () => {} });
+    await session.start({ cwd: 'D:\\x' });
+    const errors = [];
+    const done = [];
+    session.on('error', (payload) => errors.push(payload));
+    session.on('done', (payload) => done.push(payload));
+    let thrown;
+    try {
+      await session.send('触发失败');
+    } catch (error) {
+      thrown = error;
+    }
+    check('回合失败只向调用方抛出，不再额外广播 error', errors.length === 0 && /模拟回合失败/.test(thrown && thrown.message), JSON.stringify(errors));
+    check('回合失败仍发送一次 done(error) 以结束界面状态', done.length === 1 && done[0].status === 'error', JSON.stringify(done));
+  }
 
   // ── 6. 断线 ─────────────────────────────────────────────
   section('6. 该插件断开时');
@@ -255,11 +276,13 @@ async function main() {
     const client = fakeClient({ newSessionReply: { sessionId: 's-1', configOptions: [] } });
     const session = new DshSession({ client, log: () => {} });
     await session.start({ cwd: 'D:\\x' });
+    const disconnects = [];
     const errors = [];
+    session.on('disconnect', (payload) => disconnects.push(payload));
     session.on('error', (payload) => errors.push(payload));
     client.emit('close', '内核退出了');
-    check('断线会广播一条错误（界面才知道要提示）', errors.length === 1, JSON.stringify(errors));
-    check('错误里带着原因，不是空话', String(errors[0].message).includes('内核退出了'), errors[0].message);
+    check('断线只广播 disconnect，不重复广播 error', disconnects.length === 1 && errors.length === 0, JSON.stringify({ disconnects, errors }));
+    check('断线事件里带着原因', String(disconnects[0].reason).includes('内核退出了'), disconnects[0].reason);
   }
 
   console.log('\n════════════════════════════════════════════════════════');

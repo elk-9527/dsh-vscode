@@ -8,9 +8,9 @@
         # 仅监听本机回环地址。其它 host 会被插件忽略。
         host: 127.0.0.1
         port: 47821
-        # 新会话的初始模型；面板接入后可按会话另行修改。
-        provider: opencode-go
-        model: deepseek-v4.1-flash
+        # 新会话默认跟随 DSH 设置中当前选择的模型。若确实要让这个接入点固定使用
+        # 某个模型，可在 profile 的用户补丁层同时填写 provider 与 model；只填一项
+        # 会被忽略，避免把两个不同来源的半套配置错误拼在一起。
         # 新会话挂载哪套 agent preset。桌面端已关闭宿主层的全部工具，改为
         # 「每个会话按预设挂载」，而 ACP 路径不指定预设，因此由该插件补挂。
         # 可选：standard（标准）| ptc（PTC 模式）| cordis（创造模式）| minimal（极简模式）。

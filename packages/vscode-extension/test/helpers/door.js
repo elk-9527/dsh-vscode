@@ -9,9 +9,15 @@
  */
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
-const { probePort, waitForPort, spawnBackgroundDsh, runDshSync } = require('../../src/door/locate');
+const {
+  probePort,
+  spawnBackgroundDsh,
+  runDshSync,
+  dshCommandCandidates,
+} = require('../../src/door/locate');
 
 const HOST = process.env.DSH_PANEL_HOST || '127.0.0.1';
 const PORT = Number(process.env.DSH_PANEL_PORT || 47821);
@@ -35,6 +41,36 @@ function installedDoorPath(profile) {
 
 /** 测试档中该插件的所在路径（下文各项检查均针对该路径）。 */
 const DOOR_INSTALLED = installedDoorPath(TEST_PROFILE);
+
+let cachedDshCommand;
+
+/**
+ * 找到这台机器上真实可执行的 DSH 命令。
+ *
+ * 测试原先直接使用 `dsh`，但 VS Code/非交互终端常常看不到用户 npm 的 PATH；
+ * 面板生产代码早已支持默认安装目录，测试帮助器却没有复用，结果根目录 `npm test`
+ * 会在每个真 DSH 套件中白等两分钟。此处逐项执行只读的 `--version`，成功者缓存。
+ */
+function resolveTestDshCommand({ command, log = () => {} } = {}) {
+  if (command) return command;
+  if (cachedDshCommand) return cachedDshCommand;
+  const candidates = dshCommandCandidates({
+    dshCommand: process.env.DSH_PANEL_DSH || 'dsh',
+    homedir: os.homedir(),
+  });
+  const failures = [];
+  for (const candidate of candidates) {
+    try {
+      runDshSync({ command: candidate, args: ['--version'], timeoutMs: 10000 });
+      cachedDshCommand = candidate;
+      log('info', `测试使用的 DSH 命令：${candidate}`);
+      return candidate;
+    } catch (error) {
+      failures.push(String(error && error.message ? error.message : error).split('\n')[0]);
+    }
+  }
+  throw new Error(`找不到可执行的 DSH：${failures.join('；')}`);
+}
 
 function doorIsUp(host = HOST, port = PORT) {
   return probePort(host, port, 800);
@@ -104,7 +140,8 @@ function doorDrift() {
  *
  * @returns {{synced: boolean, drift: string[], copied: string[], skipped?: boolean}}
  */
-function syncDoor({ log = () => {}, command = process.env.DSH_PANEL_DSH || 'dsh' } = {}) {
+function syncDoor({ log = () => {}, command } = {}) {
+  command = resolveTestDshCommand({ command, log });
   const drift = doorDrift();
   if (drift.length === 0) {
     log('info', '该插件与源码一致，无需重新安装');
@@ -194,8 +231,9 @@ async function ensureDoor({ host = HOST, port = PORT, profile = PROFILE, log = (
   }
 
   log('info', `该插件未监听，自行启动一个后台 DSH（profile=${profile}）`);
+  const command = resolveTestDshCommand({ log });
   const kernel = spawnBackgroundDsh({
-    command: process.env.DSH_PANEL_DSH || 'dsh',
+    command,
     profile,
     log,
     extraArgs,
@@ -205,10 +243,23 @@ async function ensureDoor({ host = HOST, port = PORT, profile = PROFILE, log = (
     // 而任意空闲端口上等待不到该插件的原因（实际出现：等待 120 秒后才发现该问题）。
     port,
   });
-  const ok = await waitForPort(host, port, { totalMs: 120000 });
+  const deadline = Date.now() + 120000;
+  let ok = false;
+  while (Date.now() < deadline) {
+    if (await doorIsUp(host, port)) {
+      ok = true;
+      break;
+    }
+    if (kernel.child.exitCode !== null || kernel.child.signalCode !== null) break;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
   if (!ok) {
+    const tail = typeof kernel.stderrTail === 'function' ? kernel.stderrTail() : '';
     kernel.dispose();
-    throw new Error(`后台 DSH 已启动，但 ${host}:${port} 始终未建立监听（profile=${profile}）`);
+    throw new Error(
+      `后台 DSH 未能在 ${host}:${port} 建立监听（profile=${profile}）` +
+        (tail ? `：${tail.split(/\r?\n/).filter(Boolean).slice(-2).join(' | ')}` : ''),
+    );
   }
   return {
     started: true,
@@ -228,4 +279,5 @@ module.exports = {
   PORT,
   PROFILE,
   TEST_PROFILE,
+  resolveTestDshCommand,
 };

@@ -7,7 +7,8 @@
 桌面端未运行时，面板使用同一份 `$DSH_HOME` 中已准备的 `vscode-panel` 配置集自行启动。
 
 本扩展不是另一个 agent，也不会另起一套记忆。接入桌面端时，模型、工具与权限状态来自
-同一个运行内核；自行启动时，配置集内的插件、模型与设置需要单独准备，不会自动复制桌面端配置。
+同一个运行内核；自行启动时仍读取 DSH 当前默认模型，但配置集内的个人插件和补丁需要单独准备，
+不会自动复制桌面端配置集。
 
 ![面板](media/screenshots/panel-chat.png)
 
@@ -158,8 +159,9 @@ error: profile "desktop" is managed exclusively by the Electron application
    dsh plugin --profile vscode-panel list
    ```
 
-   插件配置中的 `provider` 和 `model` 必须与本机 DSH 的可用服务一致，详见
-   [`dsh-acp-door` 的配置说明](../dsh-door/README.md#配置)。安装或更新插件后重启该配置集的内核。
+   插件默认跟随该配置集中 DSH 当前选择的模型，无需重复填写 `provider` 和 `model`；若尚未
+   选择默认模型，请先在 DSH 中完成选择。只有需要固定到另一个模型时才同时填写这两个字段。
+   详见 [`dsh-acp-door` 的配置说明](../dsh-door/README.md#配置)。安装或更新插件后重启该配置集的内核。
 3. **安装本扩展**：在市场搜索 `DSH Panel`，或使用命令行
    `code --install-extension Elk-ydy.dsh-panel`。使用 `.vsix` 时执行
    `code --install-extension <路径>.vsix --force`，再执行一次 `Developer: Reload Window`。
@@ -169,8 +171,8 @@ error: profile "desktop" is managed exclusively by the Electron application
 
 - 每台电脑独立安装 DSH、配套插件和本扩展。面板不会连接远程 DSH，也不会同步其它电脑的
   `$DSH_HOME`；各电脑的记忆和会话记录由本机 DSH 管理。
-- 自启使用的 `vscode-panel` 配置集不会自动复制桌面端的插件或模型设置。需要相同行为时，
-  在该配置集中分别安装对应插件，并配置同一模型服务。
+- 自启使用的 `vscode-panel` 配置集不会自动复制桌面端的个人插件。它会读取同一台机器上 DSH
+  为该配置集提供的当前默认模型；需要与桌面端完全相同的工具行为时，仍需在该配置集中安装对应插件。
 - 接入点固定监听 `127.0.0.1`，不支持改为局域网地址、端口转发或隧道访问。
 - 从市场安装的扩展由 VS Code 按更新设置升级；从 `.vsix` 安装的版本需要手动安装新版 `.vsix`
   并执行 Reload Window。插件的常规兼容更新使用

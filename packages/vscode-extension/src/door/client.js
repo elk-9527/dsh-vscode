@@ -21,6 +21,15 @@ const { requireLoopbackHost } = require('./endpoint');
 /** ACP 协议版本（第 0 步实测：内核返回的值为 1）。 */
 const PROTOCOL_VERSION = 1;
 
+/** 普通 ACP 短请求的最长等待时间。模型回合另行使用可取消的长请求。 */
+const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
+
+/** 建立 / 恢复会话可能需要组装 agent，允许比普通查询更长的时间。 */
+const SESSION_REQUEST_TIMEOUT_MS = 30000;
+
+/** 用户中断长请求后，若对端始终不回取消结果，最多再等待该时长。 */
+const CANCEL_GRACE_MS = 10000;
+
 /** JSON-RPC 标准错误码。 */
 const PARSE_ERROR = -32700;
 
@@ -58,6 +67,17 @@ class DoorRequestError extends Error {
     this.name = 'DoorRequestError';
     this.code = code;
     this.data = data;
+  }
+}
+
+/** 对端已经接通，但在规定时间内没有回复某条 ACP 请求。 */
+class DoorTimeoutError extends Error {
+  constructor(method, timeoutMs, phase = '请求') {
+    super(`${phase}超时：${method} 在 ${timeoutMs}ms 内没有收到 DSH 回复`);
+    this.name = 'DoorTimeoutError';
+    this.code = 'ACP_REQUEST_TIMEOUT';
+    this.method = method;
+    this.timeoutMs = timeoutMs;
   }
 }
 
@@ -99,7 +119,7 @@ class DoorClient extends EventEmitter {
    * @param {number} [options.timeoutMs] 建连超时。
    * @returns {Promise<object>} initialize 的返回值。
    */
-  async connect({ timeoutMs = 5000 } = {}) {
+  async connect({ timeoutMs = 5000, initializeTimeoutMs = 8000 } = {}) {
     if (this.#socket) throw new Error('连接已建立，不能重复连接');
     this.#closed = false;
     this.#closeReason = '';
@@ -140,12 +160,24 @@ class DoorClient extends EventEmitter {
     socket.on('error', (error) => this.#fail(error));
     socket.on('close', () => this.#fail(new Error('连接被对方关闭')));
 
-    const result = await this.request('initialize', {
-      protocolVersion: PROTOCOL_VERSION,
-      clientCapabilities: {
-        fs: { readTextFile: true, writeTextFile: true },
-      },
-    });
+    let result;
+    try {
+      result = await this.request(
+        'initialize',
+        {
+          protocolVersion: PROTOCOL_VERSION,
+          clientCapabilities: {
+            fs: { readTextFile: true, writeTextFile: true },
+          },
+        },
+        { timeoutMs: initializeTimeoutMs, timeoutPhase: 'ACP 握手' },
+      );
+    } catch (error) {
+      // TCP 已连通但握手失败时同样要关掉 socket；否则一个“只占端口、不说 ACP”的
+      // 本机程序会留下一条无用连接，面板也无法干净地重试其它内核。
+      this.close();
+      throw error;
+    }
     this.agentInfo = result && result.agentInfo ? result.agentInfo : null;
     this.capabilities = result && result.agentCapabilities ? result.agentCapabilities : null;
     if (result && result.protocolVersion !== PROTOCOL_VERSION) {
@@ -165,21 +197,52 @@ class DoorClient extends EventEmitter {
    *   注意**不**使该 promise 进入 rejected 状态 —— 内核会返回正常的 `stopReason: cancelled`。
    * @returns {Promise<any>}
    */
-  request(method, params, { signal } = {}) {
+  request(
+    method,
+    params,
+    {
+      signal,
+      timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+      abortTimeoutMs = CANCEL_GRACE_MS,
+      timeoutPhase = 'ACP 请求',
+    } = {},
+  ) {
     const id = this.#nextId++;
+    if (signal && signal.aborted) {
+      return Promise.reject(new DoorRequestError(-32800, `请求已取消：${method}`));
+    }
     return new Promise((resolve, reject) => {
-      const onAbort = () => this.cancel(id);
+      let timeoutTimer;
+      let abortTimer;
+      const failPending = (error) => {
+        const current = this.#pending.get(id);
+        if (!current) return;
+        this.#pending.delete(id);
+        current.cleanup();
+        reject(error);
+      };
+      const onAbort = () => {
+        this.cancel(id);
+        if (Number.isFinite(abortTimeoutMs) && abortTimeoutMs > 0) {
+          clearTimeout(abortTimer);
+          abortTimer = setTimeout(() => {
+            failPending(new DoorTimeoutError(method, abortTimeoutMs, '取消请求'));
+          }, abortTimeoutMs);
+          if (typeof abortTimer.unref === 'function') abortTimer.unref();
+        }
+      };
       const entry = {
         resolve,
         reject,
         cleanup: () => {
+          clearTimeout(timeoutTimer);
+          clearTimeout(abortTimer);
           if (signal) signal.removeEventListener('abort', onAbort);
         },
       };
       this.#pending.set(id, entry);
       if (signal) {
-        if (signal.aborted) onAbort();
-        else signal.addEventListener('abort', onAbort, { once: true });
+        signal.addEventListener('abort', onAbort, { once: true });
       }
       try {
         this.#write({ jsonrpc: '2.0', id, method, params });
@@ -187,6 +250,14 @@ class DoorClient extends EventEmitter {
         this.#pending.delete(id);
         entry.cleanup();
         reject(error);
+        return;
+      }
+      if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        timeoutTimer = setTimeout(() => {
+          this.log('warn', `${timeoutPhase}超时：${method}（${timeoutMs}ms）`);
+          failPending(new DoorTimeoutError(method, timeoutMs, timeoutPhase));
+        }, timeoutMs);
+        if (typeof timeoutTimer.unref === 'function') timeoutTimer.unref();
       }
     });
   }
@@ -240,7 +311,7 @@ class DoorClient extends EventEmitter {
     if (typeof preset === 'string' && preset) {
       params._meta = { [PRESET_META_KEY]: { preset } };
     }
-    return this.request('session/new', params);
+    return this.request('session/new', params, { timeoutMs: SESSION_REQUEST_TIMEOUT_MS });
   }
 
   /**
@@ -261,7 +332,7 @@ class DoorClient extends EventEmitter {
     if (typeof preset === 'string' && preset) {
       params._meta = { [PRESET_META_KEY]: { preset } };
     }
-    return this.request('session/resume', params);
+    return this.request('session/resume', params, { timeoutMs: SESSION_REQUEST_TIMEOUT_MS });
   }
 
   /**
@@ -302,6 +373,16 @@ class DoorClient extends EventEmitter {
    */
   getHistory(id) {
     return this.request('dsh-door/sessions/get', { id });
+  }
+
+  /**
+   * 读取接入点自身的版本、初始模型来源与可选能力（0.0.14+）。
+   *
+   * 这是只读诊断方法，不返回凭据。旧版接入点会按 JSON-RPC 规范返回 -32601，
+   * 上层据此继续走兼容路径，不能把“没有这个方法”当成连接失败。
+   */
+  doorStatus() {
+    return this.request('dsh-door/status', {});
   }
 
   /**
@@ -351,7 +432,9 @@ class DoorClient extends EventEmitter {
     return this.request(
       'session/prompt',
       { sessionId, prompt: buildPromptBlocks(text, attachments) },
-      { signal },
+      // 模型回合本身不设固定总时长；长任务可以正常运行。用户点击停止后，
+      // 取消请求仍有 CANCEL_GRACE_MS 的收尾上限，防止对端不回取消结果时永久卡住。
+      { signal, timeoutMs: 0, abortTimeoutMs: CANCEL_GRACE_MS },
     );
   }
 
@@ -459,4 +542,15 @@ class DoorClient extends EventEmitter {
   }
 }
 
-module.exports = { DoorClient, DoorRequestError, PROTOCOL_VERSION, PARSE_ERROR, PRESET_META_KEY, readDoorMeta };
+module.exports = {
+  DoorClient,
+  DoorRequestError,
+  DoorTimeoutError,
+  PROTOCOL_VERSION,
+  PARSE_ERROR,
+  PRESET_META_KEY,
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  SESSION_REQUEST_TIMEOUT_MS,
+  CANCEL_GRACE_MS,
+  readDoorMeta,
+};

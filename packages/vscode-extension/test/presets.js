@@ -60,9 +60,8 @@ function freePort() {
  *
  * 采用 --patch 覆盖而不修改 profile 的原因：不得为运行测试而改动用户的档。
  * 覆盖是整体替换该插件的配置（实测：只写 port 会使 preset 被清除），
- * 因此此处写出全部需要的键 —— 尤其是 provider/model：缺少它们时会话可以建立，
- * 但发送消息即失败（内核原文 `agent "…" has no provider/model`），
- * 该测试将退化为「验证一个无法应答的模式」。
+ * 因此此处写出该测试需要的全部键。provider/model 刻意不写：0.0.14 起生产默认
+ * 就是读取 DSH 当前默认模型，真实测试必须覆盖这条路径，不能重新塞回固定值绕过它。
  */
 function writeOverlay(port) {
   fs.mkdirSync(BUILD, { recursive: true });
@@ -72,8 +71,6 @@ function writeOverlay(port) {
     '  config:',
     '    host: 127.0.0.1',
     `    port: ${port}`,
-    `    provider: ${PROVIDER}`,
-    `    model: ${MODEL}`,
     '    preset: standard',
     `    diagLog: '${DIAG}'`,
     '',
@@ -94,27 +91,6 @@ function readDiag() {
 /** 清单项应仅包含以下字段 —— 内核内部字段不得暴露给客户端。 */
 const ALLOWED_KEYS = ['id', 'name', 'description', 'order'];
 
-/**
- * 从该插件自带的 bundle 补丁中读取 provider/model，不在此处另写一份固定值。
- *
- * 原因：生产环境中的该插件使用那份配置，此处若抄录错误或遗漏，测试会「通过」
- * 而生产环境无响应。该读取同时作为一项检查：那份补丁必须写明 provider/model
- * （缺少时会话可以建立但无法发送消息，该缺陷不易发现）。
- */
-function readDoorDefaults() {
-  const file = path.join(ROOT, '..', 'dsh-door', 'cordis.patch.yml');
-  const text = fs.readFileSync(file, 'utf8');
-  const pick = (key) => {
-    const hit = text.match(new RegExp(`^\\s*${key}:\\s*(\\S+)\\s*$`, 'm'));
-    return hit ? hit[1] : '';
-  };
-  return { provider: pick('provider'), model: pick('model') };
-}
-
-const DOOR_DEFAULTS = readDoorDefaults();
-const PROVIDER = DOOR_DEFAULTS.provider;
-const MODEL = DOOR_DEFAULTS.model;
-
 async function main() {
   console.log('DSH Panel · 「模式」（agent preset）集成测试');
   fs.mkdirSync(BUILD, { recursive: true });
@@ -128,23 +104,6 @@ async function main() {
   const overlay = writeOverlay(port);
   console.log(`\n用 profile=${PROFILE}、端口 ${port}、覆盖文件 ${path.relative(ROOT, overlay)}`);
   console.log(`（这样无需占用 ${PORT}，也不会碰桌面端那一个）`);
-
-  section('0. 前置：该插件自带的配置里必须写明 provider/model');
-  check(
-    '该插件补丁里有 provider',
-    typeof PROVIDER === 'string' && PROVIDER.length > 0,
-    JSON.stringify(PROVIDER),
-  );
-  check(
-    '该插件补丁里有 model',
-    typeof MODEL === 'string' && MODEL.length > 0,
-    JSON.stringify(MODEL),
-  );
-  if (!PROVIDER || !MODEL) {
-    console.log('  ❌ 缺了它们，经该插件建立的会话能建立却发不出消息（内核原文 agent has no provider/model）。');
-    console.log('     先修 packages/dsh-door/cordis.patch.yml，再跑这个测试。');
-    process.exit(1);
-  }
 
   // 已安装的该插件必须与源码一致 —— 否则该套件测试的是旧代码（pnpm 对
   // `file:` 依赖存在缓存，修改源码后可能不会重新安装，实测已出现）。
@@ -178,6 +137,10 @@ async function main() {
     client = new DoorClient({ host: '127.0.0.1', port, log: () => {} });
     const init = await client.connect();
     check('已连接到自行启动的该插件', init && init.protocolVersion === 1, JSON.stringify(init));
+    const status = await client.doorStatus();
+    check('接入点报告的版本与源码一致', status?.version === '0.0.14', JSON.stringify(status));
+    check('从 DSH 当前设置取得了完整模型', status?.model?.ready === true, JSON.stringify(status?.model));
+    check('模型来源确实是 DSH 默认设置（测试没有偷偷写回固定值）', status?.model?.source === 'dsh-default', JSON.stringify(status?.model));
 
     section('2. 不点名：使用该插件配置里的默认预设');
     const plain = await client.newSession(cwd);

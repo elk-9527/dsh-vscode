@@ -61,7 +61,8 @@ dsh --profile vscode-panel --from-default-profile web --dump-config
 dsh plugin --profile vscode-panel add dsh-acp-door
 ```
 
-安装后在该配置集的插件配置中确认 `provider` 与 `model` 对应本机可用的 DSH 服务，再重启内核。
+安装后重启该配置集的内核。新会话默认使用该配置集中 DSH 当前选择的默认模型；无需把
+服务商或模型名再复制到本插件配置中。若该配置集还没有选择模型，先在 DSH 的模型设置中完成选择。
 不同电脑分别安装各自的 DSH 与本插件；接入点固定在 `127.0.0.1`，不支持远程设备连接、端口转发或隧道。
 
 ## 更新
@@ -81,7 +82,7 @@ dsh plugin --profile <档名> update dsh-acp-door
 | --- | --- | --- |
 | `host` | `127.0.0.1` | 固定监听地址。其它值会被忽略，接入点不会暴露到局域网。 |
 | `port` | `47821` | 监听端口。也可用环境变量 `DSH_ACP_DOOR_PORT` 覆盖（0.0.11 起）。 |
-| `provider` / `model` | 见文件 | 新会话的初始模型；客户端连接后可针对会话修改。 |
+| `provider` / `model` | 留空，跟随 DSH | 可选的成对覆盖；必须同时填写才会固定新会话的初始模型。 |
 | `preset` | `standard` | 新会话挂载的 agent preset 套件。 |
 
 ## 解决的问题
@@ -200,28 +201,26 @@ DSH Desktop（运行中）
 |---|---|---|
 | `host` | `127.0.0.1` | 固定监听地址。其它值会被忽略，接入点不会暴露到局域网。 |
 | `port` | `47821` | 监听端口；传 `0` 由系统分配空闲端口。 |
-| `provider` | — | 新会话的初始模型服务商。**必须填写**，见下文警告。 |
-| `model` | — | 新会话的初始模型名。**必须填写。** |
+| `provider` | — | 可选。与 `model` 同时填写时，固定新会话的初始模型服务商。 |
+| `model` | — | 可选。与 `provider` 同时填写时，固定新会话的初始模型名。 |
 | `preset` | `standard` | 新会话挂载的 agent preset：`standard`（标准）/ `ptc` / `cordis`（创造）/ `minimal`（极简）。 |
 | `diagLog` | 关 | 诊断日志文件路径；也可用环境变量 `DSH_ACP_DOOR_DIAG`。用于排查时序问题，未配置时不写任何文件。 |
 
-### 警告：缺少 `provider` / `model` 时静默失败
+### 初始模型的选择顺序
 
-缺少这两项时，**会话仍可建立，接入点仍正常监听**，但第一个回合直接失败：
+1. 插件配置中同时填写了 `provider` 与 `model`：使用这组显式覆盖。
+2. 未完整填写：读取 DSH 的 `agentDefaultModel.currentSelection()`，即该配置集当前选择的默认模型。
+3. 旧版 DSH 没有该服务且也没有完整显式配置：状态接口报告“模型未就绪”，新版 VS Code 面板会在
+   建会话前提示先选择模型。其它客户端也可调用 `dsh-door/status` 自检。
 
-```
-agent "…" has no provider/model: set AgentOptions.provider and AgentOptions.model
-```
-
-该问题易于触发，因为按 id 定向的 `--patch` 覆盖是**整体替换**这份配置（并非合并）——
-仅修改 `port` 而未写全其它键，会同时覆盖 `provider`/`model`。因此该插件在启动时
-检查这两项，缺失时在内核日志中记录一次警告，无需等待用户发送消息才发现。
-（`packages/vscode-extension/test/presets.js` 也校验 `cordis.patch.yml` 中必须包含这两项。）
+只填写 `provider` 或 `model` 其中一项不会与 DSH 的值拼接；这组不完整配置会被忽略并记录诊断。
+DSH 冷启动时，插件会先等待用户设置加载完成再开放端口，避免短暂读取到基础默认模型。
 
 ## 版本变更
 
 | 版本 | 改了什么 |
 | --- | --- |
+| 0.0.14 | 默认跟随 DSH 当前模型；新增安全状态接口；修复冷启动时用户设置尚未加载导致首次连接选错模型。 |
 | 0.0.13 | 固定接入点监听 `127.0.0.1`，配置中的其它监听地址会被忽略。 |
 | 0.0.12 | 新增 `dsh-door/permission/get` 与 `dsh-door/permission/set` 两个旁路方法：将内核 `@deepseek-ai/dsh-permission-presets` 的权限预设**清单与切换**透传给客户端（ACP 仅暴露模型与推理强度两个 config option，权限选择器属于其「刻意不提供」的 DSH 专用 UI 类别）。清单**不写死** —— 内核配置了什么就返回什么（`read-only`/`workspace-write`/`danger-full-access` 来自 `dsh-base`，`auto-approval` 由 `dsh-auto-approval-plugin` 添加，用户也可自行添加），因此客户端一侧与桌面端始终为同一真源。`permissionPresets` 是**可选**依赖（`ctx.inject`），档中未挂载该服务时该插件照常工作、仅返回「这个内核没有权限预设」。回归测试：`test/permission.js`（纯函数 29 项）+ 扩展一侧的 `test/permission-live.js`（真内核，四档全切一遍 24 项）。 |
 | 0.0.9 | **修复两个缺陷**：① 建会话**失败**时的预设指定会留在队列中，被**下一次**建会话取走（用户未指定却挂载了其它模式）—— 出错的回复原先未被处理（预筛要求该行含 `"result"`）；② 入站闸等待预设挂载**没有超时**，内核某个服务返回永不落定的 promise 时，`session/prompt` 会被永久阻塞 —— 症状为「发送消息后毫无响应、也没有任何报错」。现在入站与出站使用同一上限（`MOUNT_WAIT_MS`，经 `waitForMount()`），到时放行。<br>回归测试：`test/frames.js` 第 8 节第 (6) 段、第 9 节。 |
@@ -242,6 +241,7 @@ by the Electron application`），需等待桌面端未运行。因此**面板�
 
 | 方法 | 该插件所需的 params | 该插件的回复 | 起始版本 |
 | --- | --- | --- | --- |
+| `dsh-door/status` | `{}` | `{ version, model: {ready, source, provider?, model?}, capabilities }` | 0.0.14 |
 | `dsh-door/sessions/list` | `{}`（可选 `cwd`） | `{ skipped, sessions: [...] }` | 0.0.8 |
 | `dsh-door/sessions/get` | `{ id, limit? }` | `{ card, entries, truncated }` | 0.0.8 |
 | `dsh-door/permission/get` | `{ id }` | `{ currentValue, options: [{value, name?, description?}], defaultPreset? }` | 0.0.12 |
@@ -289,10 +289,11 @@ dsh plugin --profile <profile> add "file:<本目录>\dsh-acp-door-<版本>.tgz"
     - id: acp-door
       name: dsh-acp-door
       config:
-        provider: <服务商>
-        model: <模型>
         preset: standard
 ```
+
+上例默认跟随该配置集中 DSH 当前选择的模型。只有确实需要让此接入点长期固定到另一个模型时，
+才在 `config` 中**同时**增加 `provider` 与 `model`。
 
 或者将该包名 `dsh-acp-door` 加入该 profile `package.json` 的
 `dsh.profile.bundles` 数组（本包自带的 `cordis.patch.yml` 会自动生效）。

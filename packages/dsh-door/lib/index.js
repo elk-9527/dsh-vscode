@@ -47,6 +47,13 @@ import {
 import { DEFAULT_LIST_LIMIT, getSession, listSessions, resolveSessionsRoot } from './sessions.js';
 // 端口判定单独构成一个纯模块：否则必须载入整个插件（需 import 内核）才能测试该判定。
 import { LOOPBACK_HOST, resolveDoorHost, resolveDoorPort } from './port.js';
+import { resolveInitialModel } from './model.js';
+import {
+  DOOR_STATUS_METHOD,
+  doorStatusPayload,
+  doorStatusResult,
+  isDoorStatusRequest,
+} from './status.js';
 // 权限预设的旁路方法（纯帧工具与载荷规整），理由见该文件开头。
 import {
   DOOR_ERR_NO_SESSION,
@@ -308,6 +315,10 @@ function gatePrompts(source, state, diag) {
           buffer = buffer.slice(index + 1);
           // 该插件自身的方法（历史会话 / 权限预设）在此处就地应答、不转发内核；
           // 其余帧照旧走闸。
+          if (line.includes(DOOR_STATUS_METHOD)) {
+            const handled = handleDoorStatus(line, state, diag);
+            if (handled) continue;
+          }
           if (line.includes(DOOR_SESSIONS_PREFIX)) {
             const handled = await handleDoorSessions(line, state, diag);
             if (handled) continue;
@@ -327,6 +338,22 @@ function gatePrompts(source, state, diag) {
       },
     }),
   );
+}
+
+/** 就地应答只读的接入点版本、模型来源与能力状态。 */
+function handleDoorStatus(line, state, diag) {
+  const frame = parseLine(line);
+  if (!isDoorStatusRequest(frame)) return false;
+  const result = doorStatusPayload({
+    model: state.modelRoute,
+    permissionAvailable: Boolean(state.permissionHandler),
+  });
+  state.respond(doorStatusResult(frame.id, result));
+  diag(
+    `旁路应答 ${DOOR_STATUS_METHOD}（请求 ${frame.id}）：` +
+      `model=${result.model.ready ? `${result.model.provider}/${result.model.model}` : '(缺失)'}`,
+  );
+  return true;
 }
 
 /** 遇到 `session/new` 或 `session/resume` 时记录该请求（以及客户端在其上指定的预设）。 */
@@ -604,6 +631,35 @@ export function apply(ctx, config = {}) {
     typeof config.preset === 'string' && config.preset ? config.preset : DEFAULT_PRESET;
   const diag = makeDiag(config.diagLog ?? process.env.DSH_ACP_DOOR_DIAG);
 
+  /*
+   * DSH 的 settings 服务会先从磁盘异步读取 `$DSH_HOME/settings.yaml`，服务完成初始化后
+   * 才变为可注入；agentDefaultModel 随后才会把基础默认值替换为用户保存的模型。
+   *
+   * 真实复现过的竞态：内核进程启动后立刻连接，0 秒时 currentSelection() 返回
+   * deepseek-official/deepseek-flash，2 秒后重新连接才返回用户实际选择的
+   * opencode-go/deepseek-v4.1-flash。若接入点先开放端口，客户端会把这个短暂的基础值
+   * 固定为整条连接的模型，随后表现为“DSH 里明明选对了模型，VS Code 却认证失败”。
+   *
+   * 因此：只有未显式配置完整 provider/model 时，首次 listen 前等待 settings 服务变为
+   * 可注入。5 秒是兼容上限 —— 老 DSH 可能根本没有该服务，不能因此永久不监听。
+   */
+  let settingsReady = false;
+  let settleSettings;
+  const settingsReadyPromise = new Promise((resolve) => {
+    settleSettings = resolve;
+  });
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['settings'], () => {
+      settingsReady = true;
+      // agentDefaultModel 比本插件更早注册 settings 注入回调；再让出一个微任务，确保
+      // 它的 setSource() 已执行之后我们才开放端口。
+      queueMicrotask(settleSettings);
+      return () => {
+        settingsReady = false;
+      };
+    });
+  }
+
   if (rejectedHost) {
     const warning = `acp-door: 已忽略非回环监听地址；该插件固定监听 ${LOOPBACK_HOST}`;
     diag(warning);
@@ -650,20 +706,6 @@ export function apply(ctx, config = {}) {
     };
   });
 
-  // 配置中未指定模型时，内核无法确定调用对象：会话仍可建立，
-  // 但**第一个回合直接失败**（实测原文：`agent "…" has no provider/model`）。
-  // 该失败模式较为隐蔽（建会话成功、该接入点也正常启动），且容易触发 ——
-  // 任何按 id 定向的 `--patch` 覆盖都是**整体替换**配置，可能在不经意间冲掉这两项。
-  // 因此在启动时输出一次告警，而不是等用户发出消息后才发现。
-  if (!provider || !model) {
-    const warn =
-      'acp-door: 配置中缺少 provider/model —— 经该插件建立的会话将无法发出消息' +
-      '（会话可以建立，但发送第一条消息即报 agent has no provider/model）。' +
-      '请在该插件配置中补充 provider 与 model，例如 provider: opencode-go、model: deepseek-v4.1-flash。';
-    diag(warn);
-    ctx.logger?.warn?.(warn);
-  }
-
   /** 每个连接对应一份 ACP 桥；断开时逐个拆除。 */
   const live = new Set();
 
@@ -679,6 +721,35 @@ export function apply(ctx, config = {}) {
   const server = net.createServer((socket) => {
     socket.setNoDelay(true);
     diag('客户端已接入');
+
+    // 显式配置完整时使用配置；否则读取 DSH 设置中用户当前选择的默认模型。
+    // `ctx.get()` 是 Cordis 对可选服务的安全读取方式：旧版 DSH 没有该服务时返回
+    // undefined，不把它列为硬依赖，接入点仍可依靠显式 provider/model 运行。
+    let defaultModelService;
+    try {
+      defaultModelService = typeof ctx.get === 'function' ? ctx.get('agentDefaultModel') : undefined;
+    } catch (error) {
+      diag(`读取 DSH 默认模型服务失败：${String(error)}`);
+    }
+    const modelRoute = resolveInitialModel({ provider, model }, defaultModelService);
+    if (modelRoute.partialConfig) {
+      const warning =
+        'acp-door: provider/model 只配置了一项，已忽略这组不完整配置并尝试使用 DSH 当前默认模型';
+      diag(warning);
+      ctx.logger?.warn?.(warning);
+    }
+    if (!modelRoute.selection) {
+      const warning =
+        'acp-door: 无法确定初始模型；请先在 DSH 中选择默认模型，' +
+        '或在该插件配置中同时填写 provider 与 model';
+      diag(`${warning}${modelRoute.error ? `（${modelRoute.error}）` : ''}`);
+      ctx.logger?.warn?.(warning);
+    } else {
+      diag(
+        `本连接初始模型=${modelRoute.selection.provider}/${modelRoute.selection.model}` +
+          `（来源=${modelRoute.source}）`,
+      );
+    }
 
     // 同一个 socket 的两个方向：一个传给 ACP 读取，一个供 ACP 写入。
     const { readable, writable } = Duplex.toWeb(socket);
@@ -711,6 +782,8 @@ export function apply(ctx, config = {}) {
       listPromise: undefined,
       /** 该插件自身的历史会话方法（见 handleDoorSessions）。 */
       sessionsHandler,
+      /** 本连接的新会话初始模型及来源（状态方法与 ACP 桥共用同一个判定结果）。 */
+      modelRoute,
       /** 该插件自身的权限预设方法（见 handleDoorPermission）；服务缺席时为 undefined。 */
       get permissionHandler() {
         return permissionHandler;
@@ -733,7 +806,7 @@ export function apply(ctx, config = {}) {
         // 清单需要在此处获取：只有取得内核服务之后才能「向内核查询有哪些预设」。
         state.listPromise = loadPresets(child, diag);
         mountPresetOnNewSessions(child, { defaultPreset: preset, state, diag });
-        return acp.apply(child, { provider, model, stream });
+        return acp.apply(child, { ...(modelRoute.selection ?? {}), stream });
       },
     });
 
@@ -763,17 +836,39 @@ export function apply(ctx, config = {}) {
     ctx.logger?.warn?.(`acp-door: 监听失败：${String(error)}`);
   });
 
-  server.listen(port, host, () => {
-    const address = server.address();
-    const shown = typeof address === 'object' && address ? address.port : port;
-    diag(`开始监听 ${host}:${shown}，preset=${preset}，provider=${provider}，model=${model}`);
-    ctx.logger?.info?.(`acp-door: 正在监听 ${host}:${shown}`);
+  let disposed = false;
+  const listen = async () => {
+    if (!resolveInitialModel({ provider, model }).selection && !settingsReady) {
+      diag('等待 DSH 用户设置加载完成后再开放接入点');
+      let timer;
+      await Promise.race([
+        settingsReadyPromise,
+        new Promise((resolve) => {
+          timer = setTimeout(resolve, 5000);
+        }),
+      ]);
+      clearTimeout(timer);
+      diag(settingsReady ? 'DSH 用户设置已加载' : '等待设置服务到期，按旧版兼容路径继续');
+    }
+    if (disposed) return;
+    server.listen(port, host, () => {
+      const address = server.address();
+      const shown = typeof address === 'object' && address ? address.port : port;
+      const configuredModel = provider && model ? `${provider}/${model}` : '跟随 DSH 当前默认模型';
+      diag(`开始监听 ${host}:${shown}，preset=${preset}，model=${configuredModel}`);
+      ctx.logger?.info?.(`acp-door: 正在监听 ${host}:${shown}`);
+    });
+  };
+  void listen().catch((error) => {
+    diag(`等待模型设置或开始监听失败：${String(error)}`);
+    ctx.logger?.warn?.(`acp-door: 启动监听失败：${String(error)}`);
   });
 
   ctx.on('dispose', () => {
+    disposed = true;
     diag('该插件已被卸载');
     for (const entry of [...live]) entry.teardown();
     live.clear();
-    server.close();
+    if (server.listening) server.close();
   });
 }

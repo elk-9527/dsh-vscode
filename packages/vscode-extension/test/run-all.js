@@ -28,6 +28,7 @@ const suites = [
   { name: '该插件的帧解析（纯函数）', file: '../dsh-door/test/frames.js', always: true },
   { name: '该插件的会话读取（纯函数）', file: '../dsh-door/test/sessions.js', always: true },
   { name: '该插件的端口判定（纯函数）', file: '../dsh-door/test/port.js', always: true },
+  { name: '该插件的模型选择与状态（纯函数）', file: '../dsh-door/test/model-status.js', always: true },
   // ACP 接入点插件（dsh-acp-door）的权限预设旁路方法（0.0.12 版）：清单来自用户可配置的档，形状不能假设。
   { name: '该插件的权限预设方法（纯函数）', file: '../dsh-door/test/permission.js', always: true },
   // 面板侧把内核的清单转换为中文界面（标签与桌面端逐字一致）。
@@ -38,6 +39,8 @@ const suites = [
   { name: 'Markdown 渲染器', file: 'test/markdown.js', always: true },
   { name: '编辑器上下文拼块（纯函数）', file: 'test/blocks.js', always: true },
   { name: '会话层边界（假客户端）', file: 'test/session.js', always: true },
+  { name: 'ACP 客户端超时（真实 TCP）', file: 'test/client-timeout.js', always: true },
+  { name: '面板生命周期（假视图）', file: 'test/panel-lifecycle.js', always: true },
   { name: '本机边界与设置来源（纯函数）', file: 'test/security-boundaries.js', always: true },
   { name: '后台内核的归属与回收（假进程）', file: 'test/kernel-manager.js', always: true },
   // 「命令路径里有空格」的两个缺陷只在真实进程中暴露（拼接出的字符串表面上正确），
