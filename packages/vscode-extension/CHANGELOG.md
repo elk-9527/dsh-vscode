@@ -7,6 +7,8 @@
 
 ### 变更
 
+- Marketplace 内部名称改为全局未占用的 `dsh-acp-panel`，展示名改为 `DSH ACP Panel`；
+  原名称 `dsh-panel` 被市场的全局唯一性检查拒绝，且不属于当前发布者。
 - 正式图标改为 DeepSeek 鲸鱼图形：活动栏使用可随主题变化的单色版本，Marketplace 使用冰蓝底、
   品牌蓝鲸鱼与深蓝终端标记，替换原先的占位聊天气泡。
 

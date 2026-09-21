@@ -17,7 +17,7 @@ ACP 默认使用标准输入输出传输，该通道只能在进程启动时建�
 因此由插件在内核内提供一个仅监听本机回环地址的接入点，扩展连接到该接入点：
 
 ```
-VS Code ── DSH Panel 扩展（ACP 客户端）
+VS Code ── DSH ACP Panel 扩展（ACP 客户端）
               │  ACP over 127.0.0.1:47821
               ▼
         dsh-acp-door（插件：本机 ACP 接入点）
@@ -67,16 +67,16 @@ dsh plugin --profile vscode-panel list
 
 ### 2. 安装 VS Code 扩展
 
-首次发布完成后，可在扩展视图搜索 **DSH Panel**，或执行：
+首次发布完成后，可在扩展视图搜索 **DSH ACP Panel**，或执行：
 
 ```sh
-code --install-extension Elk-ydy.dsh-panel
+code --install-extension Elk-ydy.dsh-acp-panel
 ```
 
 离线安装 `.vsix` 时，使用实际文件路径并在安装后执行一次 `Developer: Reload Window`：
 
 ```sh
-code --install-extension <dsh-panel-版本>.vsix --force
+code --install-extension <dsh-acp-panel-版本>.vsix --force
 ```
 
 打开活动栏中的 DSH 图标后即可开始对话。

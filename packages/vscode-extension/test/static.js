@@ -192,6 +192,11 @@ const doorPort = Number(/^\s*port:\s*(\d+)/m.exec(doorPatch)?.[1]);
 const doorHost = /^\s*host:\s*([\d.]+)/m.exec(doorPatch)?.[1];
 
 check(
+  '市场身份不再使用已被全局唯一性检查拒绝的 dsh-panel',
+  extensionManifest.name === 'dsh-acp-panel' && extensionManifest.displayName === 'DSH ACP Panel',
+  `${extensionManifest.publisher}.${extensionManifest.name} / ${extensionManifest.displayName}`,
+);
+check(
   'CI 的 Node.js 版本满足已锁定 pnpm 11 的要求',
   workspaceManifest.packageManager === 'pnpm@11.19.0' && ciNodeVersion >= 22,
   `packageManager=${workspaceManifest.packageManager}；CI Node=${ciNodeVersion || '未找到'}`,

@@ -65,8 +65,8 @@ if (drift.length) {
   for (const d of drift) console.log('   - ' + d);
   console.log('\n重打包重装：');
   console.log('  node tools/build-vsix.js');
-  console.log('  code --install-extension "build\\dsh-panel-'
-    + manifest.version + '.vsix" --force');
+  console.log('  code --install-extension "build\\'
+    + manifest.name + '-' + manifest.version + '.vsix" --force');
   console.log('  然后让用户 Developer: Reload Window');
   process.exit(1);
 }

@@ -1,4 +1,4 @@
-# DSH Panel
+# DSH ACP Panel
 
 在 VS Code 的侧边栏里直接使用 DeepSeek Harness。
 
@@ -19,7 +19,7 @@
 <details>
 <summary>English</summary>
 
-**DSH Panel** puts [DeepSeek Harness](https://github.com/deepseek-ai) (DSH) in the
+**DSH ACP Panel** puts [DeepSeek Harness](https://github.com/deepseek-ai) (DSH) in the
 VS Code sidebar. You do not have to start the desktop app first — the extension
 starts a DSH kernel on demand, or attaches to the one already running.
 
@@ -162,8 +162,8 @@ error: profile "desktop" is managed exclusively by the Electron application
    插件默认跟随该配置集中 DSH 当前选择的模型，无需重复填写 `provider` 和 `model`；若尚未
    选择默认模型，请先在 DSH 中完成选择。只有需要固定到另一个模型时才同时填写这两个字段。
    详见 [`dsh-acp-door` 的配置说明](../dsh-door/README.md#配置)。安装或更新插件后重启该配置集的内核。
-3. **安装本扩展**：在市场搜索 `DSH Panel`，或使用命令行
-   `code --install-extension Elk-ydy.dsh-panel`。使用 `.vsix` 时执行
+3. **安装本扩展**：在市场搜索 `DSH ACP Panel`，或使用命令行
+   `code --install-extension Elk-ydy.dsh-acp-panel`。使用 `.vsix` 时执行
    `code --install-extension <路径>.vsix --force`，再执行一次 `Developer: Reload Window`。
 4. 打开侧边栏，直接提问。
 
