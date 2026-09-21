@@ -110,6 +110,7 @@ function fakeSession(id = 's-1') {
 
 function fakeClient() {
   const client = new EventEmitter();
+  client.closeSession = async () => ({});
   client.close = () => client.emit('close', '客户端主动断开');
   return client;
 }
@@ -380,6 +381,59 @@ async function checkFailedSessionStart() {
   }
 }
 
+async function checkExplicitNewSessionFailure() {
+  section('9. 主动新建失败同样清理；模式切换不得假报成功');
+
+  const panel = new DshPanelView({ extensionUri: { fsPath: 'D:/extension' }, log: () => {}, kernels: fakeKernels() });
+  const session = fakeSession('old-session');
+  const client = fakeClient();
+  const posted = [];
+  session.busy = false;
+  session.start = async () => { throw new Error('测试：主动新建失败'); };
+  panel.post = (message) => posted.push(message);
+  panel.session = session;
+  panel.client = client;
+  panel.wire(session, client);
+  const result = await panel.newSession();
+  check('主动新建失败向调用方返回 false', result === false, String(result));
+  check('主动新建失败后不保留已关闭的旧会话', panel.session === undefined && panel.client === undefined);
+  check('主动新建的业务失败只显示一张错误卡片', posted.filter((item) => item.type === 'error').length === 1);
+
+  const disconnected = new DshPanelView({ extensionUri: { fsPath: 'D:/extension' }, log: () => {}, kernels: fakeKernels() });
+  const disconnectSession = fakeSession('disconnect-old');
+  const disconnectClient = fakeClient();
+  const disconnectPosted = [];
+  disconnectSession.busy = false;
+  disconnectSession.start = async () => {
+    disconnectClient.emit('close', '新建途中断线');
+    throw new Error('新建途中断线');
+  };
+  disconnected.post = (message) => disconnectPosted.push(message);
+  disconnected.session = disconnectSession;
+  disconnected.client = disconnectClient;
+  disconnected.wire(disconnectSession, disconnectClient);
+  const disconnectedResult = await disconnected.newSession();
+  check('主动新建途中断线返回 false', disconnectedResult === false, String(disconnectedResult));
+  check(
+    '主动新建途中断线只显示断线处理的一张错误卡片',
+    disconnectPosted.filter((item) => item.type === 'error').length === 1,
+    JSON.stringify(disconnectPosted),
+  );
+
+  const presetPanel = new DshPanelView({ extensionUri: { fsPath: 'D:/extension' }, log: () => {}, kernels: fakeKernels() });
+  const presetPosted = [];
+  presetPanel.session = fakeSession('preset-session');
+  presetPanel.turnSent = false;
+  presetPanel.post = (message) => presetPosted.push(message);
+  presetPanel.newSession = async () => false;
+  await presetPanel.setPreset('minimal');
+  check(
+    '按模式重建失败时不再提示“已重新开启”',
+    !presetPosted.some((item) => item.type === 'notice' && /已按.*重新开启/.test(item.text)),
+    JSON.stringify(presetPosted),
+  );
+}
+
 function finish() {
   console.log(`\n${'═'.repeat(56)}`);
   if (failures.length === 0) console.log(`✅ 全部通过：${passed} 项检查`);
@@ -390,7 +444,12 @@ function finish() {
   }
 }
 
-checkFailedSessionStart().then(finish, (error) => {
+async function runAsyncChecks() {
+  await checkFailedSessionStart();
+  await checkExplicitNewSessionFailure();
+}
+
+runAsyncChecks().then(finish, (error) => {
   failures.push(`新建会话失败回归自身异常（${error && error.stack ? error.stack : error}）`);
   finish();
 });

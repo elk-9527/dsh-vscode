@@ -1167,11 +1167,13 @@ class DshPanelView {
 
   async newSession() {
     const session = this.session || await this.ensureConnection();
-    if (!session) return;
+    if (!session) return false;
     if (session.busy) {
       this.post({ type: 'notice', text: '当前正在工作，结束后再新建对话。' });
-      return;
+      return false;
     }
+    const client = this.client;
+    if (!client) return false;
     const cfg = this.config();
     const old = session.sessionId;
     this.post({ type: 'reset' });
@@ -1181,12 +1183,15 @@ class DshPanelView {
     // 新建会话前需要先关闭旧会话，避免内核中累积大量空会话。
     if (old) {
       try {
-        await this.client.closeSession(old);
+        await client.closeSession(old);
         this.log('info', `已关闭旧会话 ${old}`);
       } catch (error) {
         this.log('warn', `关闭旧会话失败（不影响后续操作）：${this.errText(error)}`);
       }
     }
+    // 关闭旧会话期间连接可能同时断开；此时 close 处理已经说明原因并清空引用，
+    // 不得继续拿旧的 session 对象发起 session/new。
+    if (this.session !== session || this.client !== client) return false;
     try {
       await session.start({
         cwd: this.workdir(),
@@ -1195,9 +1200,16 @@ class DshPanelView {
         preset: this.wantedPreset(cfg),
       });
       this.post({ type: 'status', state: 'ready', detail: '就绪' });
+      return true;
     } catch (error) {
+      // 等待 session/new 时若连接已断，wire() 已经展示断线说明并清空引用；
+      // 不再叠加第二张错误卡片。业务错误则主动拆除半成品，下一次操作重新连接。
+      const alreadyClosed = this.session !== session || this.client !== client;
+      if (alreadyClosed) return false;
       this.postError(`新建对话失败：${this.errText(error)}`);
       this.post({ type: 'status', state: 'error', detail: '未连接' });
+      this.teardown();
+      return false;
     }
   }
 
@@ -1220,8 +1232,8 @@ class DshPanelView {
     this.preset = preset;
     if (this.session && !this.turnSent) {
       this.log('info', `预设已改为 ${preset}；当前会话尚未发送过消息，直接重新开启一段`);
-      await this.newSession();
-      this.post({ type: 'notice', text: `已按「${this.labelOf(preset)}」重新开启。` });
+      const restarted = await this.newSession();
+      if (restarted) this.post({ type: 'notice', text: `已按「${this.labelOf(preset)}」重新开启。` });
       return;
     }
     this.log('info', `预设已改为 ${preset}（下一段新对话生效）`);
