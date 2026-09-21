@@ -576,24 +576,29 @@
   /**
    * 挂载一批附件（由扩展从编辑器侧送入）。
    *
-   * 同名项（同一文件/同一段选区）只保留一个：连续两次执行「把当前文件带进来」，
-   * 用户期望的结果是一个，而非两个。
+   * 同名项（同一文件/同一段选区）只保留一个；再次挂载时用新内容替换旧内容。
+   * 后者对未保存文件很重要：用户修改后再次执行「把当前文件带进来」，发送的必须是
+   * 最新编辑器快照，而不是第一次挂载时的旧正文。
    */
   function addAttachments(items) {
     const list = (Array.isArray(items) ? items : [items]).filter(Boolean);
     if (list.length === 0) return;
-    let added = 0;
+    let changed = 0;
+    let lastChanged;
     for (const item of list) {
       const id = item.id || item.uri || item.name;
-      if (!id || state.attachments.some((held) => (held.id || held.uri || held.name) === id)) continue;
-      state.attachments.push({ ...item, id });
-      added += 1;
+      if (!id) continue;
+      const next = { ...item, id };
+      const at = state.attachments.findIndex((held) => (held.id || held.uri || held.name) === id);
+      if (at >= 0) state.attachments[at] = next;
+      else state.attachments.push(next);
+      changed += 1;
+      lastChanged = next;
     }
     renderAttachments();
-    if (added > 0) {
+    if (changed > 0) {
       el.input.focus();
-      const last = state.attachments[state.attachments.length - 1];
-      showHint(`已附加：${last.detail || last.name}`, false);
+      showHint(`已附加：${lastChanged.detail || lastChanged.name}`, false);
     }
   }
 

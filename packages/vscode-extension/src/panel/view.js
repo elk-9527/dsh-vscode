@@ -39,7 +39,7 @@ const VIEW_ID = 'dshPanel.chat';
 /** target 是否位于 base 目录之内（Windows 上大小写不敏感，path.relative 会处理）。 */
 function pathIsInside(target, base) {
   const rel = path.relative(base, target);
-  return Boolean(rel) && !rel.startsWith('..') && !path.isAbsolute(rel);
+  return Boolean(rel) && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
 }
 
 /** 该错误是否为「对端不存在此方法」（该插件 0.0.8 之前未提供的历史旁路方法）。 */
@@ -1134,6 +1134,11 @@ class DshPanelView {
     const uri = document.uri;
     const absolute = uri && uri.fsPath ? uri.fsPath : document.fileName;
     if (!absolute) return undefined;
+    const scheme = uri && typeof uri.scheme === 'string' ? uri.scheme : '';
+    const isFile = !scheme || scheme === 'file';
+    // resource_link 最终由 DSH 从磁盘读取。未保存文件没有可读磁盘地址；已修改文件的
+    // 磁盘内容又落后于编辑器。只有普通且未修改的文件才能安全地只传链接。
+    const canReadFromDisk = isFile && !document.isUntitled && !document.isDirty;
     // 名称使用相对于工作目录的路径：模型与用户查看时都更短、更明确。
     let name = absolute;
     if (workdir && pathIsInside(absolute, workdir)) {
@@ -1141,9 +1146,11 @@ class DshPanelView {
     }
     const base = {
       name,
-      uri: uri && typeof uri.toString === 'function' ? uri.toString() : `file://${absolute}`,
       mimeType: 'text/plain',
     };
+    if (canReadFromDisk) {
+      base.uri = uri && typeof uri.toString === 'function' ? uri.toString() : `file://${absolute}`;
+    }
 
     const selection = editor.selection;
     const selected = selection && !selection.isEmpty ? document.getText(selection) : '';
@@ -1155,6 +1162,17 @@ class DshPanelView {
         language: document.languageId,
         detail: `选中 ${selection.end.line - selection.start.line + 1} 行`,
         id: `${name}:${selection.start.line + 1}-${selection.end.line + 1}`,
+      };
+    }
+    if (!canReadFromDisk) {
+      const unsaved = document.isUntitled || scheme === 'untitled';
+      return {
+        ...base,
+        kind: 'content',
+        text: document.getText(),
+        language: document.languageId,
+        detail: unsaved ? '未保存文件' : '当前文件（含未保存修改）',
+        id: name,
       };
     }
     return { ...base, kind: 'file', detail: '当前文件', id: name };

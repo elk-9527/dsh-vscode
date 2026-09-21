@@ -10,7 +10,7 @@
  */
 
 const path = require('node:path');
-const { buildPromptBlocks, selectionText, fenceFor } = require(path.join(
+const { buildPromptBlocks, selectionText, contentText, fenceFor } = require(path.join(
   __dirname,
   '..',
   'src',
@@ -177,6 +177,28 @@ section('8. 形状不对的附件：跳过，不得破坏消息结构');
   const partial = buildPromptBlocks('看这个', [{ kind: 'selection', text: 'ok', language: 'js' }]);
   check('没有 uri 的选区仍然把正文带上', blocks.length === 1 && partial[0].text.includes('ok'), JSON.stringify(partial));
   check('位置写不出来时如实写「未知位置」', partial[0].text.includes('未知位置'), JSON.stringify(partial[0].text));
+}
+
+// ── 9. 未保存/已修改文件 → 编辑器快照 ──────────────────
+section('9. 未保存或已修改文件使用编辑器当前快照');
+{
+  const current = {
+    kind: 'content',
+    name: 'src/dirty.js',
+    text: 'const disk = 1;\nconst editor = 2;',
+    language: 'javascript',
+    detail: '当前文件（含未保存修改）',
+  };
+  const blocks = buildPromptBlocks('以哪个值为准？', [current]);
+  check('编辑器快照作为正文发送', blocks.length === 2 && blocks[0].type === 'text', JSON.stringify(blocks));
+  check('快照正文包含当前位置与当前代码',
+    blocks[0].text.includes('src/dirty.js') && blocks[0].text.includes('const editor = 2;'),
+    blocks[0].text);
+  check('快照没有伪造 resource_link', !blocks.some((item) => item.type === 'resource_link'), JSON.stringify(blocks));
+  check('快照使用安全的语言围栏', contentText(current).includes('```javascript'));
+
+  const empty = buildPromptBlocks('', [{ kind: 'content', name: 'Untitled-1', text: '', language: 'plaintext' }]);
+  check('空的未保存文件也保留一段明确上下文', empty.length === 2 && /Untitled-1/.test(empty[0].text), JSON.stringify(empty));
 }
 
 console.log('\n════════════════════════════════════════════════════════');

@@ -297,9 +297,74 @@ section('7. 旁路操作失败时保持真实的忙碌状态');
   check('模型回合仍在执行时停止按钮不会被误关', busy && busy.busy === true, JSON.stringify(posted));
 }
 
+section('8. 编辑器附件区分磁盘文件与未保存内容');
+{
+  function editor({ fileName, scheme = 'file', dirty = false, untitled = false, content = 'const now = 2;', selected = '' }) {
+    return {
+      document: {
+        fileName,
+        isDirty: dirty,
+        isUntitled: untitled,
+        languageId: 'javascript',
+        uri: {
+          scheme,
+          fsPath: scheme === 'untitled' ? '' : fileName,
+          toString: () => (scheme === 'file' ? `file:///${fileName.replace(/\\/g, '/')}` : `${scheme}:${fileName}`),
+        },
+        getText: (selection) => (selection ? selected : content),
+      },
+      selection: selected
+        ? { isEmpty: false, start: { line: 2 }, end: { line: 3 } }
+        : { isEmpty: true, start: { line: 0 }, end: { line: 0 } },
+    };
+  }
+
+  const clean = DshPanelView.attachmentFromEditor(
+    editor({ fileName: 'D:\\workspace\\src\\app.js' }),
+    'D:\\workspace',
+  );
+  check('已保存文件仍使用按需读取链接', clean.kind === 'file' && clean.uri.startsWith('file:///'), JSON.stringify(clean));
+  check('工作区内文件显示相对路径', clean.name === 'src/app.js', clean.name);
+
+  const dotted = DshPanelView.attachmentFromEditor(
+    editor({ fileName: 'D:\\workspace\\..cache\\app.js' }),
+    'D:\\workspace',
+  );
+  check('以两个点开头的子目录不会被误判为工作区外', dotted.name === '..cache/app.js', dotted.name);
+
+  const outside = DshPanelView.attachmentFromEditor(
+    editor({ fileName: 'D:\\workspace-other\\app.js' }),
+    'D:\\workspace',
+  );
+  check('相邻目录不会被误判为工作区内', outside.name === 'D:\\workspace-other\\app.js', outside.name);
+
+  const dirty = DshPanelView.attachmentFromEditor(
+    editor({ fileName: 'D:\\workspace\\src\\dirty.js', dirty: true, content: 'const unsaved = 42;' }),
+    'D:\\workspace',
+  );
+  check('有未保存修改时改带编辑器快照', dirty.kind === 'content' && dirty.text === 'const unsaved = 42;', JSON.stringify(dirty));
+  check('有未保存修改时不附带可能过期的磁盘链接', dirty.uri === undefined, JSON.stringify(dirty));
+  check('有未保存修改时在附件标签中明确说明', /未保存修改/.test(dirty.detail), dirty.detail);
+
+  const untitled = DshPanelView.attachmentFromEditor(
+    editor({ fileName: 'Untitled-1', scheme: 'untitled', dirty: true, untitled: true, content: '临时内容' }),
+    'D:\\workspace',
+  );
+  check('未保存的新文件直接带正文', untitled.kind === 'content' && untitled.text === '临时内容', JSON.stringify(untitled));
+  check('未保存的新文件不伪造可读取链接', untitled.uri === undefined && untitled.detail === '未保存文件', JSON.stringify(untitled));
+
+  const dirtySelection = DshPanelView.attachmentFromEditor(
+    editor({ fileName: 'D:\\workspace\\src\\dirty.js', dirty: true, selected: 'unsaved();' }),
+    'D:\\workspace',
+  );
+  check('脏文件选区正文照常携带且不附旧磁盘链接',
+    dirtySelection.kind === 'selection' && dirtySelection.text === 'unsaved();' && dirtySelection.uri === undefined,
+    JSON.stringify(dirtySelection));
+}
+
 /** ACP 已握手但 session/new 失败：不得把未初始化会话留给下一次发送。 */
 async function checkFailedSessionStart() {
-  section('8. 新建会话失败后清掉半成品，下一次操作能够重连');
+  section('9. 新建会话失败后清掉半成品，下一次操作能够重连');
   let newAttempts = 0;
   const sockets = new Set();
   const server = net.createServer((socket) => {
@@ -382,7 +447,7 @@ async function checkFailedSessionStart() {
 }
 
 async function checkExplicitNewSessionFailure() {
-  section('9. 主动新建失败同样清理；模式切换不得假报成功');
+  section('10. 主动新建失败同样清理；模式切换不得假报成功');
 
   const panel = new DshPanelView({ extensionUri: { fsPath: 'D:/extension' }, log: () => {}, kernels: fakeKernels() });
   const session = fakeSession('old-session');

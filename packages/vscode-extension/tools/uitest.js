@@ -340,6 +340,25 @@ function assertionsScript(scene) {
       assert('选区那块和文件那块外观可区分（各有自己的类）',
         !!document.querySelector('#attachments .chip-sel') && !!document.querySelector('#attachments .chip-file'));
 
+      // 再次挂载同一个文件时应刷新原项。未保存内容是挂载瞬间的快照，若这里只去重不替换，
+      // 用户修改后重挂仍会把旧正文发给模型。
+      window.dispatchEvent(new MessageEvent('message', { data: {
+        type: 'attach',
+        items: [{
+          kind: 'content', id: 'src/panel/view.js', name: 'src/panel/view.js',
+          text: 'const refreshed = true;', detail: '当前文件（含未保存修改）'
+        }]
+      } }));
+      chips = document.querySelectorAll('#attachments .chip');
+      assert('重复挂载同一文件会刷新而不是新增一块', chips.length === EXPECT.needsAttachments, chips.length);
+      details = Array.prototype.map.call(chips, function (chip) {
+        return (chip.querySelector('.chip-detail') || {}).textContent || '';
+      });
+      assert('刷新后附件标签反映最新状态', details.some(function (d) { return d.indexOf('未保存修改') >= 0; }), details.join(' | '));
+      assert('刷新已有附件时提示的是刚刷新的文件',
+        document.getElementById('hint').textContent.indexOf('未保存修改') >= 0,
+        document.getElementById('hint').textContent);
+
       // 每个已挂载的小块都需要可移除 —— 并且是就地移除，无需等待扩展回话。
       var closes = document.querySelectorAll('#attachments .chip-close');
       assert('每一块都有移除按钮', closes.length === chips.length, closes.length + ' vs ' + chips.length);

@@ -8,11 +8,12 @@
  *
  * 设计上有两项选择，均有依据：
  *
- * 1. **当前文件使用 `resource_link`，不写入正文。** ACP 支持
+ * 1. **已落盘且没有未保存修改的当前文件使用 `resource_link`，不写入正文。** ACP 支持
  *    `{type:'resource_link', name, uri}`；内核（`dsh-acp` 的 `admitAcpPrompt`）
  *    会将其渲染为一行 `[resource_link name="…" uri="…"]` 并**并入正文文本**。
  *    这样 DSH 会**使用自身的工具读取**该文件 —— 不需要将整个文件写入上下文，
- *    大文件也不会导致上下文超限；且读取到的始终是最新内容。
+ *    大文件也不会导致上下文超限。未保存的新文件没有可读地址，已修改文件的磁盘版本
+ *    又不是编辑器里的当前版本；这两种情况改为直接发送编辑器快照，避免模型读到空内容或旧内容。
  *    同时记录同一段源码中的事实，以免后续再次推测：
  *    - 可接受的块仅有 `text`、`resource_link`，以及 `image`（需要先在 initialize
  *      中声明相应能力，否则抛出 `inline image prompts were not advertised`）；
@@ -65,6 +66,20 @@ function selectionText(item) {
   ].join('\n');
 }
 
+/** 把未保存或已修改文件的编辑器快照转换为正文。 */
+function contentText(item) {
+  const where = item.name || '（未命名文件）';
+  const content = String(item.text);
+  const fence = fenceFor(content);
+  const language = SAFE_LANGUAGE.test(String(item.language || '')) ? item.language : '';
+  return [
+    `以下是编辑器中的当前文件内容（${where}，可能尚未保存）：`,
+    `${fence}${language}`,
+    content.replace(/\s+$/, ''),
+    fence,
+  ].join('\n');
+}
+
 /**
  * 组装本次 `session/prompt` 发送的内容块。
  *
@@ -83,6 +98,10 @@ function buildPromptBlocks(text, attachments = []) {
     // 选区正文只要非空即携带 —— 正文是用户实际要提供的内容，
     // 位置信息为附加项（无法确定位置时记为「未知位置」）。
     if (item.kind === 'selection' && hasText) blocks.push({ type: 'text', text: selectionText(item) });
+    // 未保存/已修改文件必须使用编辑器快照；即使文件为空，也保留位置与空内容这一事实。
+    if (item.kind === 'content' && typeof item.text === 'string') {
+      blocks.push({ type: 'text', text: contentText(item) });
+    }
     // 选中代码时同时附带一条链接：需要更多上下文时模型可自行读取。
     if (hasUri) {
       const link = { type: 'resource_link', name: item.name || item.uri, uri: item.uri };
@@ -98,4 +117,4 @@ function buildPromptBlocks(text, attachments = []) {
   return blocks;
 }
 
-module.exports = { buildPromptBlocks, selectionText, fenceFor };
+module.exports = { buildPromptBlocks, selectionText, contentText, fenceFor };
