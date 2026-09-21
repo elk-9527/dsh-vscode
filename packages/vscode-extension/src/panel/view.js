@@ -83,6 +83,8 @@ class DshPanelView {
     this.background = undefined;
     /** 防止并发重复连接。 */
     this.connecting = null;
+    /** 防止连续点击或快速切换模式时并发关闭/创建同一段会话。 */
+    this.newSessionPending = null;
     /**
      * 断线后需要恢复的会话 id。
      *
@@ -957,6 +959,9 @@ class DshPanelView {
   async send(text, attachments = []) {
     const items = Array.isArray(attachments) ? attachments.filter(Boolean) : [];
     if ((!text || !text.trim()) && items.length === 0) return;
+    // 新建会话会先关闭旧会话、再等待 session/new。此窗口内若直接发送，旧实现会把消息
+    // 发给已关闭且尚未取得新 id 的会话。等待切换落定；失败时再由 ensureConnection 重连。
+    if (this.newSessionPending) await this.newSessionPending;
     const session = await this.ensureConnection();
     if (!session) return;
     // 自此该会话已「发送过消息」：更换预设时不能再静默重新开启该会话。
@@ -1183,7 +1188,21 @@ class DshPanelView {
     return this.preset || cfg.preset || undefined;
   }
 
-  async newSession() {
+  newSession() {
+    if (this.newSessionPending) return this.newSessionPending;
+    let operation;
+    operation = (async () => {
+      try {
+        return await this.newSessionInternal();
+      } finally {
+        if (this.newSessionPending === operation) this.newSessionPending = null;
+      }
+    })();
+    this.newSessionPending = operation;
+    return operation;
+  }
+
+  async newSessionInternal() {
     const session = this.session || await this.ensureConnection();
     if (!session) return false;
     if (session.busy) {
@@ -1193,6 +1212,9 @@ class DshPanelView {
     const client = this.client;
     if (!client) return false;
     const cfg = this.config();
+    // 快速切换模式时 this.preset 可能在 closeSession 的等待期间再次改变；本次新建必须
+    // 使用发起时的明确值，后续最新选择会在本次完成后顺序再建一段。
+    const desiredPreset = this.wantedPreset(cfg);
     const old = session.sessionId;
     this.post({ type: 'reset' });
     // 用户主动请求新对话时，不再尝试恢复上一段会话。
@@ -1215,7 +1237,7 @@ class DshPanelView {
         cwd: this.workdir(),
         provider: cfg.provider,
         model: cfg.model,
-        preset: this.wantedPreset(cfg),
+        preset: desiredPreset,
       });
       this.post({ type: 'status', state: 'ready', detail: '就绪' });
       return true;
@@ -1248,10 +1270,17 @@ class DshPanelView {
     const preset = typeof value === 'string' ? value.trim() : '';
     if (!preset) return;
     this.preset = preset;
+    // 若前一次新建尚未结束，先等待它完成。等待期间又有更新的选择时，本次已被取代，
+    // 直接退出；只有最后一次选择负责顺序重建，避免并发 session/new 与错误成功提示。
+    const pending = this.newSessionPending;
+    if (pending) await pending;
+    if (this.preset !== preset) return;
     if (this.session && !this.turnSent) {
       this.log('info', `预设已改为 ${preset}；当前会话尚未发送过消息，直接重新开启一段`);
       const restarted = await this.newSession();
-      if (restarted) this.post({ type: 'notice', text: `已按「${this.labelOf(preset)}」重新开启。` });
+      if (restarted && this.preset === preset) {
+        this.post({ type: 'notice', text: `已按「${this.labelOf(preset)}」重新开启。` });
+      }
       return;
     }
     this.log('info', `预设已改为 ${preset}（下一段新对话生效）`);

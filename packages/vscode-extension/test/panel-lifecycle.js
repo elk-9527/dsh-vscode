@@ -499,6 +499,85 @@ async function checkExplicitNewSessionFailure() {
   );
 }
 
+async function checkConcurrentNewSession() {
+  section('11. 连续新建与快速切换模式必须串行');
+
+  const panel = new DshPanelView({ extensionUri: { fsPath: 'D:/extension' }, log: () => {}, kernels: fakeKernels() });
+  const session = fakeSession('parallel-old');
+  const client = fakeClient();
+  let releaseClose;
+  let closeCalls = 0;
+  let startCalls = 0;
+  client.closeSession = async () => {
+    closeCalls += 1;
+    await new Promise((resolve) => { releaseClose = resolve; });
+  };
+  session.busy = false;
+  session.start = async () => { startCalls += 1; };
+  panel.session = session;
+  panel.client = client;
+  panel.post = () => {};
+
+  const first = panel.newSession();
+  const second = panel.newSession();
+  check('连续新建共用同一个进行中的操作', first === second);
+  await Promise.resolve();
+  releaseClose();
+  await Promise.all([first, second]);
+  check('连续新建只关闭一次旧会话', closeCalls === 1, String(closeCalls));
+  check('连续新建只创建一段新会话', startCalls === 1, String(startCalls));
+
+  client.closeSession = async () => { closeCalls += 1; };
+  await panel.newSession();
+  check('前一次完成后仍可正常再次新建', closeCalls === 2 && startCalls === 2, `${closeCalls}/${startCalls}`);
+
+  const sendPanel = new DshPanelView({ extensionUri: { fsPath: 'D:/extension' }, log: () => {}, kernels: fakeKernels() });
+  const sendSession = fakeSession('send-old');
+  const sendClient = fakeClient();
+  let releaseStart;
+  let startFinished = false;
+  let sent = false;
+  sendSession.busy = false;
+  sendSession.start = async () => {
+    await new Promise((resolve) => { releaseStart = resolve; });
+    startFinished = true;
+  };
+  sendSession.send = async () => { sent = true; };
+  sendPanel.session = sendSession;
+  sendPanel.client = sendClient;
+  sendPanel.post = () => {};
+  const changing = sendPanel.newSession();
+  await Promise.resolve();
+  await Promise.resolve();
+  const sending = sendPanel.send('不要发给旧会话');
+  await Promise.resolve();
+  check('新会话尚未建好时消息不会提前发出', sent === false);
+  releaseStart();
+  await Promise.all([changing, sending]);
+  check('新会话建好后等待中的消息正常发出', startFinished && sent);
+
+  const presetPanel = new DshPanelView({ extensionUri: { fsPath: 'D:/extension' }, log: () => {}, kernels: fakeKernels() });
+  const presetSession = fakeSession('preset-old');
+  const presetClient = fakeClient();
+  const startedPresets = [];
+  const posted = [];
+  presetSession.busy = false;
+  presetSession.start = async ({ preset }) => { startedPresets.push(preset); };
+  presetPanel.session = presetSession;
+  presetPanel.client = presetClient;
+  presetPanel.post = (message) => posted.push(message);
+  const minimal = presetPanel.setPreset('minimal');
+  const cordis = presetPanel.setPreset('cordis');
+  await Promise.all([minimal, cordis]);
+  check('快速模式切换按顺序创建且最终使用最后选择',
+    startedPresets.join(',') === 'minimal,cordis',
+    startedPresets.join(','));
+  const successes = posted.filter((item) => item.type === 'notice' && /已按.*重新开启/.test(item.text));
+  check('被后续选择取代的模式不会再提示成功',
+    successes.length === 1 && /cordis/.test(successes[0].text),
+    JSON.stringify(successes));
+}
+
 function finish() {
   console.log(`\n${'═'.repeat(56)}`);
   if (failures.length === 0) console.log(`✅ 全部通过：${passed} 项检查`);
@@ -512,6 +591,7 @@ function finish() {
 async function runAsyncChecks() {
   await checkFailedSessionStart();
   await checkExplicitNewSessionFailure();
+  await checkConcurrentNewSession();
 }
 
 runAsyncChecks().then(finish, (error) => {
