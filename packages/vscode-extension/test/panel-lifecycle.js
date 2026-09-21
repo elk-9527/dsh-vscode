@@ -248,6 +248,50 @@ section('5. 多个权限请求依次显示；停止回合会取消并清空弹�
   check('弹窗清空后的迟到回答被忽略', panel.answerPendingPermission(52, 'once') === false);
 }
 
+section('6. 忙碌时不得用历史回放或新会话覆盖当前回答');
+{
+  const panel = new DshPanelView({ extensionUri: { fsPath: 'D:/extension' }, log: () => {}, kernels: fakeKernels() });
+  const session = fakeSession('busy-session');
+  const posted = [];
+  let replayed = 0;
+  let started = 0;
+  session.busy = true;
+  session.start = async () => { started += 1; };
+  panel.session = session;
+  panel.ensureConnection = async () => session;
+  panel.sendHistoryReplay = async () => { replayed += 1; };
+  panel.post = (message) => posted.push(message);
+
+  void panel.resumeHistory('history-1');
+  check('忙碌时接回历史不会先覆盖当前转录', replayed === 0, String(replayed));
+  check(
+    '忙碌时接回历史给出明确提示',
+    posted.some((item) => item.type === 'notice' && /正在工作/.test(item.text)),
+    JSON.stringify(posted),
+  );
+
+  posted.length = 0;
+  void panel.newSession();
+  check('忙碌时不会创建并发的新会话', started === 0, String(started));
+  check('忙碌时新建不会清空当前转录', !posted.some((item) => item.type === 'reset'), JSON.stringify(posted));
+}
+
+section('7. 旁路操作失败时保持真实的忙碌状态');
+{
+  const panel = new DshPanelView({ extensionUri: { fsPath: 'D:/extension' }, log: () => {}, kernels: fakeKernels() });
+  const session = fakeSession('busy-error');
+  const posted = [];
+  session.busy = true;
+  panel.session = session;
+  panel.post = (message) => posted.push(message);
+  panel.setModel = () => { throw new Error('切换失败'); };
+
+  void panel.onWebviewMessage({ type: 'setModel', value: 'bad' });
+  const busy = posted.filter((item) => item.type === 'busy').at(-1);
+  check('旁路错误仍会展示为错误卡片', posted.some((item) => item.type === 'error'));
+  check('模型回合仍在执行时停止按钮不会被误关', busy && busy.busy === true, JSON.stringify(posted));
+}
+
 console.log(`\n${'═'.repeat(56)}`);
 if (failures.length === 0) console.log(`✅ 全部通过：${passed} 项检查`);
 else {

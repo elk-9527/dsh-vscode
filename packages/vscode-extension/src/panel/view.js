@@ -308,7 +308,10 @@ class DshPanelView {
       const text = error && error.message ? error.message : String(error);
       this.log('error', `处理界面消息时出错（${message.type}）：${text}`);
       this.postError(text);
-      this.post({ type: 'busy', busy: false });
+      // 只有“本回合自身失败”才会在抛出前把 session.busy 复位。若是切换模型、
+      // 读取历史等旁路操作失败，模型回合可能仍在执行；此处不能无条件把停止按钮
+      // 变回发送按钮，否则界面会允许用户误发第二个并发回合。
+      this.post({ type: 'busy', busy: Boolean(this.session && this.session.busy) });
     }
   }
 
@@ -1056,13 +1059,15 @@ class DshPanelView {
    * 内存中不存在该会话）时明确说明「以上仅为回放」，不将回放表示为恢复成功。
    */
   async resumeHistory(id) {
-    const session = await this.ensureConnection();
+    const session = this.session || await this.ensureConnection();
     if (!session) return;
-    await this.sendHistoryReplay(id);
     if (session.busy) {
       this.post({ type: 'notice', text: '当前正在工作，结束后再进行恢复。' });
       return;
     }
+    // 忙碌判断必须早于回放：回放会清空当前转录。若先回放再拒绝恢复，
+    // 用户正在进行的回答会被历史内容覆盖，随后到达的增量又混进回放中。
+    await this.sendHistoryReplay(id);
     try {
       await session.resume(String(id || ''), this.workdir(), { preset: this.wantedPreset() });
       this.turnSent = true;
@@ -1153,8 +1158,12 @@ class DshPanelView {
   }
 
   async newSession() {
-    const session = await this.ensureConnection();
+    const session = this.session || await this.ensureConnection();
     if (!session) return;
+    if (session.busy) {
+      this.post({ type: 'notice', text: '当前正在工作，结束后再新建对话。' });
+      return;
+    }
     const cfg = this.config();
     const old = session.sessionId;
     this.post({ type: 'reset' });

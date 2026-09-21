@@ -5,7 +5,7 @@
  *
  * 这些场景不能用假函数代替：最危险的情况正是“TCP 端口可以连接，但对端不是 ACP、
  * 或接受连接后不回复”。因此本套件在 127.0.0.1 上建立临时 TCP 服务，使用真实 socket
- * 验证握手、普通请求与取消请求都不会永久等待。
+ * 验证握手、普通请求与取消请求都不会永久等待，并固定 TCP 分片不会破坏中文。
  */
 
 const net = require('node:net');
@@ -156,6 +156,31 @@ async function main() {
     await new Promise((resolve) => setTimeout(resolve, 20));
     check('预先取消会明确失败', error && error.code === -32800, error && error.message);
     check('预先取消的业务请求没有写入 socket', !sent.includes('should/not/send'), sent.join(', '));
+    client.close();
+  });
+
+  section('5. UTF-8 字符跨 TCP 数据块时不得出现乱码');
+  await withServer((socket, frame) => {
+    if (frame.method !== 'initialize') return;
+    const payload = Buffer.from(`${JSON.stringify({
+      jsonrpc: '2.0',
+      id: frame.id,
+      result: {
+        protocolVersion: 1,
+        agentInfo: { name: '中文助手' },
+        agentCapabilities: {},
+      },
+    })}\n`, 'utf8');
+    const chinese = Buffer.from('中', 'utf8');
+    const at = payload.indexOf(chinese);
+    // 故意只发送“中”的第一个字节，稍后再发余下字节。TCP 不保留 write 边界，
+    // 客户端必须使用有状态解码器，而不能对每个 chunk 单独 toString('utf8')。
+    socket.write(payload.subarray(0, at + 1));
+    setTimeout(() => socket.write(payload.subarray(at + 1)), 15);
+  }, async (port) => {
+    const client = new DoorClient({ host: '127.0.0.1', port, log: () => {} });
+    const result = await client.connect({ initializeTimeoutMs: 300 });
+    check('跨分片的中文按原文解码', result.agentInfo.name === '中文助手', result.agentInfo.name);
     client.close();
   });
 

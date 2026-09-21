@@ -14,6 +14,7 @@
 
 const net = require('node:net');
 const { EventEmitter } = require('node:events');
+const { StringDecoder } = require('node:string_decoder');
 
 const { buildPromptBlocks } = require('../dsh/blocks');
 const { requireLoopbackHost } = require('./endpoint');
@@ -84,6 +85,7 @@ class DoorTimeoutError extends Error {
 class DoorClient extends EventEmitter {
   #socket = null;
   #buffer = '';
+  #decoder = new StringDecoder('utf8');
   #nextId = 1;
   #pending = new Map();
   #closed = false;
@@ -123,6 +125,10 @@ class DoorClient extends EventEmitter {
     if (this.#socket) throw new Error('连接已建立，不能重复连接');
     this.#closed = false;
     this.#closeReason = '';
+    // TCP 数据块边界与 UTF-8 字符边界无关。每次新连接使用新的有状态解码器，
+    // 既保留跨 chunk 的多字节字符，也丢弃上一次断线留下的半帧/半字符。
+    this.#buffer = '';
+    this.#decoder = new StringDecoder('utf8');
 
     const socket = net.connect({ host: this.host, port: this.port });
     this.#socket = socket;
@@ -452,7 +458,7 @@ class DoorClient extends EventEmitter {
   }
 
   #onData(chunk) {
-    this.#buffer += chunk.toString('utf8');
+    this.#buffer += this.#decoder.write(chunk);
     // JSON 中不会出现未转义的换行（stringify 会转义），因此按行切分是安全的。
     let index;
     while ((index = this.#buffer.indexOf('\n')) >= 0) {
