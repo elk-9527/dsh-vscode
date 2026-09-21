@@ -7,8 +7,8 @@
   "license": "MIT",
   "icon": "media/icon.png",
   "galleryBanner": {
-    "color": "#4d6bfe",
-    "theme": "dark"
+    "color": "#eaf1ff",
+    "theme": "light"
   },
   "keywords": [
     "deepseek",

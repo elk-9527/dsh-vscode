@@ -2,7 +2,7 @@
 /*
  * 生成市场使用的扩展图标 media/icon.png（128×128，VS Code 市场的要求）。
  *
- * 图形使用与活动栏一致的 DeepSeek 鲸鱼；市场版本增加品牌蓝渐变底与一个小型终端提示符，
+ * 图形使用与活动栏一致的 DeepSeek 鲸鱼；市场版本增加冰蓝渐变底与一个小型终端提示符，
  * 用于区分“DeepSeek 本体”与“连接 DSH 的 VS Code 面板”。活动栏版本仍保持 currentColor，
  * 市场图标则必须为自带颜色的位图。
  *
@@ -20,19 +20,19 @@ const ROOT = path.join(__dirname, '..');
 const CHROME = findChrome();
 const OUT = path.join(ROOT, 'media', 'icon.png');
 const STAGE = path.join(ROOT, 'build', 'icon');
-/** DeepSeek 品牌蓝；由深至浅的渐变保证白色鲸鱼在小尺寸下仍有稳定对比度。 */
-const BG = '#4d6bfe';
+/** 冰蓝底色更接近 DeepSeek 官网的轻量视觉，同时保留足够的市场列表辨识度。 */
+const BG = '#eaf1ff';
 
 if (!fs.existsSync(CHROME)) {
   console.error(missingChromeMessage());
   process.exit(1);
 }
 
-// 活动栏的单色鲸鱼原样嵌入，只在市场图标中替换为白色并放大。
+// 活动栏的单色鲸鱼原样嵌入，只在市场图标中替换为品牌蓝并放大。
 const GLYPH = fs
   .readFileSync(path.join(ROOT, 'media', 'dsh.svg'), 'utf8')
   .replace(/<!--[\s\S]*?-->/g, '')
-  .replace(/currentColor/g, '#ffffff')
+  .replace(/currentColor/g, '#4d6bfe')
   .replace('<svg ', '<svg class="whale" width="108" height="92" ');
 
 const html = `<!doctype html>
@@ -50,13 +50,13 @@ const html = `<!doctype html>
     height: 128px;
     overflow: hidden;
     border-radius: 26px;
-    background: linear-gradient(145deg, #263eb8 0%, ${BG} 58%, #79a7ff 100%);
+    background: linear-gradient(145deg, #ffffff 0%, ${BG} 58%, #d6e4ff 100%);
   }
   .whale {
     position: absolute;
     left: 8px;
     top: 16px;
-    filter: drop-shadow(0 3px 4px rgba(13, 31, 96, 0.22));
+    filter: drop-shadow(0 3px 4px rgba(77, 107, 254, 0.18));
   }
   .terminal {
     position: absolute;
@@ -65,8 +65,8 @@ const html = `<!doctype html>
     width: 32px;
     height: 32px;
     border-radius: 10px;
-    background: #ffffff;
-    box-shadow: 0 3px 8px rgba(13, 31, 96, 0.28);
+    background: #18285f;
+    box-shadow: 0 3px 8px rgba(24, 40, 95, 0.24);
   }
   .terminal::before {
     content: '';
@@ -75,8 +75,8 @@ const html = `<!doctype html>
     top: 9px;
     width: 9px;
     height: 9px;
-    border-top: 4px solid #3d5ce7;
-    border-right: 4px solid #3d5ce7;
+    border-top: 4px solid #ffffff;
+    border-right: 4px solid #ffffff;
     transform: rotate(45deg);
   }
   .terminal::after {
@@ -87,7 +87,7 @@ const html = `<!doctype html>
     bottom: 7px;
     height: 3px;
     border-radius: 2px;
-    background: #35c8ee;
+    background: #68d8e8;
   }
 </style>
 <div class="tile">${GLYPH}<span class="terminal"></span></div>
@@ -132,4 +132,4 @@ if (png.subarray(1, 4).toString() !== 'PNG') {
   process.exit(1);
 }
 
-console.log(`✅ media/icon.png：128×128，${(png.length / 1024).toFixed(1)} KB，DeepSeek 鲸鱼 + 终端标记，底色 ${BG}`);
+console.log(`✅ media/icon.png：128×128，${(png.length / 1024).toFixed(1)} KB，DeepSeek 蓝鲸鱼 + 终端标记，底色 ${BG}`);
