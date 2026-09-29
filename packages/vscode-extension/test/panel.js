@@ -80,7 +80,7 @@ require.cache['vscode-mock'] = {
 };
 
 const { DshPanelView } = require('../src/panel/view');
-const { ensureDoor, syncDoor } = require('./helpers/door');
+const { ensureDoor, isMissingModelCredentials, syncDoor } = require('./helpers/door');
 
 // ── 断言小工具 ──────────────────────────────────────────
 
@@ -198,6 +198,12 @@ function typesOf(items) {
 
   check('界面先收到自己发的话', after[0] && after[0].type === 'user', JSON.stringify(after[0]));
   check('收到 assistant 开始', after.some((item) => item.type === 'assistant'));
+  if (after.some((item) => item.type === 'error' && isMissingModelCredentials(item.message))) {
+    panel.dispose();
+    door.stop();
+    console.log('  ⏭  面板连接与建会话成功，但本机没有当前模型的凭据；跳过真实模型回合。');
+    process.exit(2);
+  }
   check('收到正文增量', after.some((item) => item.type === 'text' && item.delta));
   check('收到工具卡片', after.some((item) => item.type === 'tool'));
   check('收到用量', after.some((item) => item.type === 'usage'));

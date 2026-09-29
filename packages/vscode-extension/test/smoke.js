@@ -20,7 +20,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DoorClient } = require('../src/door/client');
 const { DshSession, flattenChoices } = require('../src/dsh/session');
-const { ensureDoor } = require('./helpers/door');
+const { ensureDoor, isMissingModelCredentials } = require('./helpers/door');
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.DSH_PANEL_PORT || 47821);
@@ -344,6 +344,11 @@ async function runOnce(round) {
     try {
       await runOnce(round);
     } catch (error) {
+      if (isMissingModelCredentials(error)) {
+        door.stop();
+        console.log('\n⏭  ACP 握手与建会话成功，但本机没有当前模型的凭据；跳过真实模型回合。');
+        process.exit(2);
+      }
       failed += 1;
       failures.push(`第 ${round} 轮发生异常：${error.message}`);
       console.log(`\n💥 第 ${round} 轮异常：${error.stack || error.message}`);

@@ -23,10 +23,16 @@
 ## 安装
 
 本扩展需要本机已安装并配置好 DSH，同时需要配套的 `dsh-acp-door` 插件提供本机连接。
+当前版本兼容 DSH `0.1.5-rc.2` 与 `0.2.0-rc.1`。
 
 ### 1. 准备 DSH 配置集
 
 若希望在桌面端未运行时也能使用面板，建议创建独立的 `vscode-panel` 配置集，并安装配套插件：
+
+最简单的方式是在安装扩展后打开命令面板，运行 **DSH：准备或修复自启配置**。它会创建
+缺失的 web 配置集，并安装或更新配套插件；已有同名非 web 配置集不会被覆盖。
+
+也可以手工执行：
 
 ```sh
 dsh --profile vscode-panel --from-default-profile web --dump-config
@@ -64,7 +70,7 @@ code --install-extension <文件路径>.vsix --force
 - 点击时钟图标浏览并接回历史会话。
 - 在编辑器中右键，选择 **DSH：把选中的代码带进对话** 或 **DSH：把当前文件带进对话**。
 - 使用顶栏控件切换模型、模式和权限。
-- 在命令面板中搜索 `DSH`，可重新连接、查看日志或停止面板启动的后台 DSH。
+- 在命令面板中搜索 `DSH`，可准备自启配置、重新连接、查看日志或停止面板启动的后台 DSH。
 
 ## 设置
 
@@ -74,7 +80,7 @@ code --install-extension <文件路径>.vsix --force
 | --- | --- | --- |
 | `dshPanel.autoStart` | `true` | 没有可用连接时，允许面板启动本机 DSH |
 | `dshPanel.fallbackProfile` | `vscode-panel` | 面板自行启动时使用的配置集 |
-| `dshPanel.dshCommand` | `dsh` | DSH 命令名称或完整路径 |
+| `dshPanel.dshCommand` | `dsh` | 自动发现失败时使用的 DSH 命令覆盖项 |
 | `dshPanel.kernelIdleMinutes` | `10` | 面板关闭后保留自启 DSH 的分钟数 |
 | `dshPanel.port` | `47821` | 连接已运行 DSH 的本机端口 |
 | `dshPanel.selfStartPort` | `47831` | 面板自行启动 DSH 时使用的本机端口 |
@@ -82,7 +88,8 @@ code --install-extension <文件路径>.vsix --force
 | `dshPanel.preset` | 空 | 新对话使用的模式；留空使用 DSH 默认值 |
 | `dshPanel.cwd` | 空 | 新会话的工作目录；留空使用当前工作区 |
 
-通常只需确认 `fallbackProfile` 和 `dshCommand`。端口设置仅在本机已有端口冲突或使用了自定义配置时修改。
+通常只需确认 `fallbackProfile`。DSH Desktop 0.2 的安装目录和随附运行时会被自动发现；
+只有自动发现失败时才需设置 `dshCommand`。端口设置仅在本机已有端口冲突或使用了自定义配置时修改。
 
 ## 本机数据与安全
 
@@ -105,7 +112,8 @@ code --install-extension <文件路径>.vsix --force
 1. 在命令面板运行 **DSH：查看日志**，查看连接或启动失败的原因。
 2. 运行 `dsh plugin --profile vscode-panel list`，确认配套插件已安装。
 3. 安装或更新配套插件后重启对应的 DSH；更新扩展后执行 **Developer: Reload Window**。
-4. 如果 DSH 不在 `PATH` 中，在 `dshPanel.dshCommand` 中填写其完整启动命令。
+4. 运行 **DSH：准备或修复自启配置**，自动创建或更新 `vscode-panel`。
+5. 如果自动发现仍失败，再在 `dshPanel.dshCommand` 中填写完整启动命令。
 
 仍有问题时，请在 [GitHub Issues](https://github.com/elk-9527/dsh-vscode/issues) 提交日志和复现步骤。版本变化见[更新记录](CHANGELOG.md)。
 

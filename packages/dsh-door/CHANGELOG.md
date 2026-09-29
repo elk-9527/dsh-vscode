@@ -3,6 +3,17 @@
 本包是一个 DSH 插件：在**运行中的** DSH 内核上提供仅监听本机（`127.0.0.1`）的 ACP 接入点，
 供 VS Code 面板等外部程序连接。
 
+## [0.1.0] — 2026-09-29
+
+- 兼容 DSH `0.2.0-rc.1`：历史会话改为优先调用公开的 `sessionQuery` 服务，支持 v4 会话格式；
+  DSH 0.1 仍保留原有的只读 v3 文件适配。
+- 权限预设同时适配 DSH 0.2 的 `catalog/current/resolve/set` 与 DSH 0.1 的
+  `selectFor/permissionState/current/set`，外部协议保持不变。
+- 状态方法新增 `historyKind`、`sessionFormat` 与 `permissionKind`，方便客户端和日志明确显示
+  当前使用的内核适配路径。
+- 首次运行且会话目录尚未创建时，历史列表返回空清单，不再把正常的空状态报告成错误。
+- 对 DSH 内核的 peer dependency 扩展为 `0.1.5-rc.2 || 0.2.0-rc.1`。
+
 ## [0.0.16] — 2026-09-21
 
 - 成功建立或恢复会话后立即释放仅供请求阶段使用的队列与索引，避免同一连接长期运行时持续积累

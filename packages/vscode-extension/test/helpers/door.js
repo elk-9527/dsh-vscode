@@ -17,6 +17,7 @@ const {
   spawnBackgroundDsh,
   runDshSync,
   dshCommandCandidates,
+  runningDesktopExecutables,
 } = require('../../src/door/locate');
 
 const HOST = process.env.DSH_PANEL_HOST || '127.0.0.1';
@@ -43,6 +44,27 @@ function installedDoorPath(profile) {
 const DOOR_INSTALLED = installedDoorPath(TEST_PROFILE);
 
 let cachedDshCommand;
+let cachedDesktopExecutables = [];
+
+/** Create the dedicated web profile on a fresh machine; never touches desktop. */
+function ensureTestProfile({ command, log = () => {} } = {}) {
+  command = resolveTestDshCommand({ command, log });
+  const manifest = path.join(
+    process.env.DSH_HOME || path.join(os.homedir(), '.dsh'),
+    'profiles',
+    TEST_PROFILE,
+    'package.json',
+  );
+  if (fs.existsSync(manifest)) return false;
+  log('info', `测试配置集 ${TEST_PROFILE} 不存在，从 web 模板创建`);
+  runDshSync({
+    command,
+    args: ['--profile', TEST_PROFILE, '--from-default-profile', 'web', '--dump-config'],
+    timeoutMs: 120000,
+  });
+  if (!fs.existsSync(manifest)) throw new Error(`DSH 没有创建测试配置集 ${TEST_PROFILE}`);
+  return true;
+}
 
 /**
  * 找到这台机器上真实可执行的 DSH 命令。
@@ -54,9 +76,12 @@ let cachedDshCommand;
 function resolveTestDshCommand({ command, log = () => {} } = {}) {
   if (command) return command;
   if (cachedDshCommand) return cachedDshCommand;
+  cachedDesktopExecutables = runningDesktopExecutables();
   const candidates = dshCommandCandidates({
     dshCommand: process.env.DSH_PANEL_DSH || 'dsh',
     homedir: os.homedir(),
+    desktopExecutables: cachedDesktopExecutables,
+    extensionDir: path.resolve(__dirname, '..', '..'),
   });
   const failures = [];
   for (const candidate of candidates) {
@@ -72,8 +97,21 @@ function resolveTestDshCommand({ command, log = () => {} } = {}) {
   throw new Error(`找不到可执行的 DSH：${failures.join('；')}`);
 }
 
+/** Match extension activation: retain the Desktop path discovered before opening the panel. */
+function desktopExecutablesForTest({ log = () => {} } = {}) {
+  resolveTestDshCommand({ log });
+  return cachedDesktopExecutables.slice();
+}
+
 function doorIsUp(host = HOST, port = PORT) {
   return probePort(host, port, 800);
+}
+
+/** True when a live-model test reached the provider but this machine has no usable credential. */
+function isMissingModelCredentials(value) {
+  return /no API key|credentials service|incorrect API key|unauthorized/i.test(
+    String(value && value.message ? value.message : value || ''),
+  );
 }
 
 /** 列出该包应包含的文件（依据 package.json 的 files 字段，不另行维护一份）。 */
@@ -142,6 +180,7 @@ function doorDrift() {
  */
 function syncDoor({ log = () => {}, command } = {}) {
   command = resolveTestDshCommand({ command, log });
+  ensureTestProfile({ command, log });
   const drift = doorDrift();
   if (drift.length === 0) {
     log('info', '该插件与源码一致，无需重新安装');
@@ -275,9 +314,12 @@ module.exports = {
   syncDoor,
   doorDrift,
   inspectDoor,
+  isMissingModelCredentials,
+  desktopExecutablesForTest,
   HOST,
   PORT,
   PROFILE,
   TEST_PROFILE,
+  ensureTestProfile,
   resolveTestDshCommand,
 };

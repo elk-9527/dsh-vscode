@@ -197,7 +197,10 @@ function runningDesktopExecutables({ env = process.env, platform = process.platf
         '-Command',
         "Get-Process -Name 'DeepSeek Harness' -ErrorAction SilentlyContinue | ForEach-Object { $_.Path }",
       ],
-      { encoding: 'utf8', timeout: 2500, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] },
+      // A cold PowerShell start can exceed 2.5 seconds on Windows.  Missing this
+      // result is costly (the panel falls back to a non-existent PATH command),
+      // so allow one short startup-sized window for this read-only probe.
+      { encoding: 'utf8', timeout: 5000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] },
     );
     for (const line of String(output || '').split(/\r?\n/)) push(line);
   } catch {

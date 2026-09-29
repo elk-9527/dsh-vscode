@@ -722,6 +722,14 @@ class DshPanelView {
       const status = await client.doorStatus();
       this.doorStatus = status;
       if (status?.version) this.log('info', `接入点插件版本 ${status.version}`);
+      if (status?.capabilities?.historyKind || status?.capabilities?.permissionKind) {
+        this.log(
+          'info',
+          `内核兼容适配：历史=${status.capabilities.historyKind || 'unknown'}` +
+            `${status.capabilities.sessionFormat ? `/v${status.capabilities.sessionFormat}` : ''}，` +
+            `权限=${status.capabilities.permissionKind || 'unavailable'}`,
+        );
+      }
       if (status?.model?.ready === false) {
         client.close();
         this.postError('DSH 还没有可供新对话使用的模型。', {

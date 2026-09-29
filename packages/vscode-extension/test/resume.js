@@ -17,7 +17,7 @@
 const path = require('node:path');
 
 const { DoorClient } = require('../src/door/client');
-const { ensureDoor, HOST, PORT } = require('./helpers/door');
+const { ensureDoor, isMissingModelCredentials, HOST, PORT } = require('./helpers/door');
 
 const SCRATCH = path.resolve(__dirname, '..', '..', '..', 'spike', 'scratch');
 
@@ -73,10 +73,21 @@ const log = () => {};
   const originalId = created.sessionId;
   console.log(`     会话 ${originalId}，要记的数字 ${secret}`);
 
-  const remembered = await ask(first, {
-    sessionId: originalId,
-    text: `记住这个数字：${secret}。只回答「已记住」，不要用任何工具。`,
-  });
+  let remembered;
+  try {
+    remembered = await ask(first, {
+      sessionId: originalId,
+      text: `记住这个数字：${secret}。只回答「已记住」，不要用任何工具。`,
+    });
+  } catch (error) {
+    first.close();
+    door.stop();
+    if (isMissingModelCredentials(error)) {
+      console.log('  ⏭  ACP 握手与建会话成功，但本机没有当前模型的凭据；跳过记忆恢复回合。');
+      process.exit(2);
+    }
+    throw error;
+  }
   check('它给出了回应', Boolean(remembered.answer), JSON.stringify(remembered));
   console.log(`     回应：${remembered.answer.slice(0, 60)}`);
 

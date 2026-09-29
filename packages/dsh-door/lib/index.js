@@ -393,8 +393,9 @@ function rememberSessionRequest(line, state, diag) {
 /**
  * 就地应答该插件自身的历史会话请求（`dsh-door/sessions/list|get`）。
  *
- * 由该插件应答而不转发内核的原因：内核没有「列出历史会话」的公开方法，
- * 而会话文件位于本机磁盘上 —— 由该插件读取磁盘（lib/sessions.js，只读）即可。
+ * 由该插件应答而不转发 ACP 的原因：ACP 没有「列出历史会话」方法。DSH 0.2
+ * 通过公开的 sessionQuery 服务读取 v4；旧内核没有该服务时，才回退到
+ * lib/sessions.js 的只读 v3 磁盘适配。
  * 应答帧经 `state.respond` 走唯一的写出口，请求帧本身**被丢弃且不转发**
  * （内核会将其视为无法识别的方法并报错，不产生任何效果）。
  *
@@ -433,7 +434,8 @@ async function handleDoorSessions(line, state, diag) {
  * 清单与切换均来自内核的 `@deepseek-ai/dsh-permission-presets` 服务
  * （与桌面端的「权限」选择器使用同一份数据），该插件仅做转接：
  *
- *   - `get` → 读取会话的 `permissions` 投影（`selectFor(permissionState(session))`），
+ *   - `get` → DSH 0.2 使用进程级 `catalog()`，DSH 0.1 使用
+ *     `selectFor(permissionState(session))`，
  *     返回 `{currentValue, options, defaultPreset}`；
  *   - `set` → 先经 `resolve()` 校验（无法识别的预设名会抛出异常，原话转给客户端），
  *     再调用 `set(session, value)`，随后**重新读取一次**返回给客户端。
@@ -608,7 +610,7 @@ export function apply(ctx, config = {}) {
     ctx.logger?.warn?.(warning);
   }
 
-  // 历史会话：目录与内核采用同一套判定（DSH_HOME 或 ~/.dsh）。只读，见 lib/sessions.js。
+  // 历史会话：优先使用 DSH 0.2 的公开 sessionQuery；旧内核回退为只读 v3 文件适配。
   const sessionsRoot =
     typeof config.sessionsDir === 'string' && config.sessionsDir
       ? config.sessionsDir

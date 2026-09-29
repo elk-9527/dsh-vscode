@@ -6,6 +6,9 @@
 
 本仓库由两个组成部分构成，两者都需要安装。
 
+当前维护版本已同时适配 DSH `0.1.5-rc.2` 与 `0.2.0-rc.1`。DSH 0.2 使用 v4 会话格式和
+新的权限目录接口；兼容差异由接入点插件内部处理，VS Code 面板协议不变。
+
 | 包 | 内容 | 安装位置 |
 | --- | --- | --- |
 | [`packages/vscode-extension`](packages/vscode-extension)（`dsh-panel`） | VS Code 扩展：侧边栏面板，本身即 ACP 客户端 | VS Code 市场 / `.vsix` |
@@ -51,6 +54,10 @@ DSH 的会话、记忆与默认模型设置来自同一份 `$DSH_HOME`；各配�
 桌面端已经运行且其中已安装配套插件时，面板会直接接入该内核。为了在桌面端未启动时仍可使用，
 建议创建一个可由命令行启动的网页配置集，并在其中安装配套插件：
 
+安装扩展后，可先在 VS Code 命令面板运行 **DSH：准备或修复自启配置**。该命令会创建
+缺失的 `vscode-panel` web 配置集，并安装或更新接入点插件；它不会覆盖已有的同名非 web 配置集。
+也可以手工执行：
+
 ```sh
 # 从 DSH 的 web 模板创建配置集（首次执行时）
 dsh --profile vscode-panel --from-default-profile web --dump-config
@@ -80,6 +87,9 @@ code --install-extension <dsh-acp-panel-版本>.vsix --force
 ```
 
 打开活动栏中的 DSH 图标后即可开始对话。
+
+DSH Desktop 0.2 无需另外把 `dsh` 加入 `PATH`：扩展会自动查找 Desktop 的安装位置和随附运行时。
+`dshPanel.dshCommand` 只在自动发现失败或需要覆盖启动命令时使用。
 
 ### 其它电脑与后续更新
 
