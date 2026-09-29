@@ -30,6 +30,7 @@ const {
   redactSensitiveOutput,
 } = require('../door/locate');
 const { resolveLoopbackHost } = require('../door/endpoint');
+const { syncPanelProfilePlugins } = require('../door/setup');
 const { renderHtml, makeNonce } = require('../panel/html');
 const localSessions = require('../dsh/sessions');
 const { kernelManager } = require('../panel/kernel-manager');
@@ -493,11 +494,50 @@ class DshPanelView {
 
     const failures = [];
     const kinds = new Set();
+    // 同一配置集只需成功同步一次；命令不可用时允许下一条命令候选重试。
+    const syncedProfiles = new Set();
+    const syncAttempts = new Set();
     for (let i = 0; i < plans.length; i += 1) {
       const { profile, command } = plans[i];
       const hasMore = i + 1 < plans.length;
       // 逐项尝试候选命令只写入日志，顶栏不需要随之变化。
       this.log('info', `尝试启动：${redactSensitiveOutput(command)}（配置集：${profile}）`);
+
+      /*
+       * desktop 与 vscode-panel 是两个独立的依赖清单。此前准备命令只给后者安装连接组件，
+       * 结果是：桌面端开着时模型能调用用户插件；桌面端关闭、自启 vscode-panel 后同一批
+       * 插件全部消失。这里在真正自启前做一次差异同步，后续桌面端增装/升级插件也能跟上。
+       *
+       * 仅自动维护约定的 vscode-panel：测试配置集与用户自定义配置集不应被静默改写；
+       * desktop 更不会在此处被写入。同步失败不阻止聊天启动，原有能力仍可继续使用，
+       * 具体原因保留在日志中。
+       */
+      const syncKey = `${profile}\0${command}`;
+      if (
+        profile === 'vscode-panel'
+        && !syncedProfiles.has(profile)
+        && !syncAttempts.has(syncKey)
+      ) {
+        syncAttempts.add(syncKey);
+        this.post({ type: 'status', state: 'connecting', detail: '正在同步插件…' });
+        try {
+          const result = syncPanelProfilePlugins({ command, profile });
+          syncedProfiles.add(profile);
+          if (result.synced.length > 0) {
+            this.log('info', `已将桌面端的 ${result.synced.length} 个插件同步到 ${profile}：${result.synced.join('、')}`);
+            this.post({ type: 'notice', text: `已同步 ${result.synced.length} 个 DSH 插件。` });
+          }
+          if (result.skipped.length > 0) {
+            this.log(
+              'warn',
+              `有 ${result.skipped.length} 个桌面端插件使用本地或无法复现的来源，未自动同步：` +
+                result.skipped.map((item) => item.name).join('、'),
+            );
+          }
+        } catch (error) {
+          this.log('warn', `同步桌面端插件失败，继续启动现有配置：${redactSensitiveOutput(this.errText(error))}`);
+        }
+      }
       let entry;
       try {
         // 交由 manager 启动并登记：这样"视图销毁"不会终止该进程，另一个窗口也可以复用。

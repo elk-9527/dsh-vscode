@@ -807,6 +807,12 @@ check(
   check('端口归属：更换内核的路径只监听自身端口（否则会连回同一台）',
     /ownPortOnly[\s\S]{0,120}return \[cfg\.selfStartPort\]/.test(viewSource) &&
       /this\.ownPortOnly = true/.test(viewSource));
+  check('插件能力：vscode-panel 自启前会同步 desktop 中已启用的注册表插件',
+    /profile === 'vscode-panel'[\s\S]{0,500}syncPanelProfilePlugins\(\{ command, profile \}\)/.test(viewSource) &&
+      /planPanelPluginSync/.test(read('src/door/setup.js')));
+  check('插件能力：同步不覆盖连接组件，也不自动复制本地或 Git 来源',
+    /isDoorPackage\(name\)/.test(read('src/door/setup.js')) &&
+      /file\|link\|workspace\|catalog\|git/.test(read('src/door/setup.js')));
 
   const soak = path.join(ROOT, 'tools', 'soak.cjs');
   check('有长时间运行的耐力测试（用于发现「能启动但存活时间短」这类问题）',
