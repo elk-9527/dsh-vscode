@@ -41,6 +41,8 @@ dsh plugin --profile <your-profile> update dsh-acp-door
 
 Restart the kernel afterwards.
 
+Compatibility: DSH `0.1.5-rc.2` and `0.2.0-rc.1`.
+
 </details>
 
 ## 安装
@@ -216,10 +218,22 @@ DSH Desktop（运行中）
 只填写 `provider` 或 `model` 其中一项不会与 DSH 的值拼接；这组不完整配置会被忽略并记录诊断。
 DSH 冷启动时，插件会先等待用户设置加载完成再开放端口，避免短暂读取到基础默认模型。
 
+## DSH 内核兼容性
+
+| DSH | 历史会话 | 权限预设 |
+| --- | --- | --- |
+| `0.2.0-rc.1` | 公开 `sessionQuery` 服务，v4 会话格式 | `catalog/current/resolve/set` |
+| `0.1.5-rc.2` | 只读解析本机 v3 会话文件 | `selectFor/permissionState/current/set` |
+
+两条路径对外提供相同的 `dsh-door/…` 方法。接入点的状态回复会用 `historyKind`、
+`sessionFormat` 和 `permissionKind` 报告实际选中的适配器。不会在插件中私自解析 v4：
+该格式由 DSH 0.2 的 `sessionQuery` 负责读取和迁移。
+
 ## 版本变更
 
 | 版本 | 改了什么 |
 | --- | --- |
+| 0.1.0 | 兼容 DSH 0.2：历史使用公开 `sessionQuery` 和 v4 格式，权限使用新版 catalog 接口；保留 DSH 0.1 的 v3/`selectFor` 回退路径，并报告当前适配器。 |
 | 0.0.16 | 建立、恢复或关闭会话后及时释放连接内的请求期索引与挂载状态，避免长连接持续积累过期记录；关闭失败时保留仍有效的会话状态。 |
 | 0.0.15 | 卸载、重载或退出时完整关闭所有客户端连接；单条连接清理失败不再阻断其余连接。 |
 | 0.0.14 | 默认跟随 DSH 当前模型；新增安全状态接口；修复冷启动时用户设置尚未加载导致首次连接选错模型。 |
@@ -230,11 +244,9 @@ DSH 冷启动时，插件会先等待用户设置加载完成再开放端口，�
 | 0.0.7 | 模式（agent preset）切换；修复「断线重连之后会话没有工具」（遇到预设锁时改用工厂期的 `mount()` 补挂）。 |
 | 0.0.5 | 首个可用版本。 |
 
-**注意**：该插件装入 `desktop` 档之后**不一定能够升级** —— 桌面端运行时
-`dsh plugin --profile desktop …` 会被拒绝（`profile "desktop" is managed exclusively
-by the Electron application`），需等待桌面端未运行。因此**面板不依赖该插件的版本**：
-连接本机时面板自行读取 `$DSH_HOME/sessions`（`packages/vscode-extension/src/dsh/sessions.js`，
-与 `lib/sessions.js` 之间有一致性测试约束）。
+**注意**：DSH 0.2 的 `desktop` 档由 Electron 应用独占管理，命令行会拒绝
+`dsh plugin --profile desktop …`。请在 Desktop 的插件界面安装或更新本插件；命令面板中的
+**DSH：准备或修复自启配置**只处理可由命令行管理的 `vscode-panel` 档。
 
 ## 旁路方法：ACP 未提供的能力
 
@@ -260,6 +272,8 @@ by the Electron application`），需等待桌面端未运行。因此**面板�
    会**导致整个插件无法加载**，而非仅权限这一项不可用。
 2. 切换后**回读**再回复（`settledPermission`），不采用乐观更新：若某项设置被其它
    机制阻塞，客户端显示的是真实状态。
+
+历史方法在 DSH 0.2 上通过 `sessionQuery` 读取；只有 DSH 0.1 才使用只读 v3 文件适配。
 
 ## 从源码目录或 tgz 安装
 

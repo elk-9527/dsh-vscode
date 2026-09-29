@@ -24,6 +24,7 @@ const { decorateOptions, currentLabel, explainPermissionFailure, DISPLAY_ONLY } 
 const {
   probePort,
   dshCommandCandidates,
+  runningDesktopExecutables,
   explainKernelFailure,
   panelProfileCandidates,
   redactSensitiveOutput,
@@ -58,10 +59,12 @@ class DshPanelView {
    *   `--patch`，把接入点指向其它端口，这样测试「从零启动」时不需要占用 47821
    *   （桌面端运行时该端口上已存在接入点，否则该测试只能跳过）。
    */
-  constructor({ extensionUri, log, spawnArgs = [], kernels }) {
+  constructor({ extensionUri, log, spawnArgs = [], kernels, desktopExecutables = [] }) {
     this.extensionUri = extensionUri;
     this.log = log;
     this.spawnArgs = spawnArgs;
+    /** 曾经发现过的 DSH Desktop 安装位置；用于桌面端关闭后的自启。 */
+    this.desktopExecutables = desktopExecutables;
     /**
      * 后台内核的归属 —— 归**扩展**所有，不属于本视图（见 kernel-manager.js 开头）。
      *
@@ -387,7 +390,16 @@ class DshPanelView {
    * 仅测试「命令不可用」这一条路径）。
    */
   candidatesFor(cfg) {
-    return dshCommandCandidates({ dshCommand: cfg.dshCommand, homedir: os.homedir() });
+    const desktops = [
+      ...this.desktopExecutables,
+      ...runningDesktopExecutables(),
+    ].filter((value, index, all) => value && all.indexOf(value) === index);
+    return dshCommandCandidates({
+      dshCommand: cfg.dshCommand,
+      homedir: os.homedir(),
+      desktopExecutables: desktops,
+      extensionDir: path.resolve(__dirname, '..', '..'),
+    });
   }
 
   /**
@@ -455,8 +467,7 @@ class DshPanelView {
     }
 
     const profiles = this.profilesFor(cfg);
-    // 对话流中只保留一句最简说明；使用哪个配置集、等待多久只写入日志（用户不查看该内容）。
-    this.post({ type: 'notice', text: '正在启动 DSH…' });
+    // 启动过程只显示在顶栏状态中；配置集与等待细节写入日志。
     this.log('info', `端口上不存在接入点，按配置自行启动一个 DSH 内核（配置集：${profiles[0]}，接入点固定为 ${cfg.host}:${cfg.selfStartPort}）`);
 
     const candidates = this.candidatesFor(cfg);
@@ -711,6 +722,14 @@ class DshPanelView {
       const status = await client.doorStatus();
       this.doorStatus = status;
       if (status?.version) this.log('info', `接入点插件版本 ${status.version}`);
+      if (status?.capabilities?.historyKind || status?.capabilities?.permissionKind) {
+        this.log(
+          'info',
+          `内核兼容适配：历史=${status.capabilities.historyKind || 'unknown'}` +
+            `${status.capabilities.sessionFormat ? `/v${status.capabilities.sessionFormat}` : ''}，` +
+            `权限=${status.capabilities.permissionKind || 'unavailable'}`,
+        );
+      }
       if (status?.model?.ready === false) {
         client.close();
         this.postError('DSH 还没有可供新对话使用的模型。', {
@@ -1387,7 +1406,6 @@ class DshPanelView {
       `接入的 ${cfg.host}:${cfg.port} 无法切换权限（${shaped.state}），` +
         `改用面板自己启动的（${cfg.host}:${cfg.selfStartPort}，配置集：自启配置集）`,
     );
-    this.post({ type: 'notice', text: '该 DSH 版本过低，已改用面板自行启动的内核。' });
     // 仅断开连接，不终止任何内核（teardown 不操作进程）。
     this.teardown();
     this.resumeTarget = undefined;

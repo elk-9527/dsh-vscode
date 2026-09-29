@@ -1,8 +1,8 @@
 {
   "name": "dsh-acp-panel",
   "displayName": "DSH ACP Panel",
-  "description": "在 VS Code 侧边栏中直接使用 DeepSeek Harness：桌面端运行时直接接入；未运行时使用同一份 $DSH_HOME 中已准备的配置集启动。",
-  "version": "0.1.6",
+  "description": "在 VS Code 侧边栏使用 DeepSeek Harness：对话、调用工具、附加代码上下文，并切换模型、模式与权限。",
+  "version": "0.2.1",
   "publisher": "Elk-ydy",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -97,6 +97,10 @@
         "title": "DSH：停止后台内核"
       },
       {
+        "command": "dshPanel.setupProfile",
+        "title": "DSH：准备或修复自启配置"
+      },
+      {
         "command": "dshPanel.attachFile",
         "title": "DSH：把当前文件带进对话",
         "icon": "$(file-add)"
@@ -137,6 +141,9 @@
         },
         {
           "command": "dshPanel.stopKernel"
+        },
+        {
+          "command": "dshPanel.setupProfile"
         },
         {
           "command": "dshPanel.attachSelection",
@@ -191,7 +198,7 @@
           "type": "string",
           "default": "dsh",
           "scope": "machine",
-          "description": "dsh 命令行程序的名字或完整路径。可以带参数 —— 例如本机 dsh 不在 PATH 上时，填「node C:\\Users\\<用户名>\\.dsh\\profiles\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js」；路径中有空格时，用双引号将整段括起来。"
+          "description": "DSH 命令行的覆盖项。通常保持默认即可：面板会自动查找 PATH、旧版用户目录和 DSH Desktop 0.2 随附的运行时。需要手动指定时可填写程序名、完整路径或带参数的完整命令；路径中有空格时用双引号括起。"
         },
         "dshPanel.provider": {
           "type": "string",

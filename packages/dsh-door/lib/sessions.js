@@ -213,6 +213,7 @@ export function listSessions(root, { limit = DEFAULT_LIST_LIMIT } = {}) {
   try {
     dirs = fs.readdirSync(root, { withFileTypes: true });
   } catch (error) {
+    if (error && error.code === 'ENOENT') return { sessions: [], skipped: 0 };
     return { sessions: [], skipped: 0, error: `读不了会话目录：${error && error.message ? error.message : error}` };
   }
   for (const group of dirs) {

@@ -1,5 +1,5 @@
 /** 该版本同时作为客户端兼容诊断信息；测试会核对它与 package.json 一致。 */
-export const DOOR_VERSION = '0.0.16';
+export const DOOR_VERSION = '0.1.1';
 
 /** 该插件自定义的只读状态方法。 */
 export const DOOR_STATUS_METHOD = 'dsh-door/status';
@@ -14,8 +14,14 @@ export function isDoorStatusRequest(frame) {
  *
  * `model` 只报告路由名称与来源；API key、环境变量、设置文件位置均不会进入协议。
  */
-export function doorStatusPayload({ model, permissionAvailable = false } = {}) {
+export function doorStatusPayload({
+  model,
+  historyKind = 'legacy-v3-disk',
+  permissionKind,
+} = {}) {
   const selection = model && model.selection;
+  const normalizedHistory =
+    historyKind === 'session-query' ? 'session-query' : 'legacy-v3-disk';
   return {
     version: DOOR_VERSION,
     model: {
@@ -27,7 +33,10 @@ export function doorStatusPayload({ model, permissionAvailable = false } = {}) {
     capabilities: {
       presets: true,
       history: true,
-      permissionPresets: Boolean(permissionAvailable),
+      historyKind: normalizedHistory,
+      sessionFormat: normalizedHistory === 'session-query' ? 4 : 3,
+      permissionPresets: Boolean(permissionKind),
+      ...(permissionKind ? { permissionKind } : {}),
     },
   };
 }

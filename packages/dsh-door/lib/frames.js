@@ -28,6 +28,64 @@ export const DOOR_META_KEY = 'dsh-door';
 export const DOOR_SESSIONS_PREFIX = 'dsh-door/sessions/';
 
 /**
+ * DSH 0.2 的进程内 assistant stream 经该通知安全投影给面板。
+ *
+ * 标准 ACP 只发送已经提交的完整消息；这个私有通知只保留正文/思考增量，
+ * 不转发工具参数、provider 原始帧、用量或其它内核内部字段。
+ */
+export const DOOR_STREAM_METHOD = 'dsh-door/stream';
+
+/**
+ * 把 DSH 0.2 的 assistant stream 帧收窄成稳定、最小的通知形状。
+ * 旧版 DSH 不产生这些帧，调用方自然继续使用标准 ACP 的完整消息。
+ *
+ * @param {string} sessionId
+ * @param {unknown} frame
+ * @returns {object|undefined}
+ */
+export function doorStreamNotification(sessionId, frame) {
+  if (typeof sessionId !== 'string' || !sessionId || !frame || typeof frame !== 'object') {
+    return undefined;
+  }
+  const attemptId = typeof frame.attemptId === 'string' ? frame.attemptId : undefined;
+  if (!attemptId) return undefined;
+
+  let params;
+  if (frame.type === 'start') {
+    params = { sessionId, attemptId, kind: 'start' };
+  } else if (frame.type === 'chunk') {
+    const chunk = frame.chunk;
+    if (!chunk || typeof chunk !== 'object' || typeof chunk.text !== 'string' || !chunk.text) {
+      return undefined;
+    }
+    const kind = chunk.type === 'text-delta'
+      ? 'text'
+      : chunk.type === 'reasoning-delta'
+        ? 'thinking'
+        : undefined;
+    if (!kind) return undefined;
+    const block = Number.isSafeInteger(chunk.index) && chunk.index >= 0 ? chunk.index : 0;
+    params = { sessionId, attemptId, kind, block, delta: chunk.text };
+  } else if (frame.type === 'end') {
+    const outcome = frame.outcome;
+    const committed = outcome?.kind === 'committed';
+    params = {
+      sessionId,
+      attemptId,
+      kind: 'end',
+      committed,
+      ...(committed && typeof outcome.eventType === 'string'
+        ? { eventType: outcome.eventType }
+        : {}),
+    };
+  } else {
+    return undefined;
+  }
+
+  return { jsonrpc: '2.0', method: DOOR_STREAM_METHOD, params };
+}
+
+/**
  * 判断是否为该插件应当处理的「历史会话」请求（带 id 的 JSON-RPC 请求）。
  * @param {object} frame
  */
@@ -244,6 +302,7 @@ export async function decorateLine(line, state, diag) {
       state.applied.delete(sessionId);
       state.pending.delete(sessionId);
       state.resumes.delete(sessionId);
+      state.sessions?.delete(sessionId);
       diag(`会话 ${sessionId} 已关闭：清理本连接的临时挂载状态`);
     } else {
       diag(`关闭会话 ${sessionId} 失败：保留本连接状态`);
@@ -278,6 +337,7 @@ export async function decorateLine(line, state, diag) {
   }
 
   const sessionId = frame.result?.sessionId ?? asked?.sessionId;
+  if (typeof sessionId === 'string' && sessionId) state.sessions?.add(sessionId);
   const mounting = typeof sessionId === 'string' ? state.pending.get(sessionId) : undefined;
   if (mounting) await withTimeout(mounting, MOUNT_WAIT_MS);
 

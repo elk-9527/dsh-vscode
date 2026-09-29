@@ -1,2 +1,7 @@
 packages:
   - packages/*
+
+# DSH 0.2 compatibility intentionally tracks the official prerelease packages.
+# Keep pnpm's release-age protection for every other dependency.
+minimumReleaseAgeExclude:
+  - '@deepseek-ai/*'

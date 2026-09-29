@@ -32,6 +32,7 @@ import {
   FALLBACK_PRESETS,
   MOUNT_WAIT_MS,
   createOutboundRelay,
+  doorStreamNotification,
   doorSessionsError,
   doorSessionsMethod,
   doorSessionsResult,
@@ -45,7 +46,9 @@ import {
   sessionCloseTarget,
   waitForMount,
 } from './frames.js';
-import { DEFAULT_LIST_LIMIT, getSession, listSessions, resolveSessionsRoot } from './sessions.js';
+import { resolveSessionsRoot } from './sessions.js';
+import { createLegacyHistory, createSessionQueryHistory } from './kernel/history.js';
+import { createPermissionHandler } from './kernel/permissions.js';
 // 端口判定单独构成一个纯模块：否则必须载入整个插件（需 import 内核）才能测试该判定。
 import { LOOPBACK_HOST, resolveDoorHost, resolveDoorPort } from './port.js';
 import { resolveInitialModel } from './model.js';
@@ -58,18 +61,13 @@ import {
 } from './status.js';
 // 权限预设的旁路方法（纯帧工具与载荷规整），理由见该文件开头。
 import {
-  DOOR_ERR_NO_SESSION,
-  DOOR_ERR_UNKNOWN_PRESET,
   DOOR_PERMISSION_PREFIX,
   doorErrorCode,
   doorPermissionError,
   doorPermissionMethod,
   doorPermissionResult,
   isDoorPermissionRequest,
-  permissionError,
-  permissionPayload,
   permissionTarget,
-  settledPermission,
 } from './permission.js';
 
 export const name = 'acp-door';
@@ -153,7 +151,12 @@ function mountPresetOnNewSessions(child, { defaultPreset, state, diag }) {
     // 任何同步异常都会直接中断 session/new（实测遇到：
     // `cannot get property "agentPresets" without inject`）。
     try {
-      const sessionId = agent?.id;
+      const sessionId = agent?.session?.id ?? agent?.id;
+      if (typeof sessionId !== 'string' || !sessionId) {
+        throw new Error('agent/created 没有可识别的会话 id');
+      }
+      state.sessions.add(sessionId);
+      state.agents.add(agent);
       // 本次应当挂载的预设共有三种来源，优先级由高到低：
       //   1. 客户端在 session/new 或 session/resume 中指定的（_meta）；
       //   2. 本内核进程内记录的（该会话此前挂载过的预设）—— 断线重连时适用；
@@ -348,7 +351,8 @@ function handleDoorStatus(line, state, diag) {
   if (!isDoorStatusRequest(frame)) return false;
   const result = doorStatusPayload({
     model: state.modelRoute,
-    permissionAvailable: Boolean(state.permissionHandler),
+    historyKind: state.sessionsHandler?.kind,
+    permissionKind: state.permissionHandler?.kind,
   });
   state.respond(doorStatusResult(frame.id, result));
   diag(
@@ -395,8 +399,9 @@ function rememberSessionRequest(line, state, diag) {
 /**
  * 就地应答该插件自身的历史会话请求（`dsh-door/sessions/list|get`）。
  *
- * 由该插件应答而不转发内核的原因：内核没有「列出历史会话」的公开方法，
- * 而会话文件位于本机磁盘上 —— 由该插件读取磁盘（lib/sessions.js，只读）即可。
+ * 由该插件应答而不转发 ACP 的原因：ACP 没有「列出历史会话」方法。DSH 0.2
+ * 通过公开的 sessionQuery 服务读取 v4；旧内核没有该服务时，才回退到
+ * lib/sessions.js 的只读 v3 磁盘适配。
  * 应答帧经 `state.respond` 走唯一的写出口，请求帧本身**被丢弃且不转发**
  * （内核会将其视为无法识别的方法并报错，不产生任何效果）。
  *
@@ -435,7 +440,8 @@ async function handleDoorSessions(line, state, diag) {
  * 清单与切换均来自内核的 `@deepseek-ai/dsh-permission-presets` 服务
  * （与桌面端的「权限」选择器使用同一份数据），该插件仅做转接：
  *
- *   - `get` → 读取会话的 `permissions` 投影（`selectFor(permissionState(session))`），
+ *   - `get` → DSH 0.2 使用进程级 `catalog()`，DSH 0.1 使用
+ *     `selectFor(permissionState(session))`，
  *     返回 `{currentValue, options, defaultPreset}`；
  *   - `set` → 先经 `resolve()` 校验（无法识别的预设名会抛出异常，原话转给客户端），
  *     再调用 `set(session, value)`，随后**重新读取一次**返回给客户端。
@@ -503,70 +509,6 @@ async function handleDoorPermission(line, state, diag) {
     diag(`旁路应答权限 ${method}（会话 ${sessionId}）失败：${message}`);
   }
   return true;
-}
-
-/**
- * 把内核的权限预设服务包装成该插件需要的两个动作。
- *
- * `service` 无法取得（该档未挂载权限预设）时返回 undefined —— 该插件照常工作，
- * 客户端只会收到「这个内核没有权限预设」的明确答复，而不是整个接入点不可用。
- *
- * @param {object} ctx 内核上下文（要 `sessions` 与 `permissionPresets`）。
- * @param {(message: string) => void} diag
- * @returns {{get: (id: string) => Promise<object>, set: (id: string, value: string) => Promise<object>}|undefined}
- */
-function makePermissionHandler(ctx, diag) {
-  const service = ctx.permissionPresets;
-  if (!service || typeof service.selectFor !== 'function' || typeof service.set !== 'function') {
-    diag('该内核没有 permissionPresets 服务，权限方法将明确返回「不支持」');
-    return undefined;
-  }
-  /** 读取一次：会话的权限投影 → 客户端需要的载荷。 */
-  const read = (session) =>
-    permissionPayload({
-      currentValue: service.current(session),
-      options: service.selectFor(service.permissionState(session)).options,
-      defaultPreset: service.defaultPreset,
-    });
-  /** 按 id 查找存活的会话；找不到时**携带自身的错误码**明确说明情形。 */
-  const sessionOf = (id) => {
-    const session = ctx.sessions?.get?.(id);
-    if (!session) {
-      // 标记 -32003：客户端需要与「名字不存在」区分（前者应重新打开会话，后者应更换选项）。
-      throw permissionError(
-        DOOR_ERR_NO_SESSION,
-        `这个内核里没有会话 ${id}（可能它是别的内核建的，或已被关闭）`,
-      );
-    }
-    return session;
-  };
-  return {
-    async get(id) {
-      return read(sessionOf(id));
-    },
-    async set(id, value) {
-      const session = sessionOf(id);
-      // 先经 resolve 校验：名称不正确时内核的原话最为准确（会列出所有可用预设名）。
-      // 单独包一层仅为给「名字不存在」标记 -32002 —— 不使其混入 -32000 那一类，
-      // 客户端需要依据错误码决定输出哪一句提示。
-      //
-      // 同时说明客户端不应发送「展示项」的原因：内核的清单中 `custom` 是
-      // 「当前配置组合不匹配任何预设」的展示态，`resolve('custom')` 会在该处抛出异常。
-      try {
-        service.resolve(value);
-      } catch (error) {
-        throw permissionError(
-          DOOR_ERR_UNKNOWN_PRESET,
-          error && error.message ? error.message : String(error),
-        );
-      }
-      service.set(session, value);
-      const payload = read(session);
-      // 投影完成折算之前读取到的可能仍是旧值 —— 以刚切换的值为准（见 settledPermission）。
-      payload.currentValue = settledPermission(payload.currentValue, value);
-      return payload;
-    },
-  };
 }
 
 /**
@@ -674,27 +616,25 @@ export function apply(ctx, config = {}) {
     ctx.logger?.warn?.(warning);
   }
 
-  // 历史会话：目录与内核采用同一套判定（DSH_HOME 或 ~/.dsh）。只读，见 lib/sessions.js。
+  // 历史会话：优先使用 DSH 0.2 的公开 sessionQuery；旧内核回退为只读 v3 文件适配。
   const sessionsRoot =
     typeof config.sessionsDir === 'string' && config.sessionsDir
       ? config.sessionsDir
       : resolveSessionsRoot();
-  const sessionsHandler = {
-    /** 列出历史会话（按修改时间从新到旧）。 */
-    async list(params = {}) {
-      const limit =
-        typeof params.limit === 'number' && Number.isFinite(params.limit) && params.limit > 0
-          ? Math.min(Math.floor(params.limit), 500)
-          : DEFAULT_LIST_LIMIT;
-      const { sessions, skipped, error } = listSessions(sessionsRoot, { limit });
-      if (error) throw new Error(error);
-      return { sessions, skipped };
-    },
-    /** 获取一段会话的名片与回放。 */
-    async get(id) {
-      return getSession(sessionsRoot, id, {});
-    },
-  };
+  const legacySessionsHandler = createLegacyHistory(sessionsRoot);
+  let sessionsHandler = legacySessionsHandler;
+  ctx.inject(['sessionQuery'], (queryCtx) => {
+    const handler = createSessionQueryHistory(queryCtx.sessionQuery, diag);
+    if (!handler) {
+      diag('sessionQuery 服务存在，但接口版本无法识别，继续使用旧版 v3 只读路径');
+      return undefined;
+    }
+    sessionsHandler = handler;
+    diag('历史会话已接入内核 sessionQuery 服务');
+    return () => {
+      if (sessionsHandler === handler) sessionsHandler = legacySessionsHandler;
+    };
+  });
 
   /**
    * 权限预设（`dsh-door/permission/get|set`）。
@@ -707,8 +647,8 @@ export function apply(ctx, config = {}) {
    */
   let permissionHandler;
   ctx.inject(['permissionPresets'], (pctx) => {
-    permissionHandler = makePermissionHandler(pctx, diag);
-    diag('已接入内核的权限预设服务');
+    permissionHandler = createPermissionHandler(pctx, diag);
+    if (permissionHandler) diag(`已接入内核的权限预设服务（${permissionHandler.kind}）`);
     return () => {
       permissionHandler = undefined;
     };
@@ -791,13 +731,19 @@ export function apply(ctx, config = {}) {
       /** 可用预设清单；连接挂载内核服务后才有值。 */
       listPromise: undefined,
       /** 该插件自身的历史会话方法（见 handleDoorSessions）。 */
-      sessionsHandler,
+      get sessionsHandler() {
+        return sessionsHandler;
+      },
       /** 本连接的新会话初始模型及来源（状态方法与 ACP 桥共用同一个判定结果）。 */
       modelRoute,
       /** 该插件自身的权限预设方法（见 handleDoorPermission）；服务缺席时为 undefined。 */
       get permissionHandler() {
         return permissionHandler;
       },
+      /** 仅属于该 TCP 客户端的会话；实时事件必须按此集合隔离。 */
+      sessions: new Set(),
+      /** 同一会话也可能被其它本机界面打开，故进一步按本连接创建的 agent 对象隔离。 */
+      agents: new WeakSet(),
     };
 
     // 出站方向增加一道「补充预设清单」的闸，入站方向增加一道「阻塞 prompt」的闸。
@@ -816,6 +762,15 @@ export function apply(ctx, config = {}) {
         // 清单需要在此处获取：只有取得内核服务之后才能「向内核查询有哪些预设」。
         state.listPromise = loadPresets(child, diag);
         mountPresetOnNewSessions(child, { defaultPreset: preset, state, diag });
+        // DSH 0.2 的标准 ACP 有意只投影已提交的完整消息；这里订阅同进程的
+        // transient stream，并只向创建/恢复这些会话的客户端发送正文与思考增量。
+        // DSH 0.1 不会触发该事件，因此无需版本分支即可自然回退。
+        child.on('agent/assistant-stream', ({ agent, frame } = {}) => {
+          const sessionId = agent?.session?.id ?? agent?.id;
+          if (!agent || !state.agents.has(agent) || !state.sessions.has(sessionId)) return;
+          const notification = doorStreamNotification(sessionId, frame);
+          if (notification) state.respond(notification);
+        }, { global: true });
         return acp.apply(child, { ...(modelRoute.selection ?? {}), stream });
       },
     });

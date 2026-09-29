@@ -43,8 +43,8 @@ function writeDoorPortPatch() {
     '  config:',
     '    host: 127.0.0.1',
     `    port: ${PORT}`,
-    '    provider: opencode-go',
-    '    model: deepseek-v4.1-flash',
+    // Do not pin a developer-machine model: DSH 0.2 validates the route during
+    // session creation.  Omitting both fields exercises the production default.
     '    preset: standard',
     '',
   ].join('\n');
@@ -112,6 +112,11 @@ require.cache['vscode-mock'] = {
 
 const { DshPanelView } = require('../src/panel/view');
 const { probePort } = require('../src/door/locate');
+const {
+  desktopExecutablesForTest,
+  isMissingModelCredentials,
+  syncDoor,
+} = require('./helpers/door');
 
 let passed = 0;
 let failed = 0;
@@ -174,6 +179,11 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
     else if (process.env.DSH_PANEL_TEST_VERBOSE) console.log(`     [info] ${message}`);
   };
 
+  // A clean DSH 0.2 installation only has the Electron-managed desktop profile.
+  // Prepare the hard-coded test profile before exercising the panel's startup path.
+  syncDoor({ log });
+  const desktopExecutables = desktopExecutablesForTest({ log });
+
   section('0. 前置：端口必须是空的');
   const alreadyUp = await probePort('127.0.0.1', PORT, 800);
   if (alreadyUp) {
@@ -193,6 +203,7 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
   const panel = new DshPanelView({
     extensionUri: { fsPath: path.resolve(__dirname, '..') },
     log,
+    desktopExecutables,
     // 更换端口时，把该插件也指向该端口（生产路径不传此参数）。
     spawnArgs: PATCH ? ['--patch', PATCH] : [],
   });
@@ -217,11 +228,7 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
     statuses.every((s) => String(s.detail || '').length <= 24 && !/\n/.test(String(s.detail || ''))),
     JSON.stringify(statuses.map((s) => s.detail)),
   );
-  check(
-    '「正在启动 DSH」这件事说在对话流里',
-    notices.some((text) => /正在启动 DSH/.test(text)),
-    JSON.stringify(notices),
-  );
+  check('启动过程不向对话流插入说明卡片', notices.length === 0, JSON.stringify(notices));
   // 用户曾对这条路径上的文案提出意见（原话：认为"没有现成的内核，正在启动一个
   // （档：vscode-panel）。第一次会慢一点…"过长）。自启动路径最容易产生长句，
   // 因此在此固定一条约束：自身生成的文案要短，引用行可略长。
@@ -249,9 +256,16 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
     text: '用一句话回答：你现在连的是哪个模型？不要用工具。',
   });
   const after = view.messages.slice(before).map((item) => item.message);
-  check('收到正文', after.some((item) => item.type === 'text' && item.delta), JSON.stringify(after.map((i) => i.type)));
+  const modelUnavailable = after.some(
+    (item) => item.type === 'error' && isMissingModelCredentials(item.message),
+  );
+  if (modelUnavailable) {
+    console.log('  ⏭  本机没有当前模型的凭据；保留启动/连接断言，跳过正文断言。');
+  } else {
+    check('收到正文', after.some((item) => item.type === 'text' && item.delta), JSON.stringify(after.map((i) => i.type)));
+    check('没有错误', !after.some((item) => item.type === 'error'), JSON.stringify(after.filter((i) => i.type === 'error')));
+  }
   check('回合正常结束', after.some((item) => item.type === 'done'));
-  check('没有错误', !after.some((item) => item.type === 'error'), JSON.stringify(after.filter((i) => i.type === 'error')));
 
   section('3. 自己拉起来的那个内核要能复用，不能每连一次就多起一个');
   {
@@ -279,8 +293,15 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
       `pid ${pidBefore} → ${pidAfter}`);
     check('重连后仍可正常工作', resumeMessages.some((item) => item.type === 'done'),
       JSON.stringify(resumeMessages.map((i) => i.type)));
-    check('重连过程没有报错', !resumeMessages.some((item) => item.type === 'error'),
-      JSON.stringify(resumeMessages.filter((i) => i.type === 'error').map((i) => i.message)));
+    const resumeModelUnavailable = resumeMessages.some(
+      (item) => item.type === 'error' && isMissingModelCredentials(item.message),
+    );
+    if (resumeModelUnavailable) {
+      console.log('  ⏭  重连已成功；因本机缺少模型凭据，跳过回复内容断言。');
+    } else {
+      check('重连过程没有报错', !resumeMessages.some((item) => item.type === 'error'),
+        JSON.stringify(resumeMessages.filter((i) => i.type === 'error').map((i) => i.message)));
+    }
   }
 
   section('4. 关闭面板必须回收干净（Windows 上最容易漏）');
@@ -359,6 +380,7 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
       const panel2 = new DshPanelView({
         extensionUri: { fsPath: path.resolve(__dirname, '..') },
         log,
+        desktopExecutables,
         spawnArgs: PATCH ? ['--patch', PATCH] : [],
       });
       const view2 = makeFakeView();
@@ -463,6 +485,7 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
     const panelA = new DshPanelView({
       extensionUri: { fsPath: path.resolve(__dirname, '..') },
       log,
+      desktopExecutables,
       spawnArgs: PATCH ? ['--patch', PATCH] : [],
     });
     panelA.resolveWebviewView(makeFakeView());
@@ -487,6 +510,7 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
     const panelB = new DshPanelView({
       extensionUri: { fsPath: path.resolve(__dirname, '..') },
       log,
+      desktopExecutables,
       spawnArgs: PATCH ? ['--patch', PATCH] : [],
     });
     panelB.resolveWebviewView(makeFakeView());

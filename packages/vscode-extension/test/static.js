@@ -258,6 +258,7 @@ check(
 
 const doorFrames = read('../dsh-door/lib/frames.js');
 const clientSource = read('src/door/client.js');
+const liveStreamSource = read('src/door/live-stream.js');
 const doorKey = /DOOR_META_KEY\s*=\s*'([^']+)'/.exec(doorFrames)?.[1];
 const clientKey = /PRESET_META_KEY\s*=\s*'([^']+)'/.exec(clientSource)?.[1];
 
@@ -378,9 +379,27 @@ check(
 );
 check(
   '该插件为这两种失败附加了各自的码（缺少该标记则全部落入 -32000）',
-  /permissionError\(\s*\n?\s*DOOR_ERR_UNKNOWN_PRESET/.test(read('../dsh-door/lib/index.js')) &&
-    /permissionError\(\s*\n?\s*DOOR_ERR_NO_SESSION/.test(read('../dsh-door/lib/index.js')),
-  'dsh-door/lib/index.js 里没给 resolve()/会话查找打码',
+  /permissionError\(\s*\n?\s*DOOR_ERR_UNKNOWN_PRESET/.test(
+    read('../dsh-door/lib/kernel/permissions.js'),
+  ) &&
+    /permissionError\(\s*\n?\s*DOOR_ERR_NO_SESSION/.test(
+      read('../dsh-door/lib/kernel/permissions.js'),
+    ),
+  'dsh-door/lib/kernel/permissions.js 里没给 resolve()/会话查找打码',
+);
+const doorStreamMethod = /DOOR_STREAM_METHOD\s*=\s*'([^']+)'/.exec(doorFrames)?.[1];
+const clientStreamMethod = /DOOR_STREAM_METHOD\s*=\s*'([^']+)'/.exec(liveStreamSource)?.[1];
+check(
+  '实时输出的私有方法名在该插件与扩展侧完全一致',
+  doorStreamMethod === 'dsh-door/stream' && clientStreamMethod === doorStreamMethod,
+  `该插件=${doorStreamMethod} vs 扩展=${clientStreamMethod}`,
+);
+check(
+  '实时通道只投影正文和思考，不透传工具参数',
+  /chunk\.type === 'text-delta'/.test(doorFrames) &&
+    /chunk\.type === 'reasoning-delta'/.test(doorFrames) &&
+    !/argumentsDelta.*params/.test(doorFrames),
+  'frames.js 的实时通知过滤范围发生了变化',
 );
 
 // custom 是内核推导出的**展示状态**（附在清单末尾），不是可切换的目标：内核的
@@ -540,6 +559,9 @@ check(
   // 实际会被 VS Code 加载的文件：任何语法错误都会使整套功能静默失效。
   const { execFileSync } = require('node:child_process');
   const files = ['src/extension.js', 'src/panel/view.js', 'src/panel/html.js', 'src/door/client.js',
+    'src/door/live-stream.js',
+    'src/door/desktop-cli-host.cjs',
+    'src/door/setup.js',
     'src/door/locate.js', 'src/dsh/session.js', 'src/dsh/blocks.js', 'src/dsh/errors.js',
     'media/main.js', 'media/markdown.js'];
   const broken = [];
@@ -563,19 +585,52 @@ check(
   const bin = path.join(binDir, 'bin.js');
   fs.writeFileSync(bin, '// fake\n');
 
-  const withBoth = dshCommandCandidates({ dshCommand: 'dsh', homedir: tmp });
+  const withBoth = dshCommandCandidates({ dshCommand: 'dsh', homedir: tmp, desktopExecutables: [] });
   check('候选清单：设置中的命令排第一', withBoth[0] === 'dsh', withBoth.join(' | '));
   check('候选清单：默认安装位置会被发现（node bin.js）',
     withBoth.some((item) => item.startsWith('node ') && item.includes('bin.js')), withBoth.join(' | '));
 
-  const onlyBin = dshCommandCandidates({ dshCommand: '', homedir: tmp });
+  const onlyBin = dshCommandCandidates({ dshCommand: '', homedir: tmp, desktopExecutables: [] });
   check('候选清单：设置为空时也不至于没有候选', onlyBin.length === 1 && onlyBin[0].startsWith('node '), onlyBin.join(' | '));
 
-  const noBin = dshCommandCandidates({ dshCommand: 'dsh', homedir: path.join(tmp, 'empty') });
+  const noBin = dshCommandCandidates({ dshCommand: 'dsh', homedir: path.join(tmp, 'empty'), desktopExecutables: [] });
   check('候选清单：默认位置不存在时不额外添加', noBin.length === 1 && noBin[0] === 'dsh', noBin.join(' | '));
 
-  const dup = dshCommandCandidates({ dshCommand: `node ${bin}`, homedir: tmp });
+  const dup = dshCommandCandidates({ dshCommand: `node ${bin}`, homedir: tmp, desktopExecutables: [] });
   check('候选清单：重复命令去重', dup.length === 1, dup.join(' | '));
+
+  if (process.platform === 'win32') {
+    const install = path.join(tmp, 'DeepSeek Harness');
+    const executable = path.join(install, 'DeepSeek Harness.exe');
+    const bundledNode = path.join(
+      install,
+      'resources',
+      'runtime',
+      'primary-runtime',
+      'dependencies',
+      'node',
+      'bin',
+      'node.exe',
+    );
+    fs.mkdirSync(path.dirname(bundledNode), { recursive: true });
+    fs.writeFileSync(executable, 'fake');
+    fs.writeFileSync(path.join(install, 'resources', 'app.asar'), 'fake');
+    fs.writeFileSync(bundledNode, 'fake');
+    const desktop = dshCommandCandidates({
+      dshCommand: '',
+      homedir: path.join(tmp, 'empty'),
+      desktopExecutables: [executable],
+      extensionDir: ROOT,
+    });
+    check(
+      '候选清单：DSH Desktop 0.2 的 app.asar CLI 会经随附 Node 与 IPC 代理启动',
+      desktop.length === 1 &&
+        desktop[0].includes('desktop-cli-host.cjs') &&
+        desktop[0].includes('app.asar') &&
+        desktop[0].includes('node.exe'),
+      desktop.join(' | '),
+    );
+  }
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 {

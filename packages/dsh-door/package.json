@@ -1,6 +1,6 @@
 {
   "name": "dsh-acp-door",
-  "version": "0.0.16",
+  "version": "0.1.1",
   "description": "在正在运行的 DeepSeek Harness 内核上新增一个仅监听本机回环地址的 ACP 接入点，供 VS Code 面板等外部程序连接。",
   "license": "MIT",
   "type": "module",
@@ -35,6 +35,9 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-acp": "0.1.5-rc.2 || 0.2.0-rc.1"
   },
   "dsh": {
     "bundle": {

@@ -91,10 +91,35 @@ check('状态载荷不包含服务对象或异常原文', () => {
     selection: { provider: 'p', model: 'm' },
     error: 'secret-like diagnostic',
   };
-  assert.deepEqual(doorStatusPayload({ model, permissionAvailable: true }), {
+  assert.deepEqual(doorStatusPayload({
+    model,
+    historyKind: 'session-query',
+    permissionKind: 'catalog',
+  }), {
     version: DOOR_VERSION,
     model: { ready: true, source: 'dsh-default', provider: 'p', model: 'm' },
-    capabilities: { presets: true, history: true, permissionPresets: true },
+    capabilities: {
+      presets: true,
+      history: true,
+      historyKind: 'session-query',
+      sessionFormat: 4,
+      permissionPresets: true,
+      permissionKind: 'catalog',
+    },
+  });
+});
+
+check('旧内核的能力状态明确报告 v3 磁盘回退且不虚报权限服务', () => {
+  assert.deepEqual(doorStatusPayload({}), {
+    version: DOOR_VERSION,
+    model: { ready: false, source: 'missing' },
+    capabilities: {
+      presets: true,
+      history: true,
+      historyKind: 'legacy-v3-disk',
+      sessionFormat: 3,
+      permissionPresets: false,
+    },
   });
 });
 

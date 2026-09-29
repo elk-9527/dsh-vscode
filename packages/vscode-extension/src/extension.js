@@ -11,6 +11,12 @@
 const vscode = require('vscode');
 const { DshPanelView, VIEW_ID } = require('./panel/view');
 const { kernelManager } = require('./panel/kernel-manager');
+const {
+  runDshSync,
+  redactSensitiveOutput,
+  runningDesktopExecutables,
+} = require('./door/locate');
+const { preparePanelProfile } = require('./door/setup');
 /**
  * 创建一个带时间戳的输出通道。
  *
@@ -35,7 +41,19 @@ function activate(context) {
   const log = makeLogger(channel);
   log('info', `DSH Panel 启动（VS Code ${vscode.version}）`);
 
-  const view = new DshPanelView({ extensionUri: context.extensionUri, log });
+  // 自定义安装目录只有在桌面端运行时才能从进程路径发现；一旦发现便记在扩展自己的
+  // globalState 中。之后桌面端关闭，面板仍能找到同一套 0.2 CLI 并自启 web 配置集。
+  const DESKTOP_PATH_KEY = 'dshPanel.desktopExecutable';
+  const rememberedDesktop = context.globalState.get(DESKTOP_PATH_KEY);
+  const detectedDesktops = runningDesktopExecutables();
+  if (detectedDesktops[0] && detectedDesktops[0] !== rememberedDesktop) {
+    context.globalState.update(DESKTOP_PATH_KEY, detectedDesktops[0]);
+  }
+  const view = new DshPanelView({
+    extensionUri: context.extensionUri,
+    log,
+    desktopExecutables: [rememberedDesktop, ...detectedDesktops].filter(Boolean),
+  });
 
   /**
    * 将当前编辑器中的内容挂载到面板。
@@ -90,6 +108,64 @@ function activate(context) {
       const text = stopped > 0 ? `已停止 ${stopped} 个后台 DSH。` : '没有本扩展启动的后台 DSH。';
       log('info', text);
       vscode.window.showInformationMessage(text);
+    }),
+    /**
+     * 显式准备面板的命令行配置集：缺少时从 web 模板创建，随后安装或更新接入点。
+     * desktop 配置集由桌面应用独占，CLI 不允许修改；因此这条命令只处理设置中的
+     * fallbackProfile（默认 vscode-panel），不会碰桌面端正在使用的配置集。
+     */
+    vscode.commands.registerCommand('dshPanel.setupProfile', async () => {
+      const profile = view.config().fallbackProfile;
+      const stopped = kernelManager(log).disposeAll('准备或修复配置集');
+      if (stopped) log('info', `准备配置前停止了 ${stopped} 个由面板启动的后台内核`);
+      const candidates = view.candidatesFor(view.config());
+      try {
+        const result = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: `正在准备 DSH 配置集 ${profile}`,
+            cancellable: false,
+          },
+          async (progress) => {
+            // 先找出真正可执行的一条；默认的裸 `dsh` 不在 PATH 时继续尝试 Desktop 0.2 入口。
+            let command;
+            const failures = [];
+            for (const candidate of candidates) {
+              progress.report({ message: `检测 ${redactSensitiveOutput(candidate)}` });
+              await new Promise((resolve) => setImmediate(resolve));
+              try {
+                runDshSync({ command: candidate, args: ['--version'], timeoutMs: 15000 });
+                command = candidate;
+                break;
+              } catch (error) {
+                failures.push(error.message);
+              }
+            }
+            if (!command) {
+              throw new Error(
+                `没有找到可运行的 DSH CLI。${failures.length ? `\n${failures.join('\n')}` : ''}`,
+              );
+            }
+            progress.report({ message: '创建配置并同步连接组件…' });
+            await new Promise((resolve) => setImmediate(resolve));
+            return preparePanelProfile({ command, profile });
+          },
+        );
+        const message = result.created
+          ? `已创建 ${profile} 并安装连接组件。`
+          : `已${result.action === 'update' ? '更新' : '安装'} ${profile} 的连接组件。`;
+        log('info', message);
+        const choice = await vscode.window.showInformationMessage(message, '重新连接');
+        if (choice === '重新连接') await view.reconnect();
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error);
+        log('error', `准备配置失败：${redactSensitiveOutput(message)}`);
+        const choice = await vscode.window.showErrorMessage(
+          `无法准备 DSH 配置：${redactSensitiveOutput(message)}`,
+          '查看日志',
+        );
+        if (choice === '查看日志') channel.show(true);
+      }
     }),
     /**
      * 「DSH：打开面板」—— 展开侧边栏面板并使其获得焦点。

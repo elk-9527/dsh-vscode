@@ -18,6 +18,7 @@ const { StringDecoder } = require('node:string_decoder');
 
 const { buildPromptBlocks } = require('../dsh/blocks');
 const { requireLoopbackHost } = require('./endpoint');
+const { DOOR_STREAM_METHOD, DoorLiveStream } = require('./live-stream');
 
 /** ACP 协议版本（第 0 步实测：内核返回的值为 1）。 */
 const PROTOCOL_VERSION = 1;
@@ -90,6 +91,7 @@ class DoorClient extends EventEmitter {
   #pending = new Map();
   #closed = false;
   #closeReason = '';
+  #liveStream = new DoorLiveStream();
 
   /**
    * @param {object} options
@@ -129,6 +131,7 @@ class DoorClient extends EventEmitter {
     // 既保留跨 chunk 的多字节字符，也丢弃上一次断线留下的半帧/半字符。
     this.#buffer = '';
     this.#decoder = new StringDecoder('utf8');
+    this.#liveStream.reset();
 
     const socket = net.connect({ host: this.host, port: this.port });
     this.#socket = socket;
@@ -507,9 +510,14 @@ class DoorClient extends EventEmitter {
     }
     // 3) 通知。
     if (message.method) {
-      if (message.method === 'session/update') {
+      if (message.method === DOOR_STREAM_METHOD) {
+        const projected = this.#liveStream.accept(message.params);
+        if (projected) this.emit('update', projected.sessionId, projected.update);
+      } else if (message.method === 'session/update') {
         const params = message.params || {};
-        this.emit('update', params.sessionId, params.update);
+        if (this.#liveStream.shouldForward(params.sessionId, params.update)) {
+          this.emit('update', params.sessionId, params.update);
+        }
       }
       this.emit('notification', message.method, message.params);
       return;
@@ -543,6 +551,7 @@ class DoorClient extends EventEmitter {
       entry.reject(error);
     }
     this.#pending.clear();
+    this.#liveStream.reset();
     if (!silent) this.log('warn', `连接结束：${this.#closeReason}`);
     this.emit('close', this.#closeReason);
   }

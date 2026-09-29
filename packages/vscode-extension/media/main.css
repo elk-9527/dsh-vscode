@@ -493,35 +493,6 @@ body {
   outline: none;
 }
 
-.empty {
-  margin: auto;
-  text-align: center;
-  color: var(--vscode-descriptionForeground);
-  max-width: 260px;
-}
-
-.empty-title {
-  margin: 0 0 4px;
-  font-size: 1em;
-  color: var(--vscode-foreground);
-}
-
-.empty-hint {
-  margin: 0;
-  font-size: var(--dsh-fs-s);
-  line-height: 1.55;
-}
-
-/* 空态第二行：说明「记忆和会话的来源」。
-   使用最轻的一档字号与 descriptionForeground 的暗色 —— 该行需要可见，
-   但不应与第一行争夺注意力。 */
-.empty-note {
-  margin: 6px 0 0;
-  font-size: var(--dsh-fs-xs);
-  line-height: 1.55;
-  opacity: 0.9;
-}
-
 .msg {
   display: flex;
   flex-direction: column;
