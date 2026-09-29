@@ -77,11 +77,7 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
   </header>
 
   <main id="messages" class="messages" tabindex="0" aria-live="polite">
-    <div class="empty" id="empty">
-      <p class="empty-title">DSH Panel</p>
-      <p class="empty-hint">直接提问即可 —— DSH 会按需启动，不需要先启动桌面端。</p>
-      <p class="empty-note">记忆与历史保留在本机；自启时使用已准备的 DSH 配置。</p>
-    </div>
+    <div id="empty"></div>
   </main>
 
   <!-- 历史会话浮层：覆盖整个面板；列表内容由 main.js 填充。

@@ -455,8 +455,7 @@ class DshPanelView {
     }
 
     const profiles = this.profilesFor(cfg);
-    // 对话流中只保留一句最简说明；使用哪个配置集、等待多久只写入日志（用户不查看该内容）。
-    this.post({ type: 'notice', text: '正在启动 DSH…' });
+    // 启动过程只显示在顶栏状态中；配置集与等待细节写入日志。
     this.log('info', `端口上不存在接入点，按配置自行启动一个 DSH 内核（配置集：${profiles[0]}，接入点固定为 ${cfg.host}:${cfg.selfStartPort}）`);
 
     const candidates = this.candidatesFor(cfg);
@@ -1387,7 +1386,6 @@ class DshPanelView {
       `接入的 ${cfg.host}:${cfg.port} 无法切换权限（${shaped.state}），` +
         `改用面板自己启动的（${cfg.host}:${cfg.selfStartPort}，配置集：自启配置集）`,
     );
-    this.post({ type: 'notice', text: '该 DSH 版本过低，已改用面板自行启动的内核。' });
     // 仅断开连接，不终止任何内核（teardown 不操作进程）。
     this.teardown();
     this.resumeTarget = undefined;
