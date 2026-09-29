@@ -10,6 +10,7 @@ const { runDshSync } = require('./locate');
 const { resolveSessionsRoot } = require('../dsh/sessions');
 
 const SAFE_PROFILE = /^[A-Za-z0-9._-]+$/;
+const OFFICIAL_RUNTIME_BUNDLE = /^@deepseek-ai\/dsh-[A-Za-z0-9._-]+$/;
 
 function profileDirectory(profile, { homedir = os.homedir(), env = process.env } = {}) {
   const home = path.dirname(resolveSessionsRoot({ homedir, env }));
@@ -82,14 +83,57 @@ function installedVersion(state, name) {
   return undefined;
 }
 
+/**
+ * DSH Desktop 0.2 会把一部分官方 bundle 随运行时一起发布，并直接写入 desktop 的
+ * dsh.profile.bundles；这些包不属于 profile.dependencies，因此不能走 `dsh plugin add`。
+ *
+ * vscode-panel 与 desktop 由同一个本机 DSH 运行时加载，故可安全复用这些官方 bundle
+ * 名称。第三方无依赖条目不作同样推断，避免把无法解析的手工清单复制过去。
+ */
+function runtimeBundleAdditions(source, target) {
+  const declaredDependencies = new Set(Object.keys(source.dependencies));
+  return source.bundles.filter((name) => (
+    OFFICIAL_RUNTIME_BUNDLE.test(name)
+    && !declaredDependencies.has(name)
+    && !target.bundles.includes(name)
+  ));
+}
+
+/** 只改面板 profile 的 bundle 清单；调用点位于内核启动前，不触碰 desktop。 */
+function enableRuntimeBundles(profile, state, names, options = {}) {
+  if (!Array.isArray(names) || names.length === 0) return state;
+  const manifest = path.join(state.directory, 'package.json');
+  const original = fs.readFileSync(manifest, 'utf8');
+  const pkg = JSON.parse(original);
+  const profileConfig = pkg?.dsh?.profile;
+  if (!profileConfig || !Array.isArray(profileConfig.bundles)) {
+    throw new Error(`配置集清单缺少 dsh.profile.bundles：${manifest}`);
+  }
+  const additions = names.filter((name) => !profileConfig.bundles.includes(name));
+  if (additions.length === 0) return state;
+  profileConfig.bundles.push(...additions);
+  try {
+    fs.writeFileSync(manifest, `${JSON.stringify(pkg, null, 2)}\n`, 'utf8');
+  } catch (error) {
+    try {
+      fs.writeFileSync(manifest, original, 'utf8');
+    } catch {
+      // 保留原始写入错误；恢复失败时该错误仍最能说明操作为何没有完成。
+    }
+    throw error;
+  }
+  return inspectPanelProfile(profile, options);
+}
+
 /** 标准 npm 版本号；同步时固定到源配置集的实际版本，不把范围继续扩散到目标配置集。 */
 const EXACT_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 /**
  * 计算 desktop → 面板自启配置集的插件差异，不执行任何命令。
  *
- * 只同步同时出现在 `dependencies` 与 `dsh.profile.bundles` 中的直接插件：前者给出来源，
- * 后者证明该包当前确实启用。DSH 自带的基础 bundle 不在 dependencies 中，因而不会被误装。
+ * 注册表插件只同步同时出现在 `dependencies` 与 `dsh.profile.bundles` 中的直接依赖：
+ * 前者给出来源，后者证明该包当前确实启用。除此之外，desktop 中由同一 DSH 运行时
+ * 提供的官方 bundle（例如 0.2 的 experimental-auto-review）按 bundle 名启用，不重复安装。
  */
 function planPanelPluginSync({
   profile = 'vscode-panel',
@@ -102,9 +146,10 @@ function planPanelPluginSync({
   const active = new Set(source.bundles);
   const install = [];
   const skipped = [];
+  const runtimeBundles = runtimeBundleAdditions(source, target);
 
   if (!source.exists || !target.exists) {
-    return { source, target, install, skipped };
+    return { source, target, install, runtimeBundles: [], skipped };
   }
 
   for (const [name, declared] of Object.entries(source.dependencies)) {
@@ -126,7 +171,7 @@ function planPanelPluginSync({
     install.push({ name, version, argument: `${name}@${version}` });
   }
 
-  return { source, target, install, skipped };
+  return { source, target, install, runtimeBundles, skipped };
 }
 
 /**
@@ -149,27 +194,34 @@ function syncPanelProfilePlugins({
   }
 
   const plan = planPanelPluginSync({ profile, sourceProfile, homedir, env });
-  if (!plan.source.exists || !plan.target.exists || plan.install.length === 0) {
-    return { ...plan, synced: [], unchanged: plan.install.length === 0 };
+  if (!plan.source.exists || !plan.target.exists) {
+    return { ...plan, synced: [], unchanged: true };
+  }
+  if (plan.install.length === 0 && plan.runtimeBundles.length === 0) {
+    return { ...plan, synced: [], unchanged: true };
   }
   if (!plan.target.hasWebApp) {
     throw new Error(`配置集 ${profile} 不是可由面板自启的 web 配置集；未同步桌面端插件。`);
   }
-  if (!String(command || '').trim()) throw new Error('没有可用的 DSH 命令。');
+  if (plan.install.length > 0 && !String(command || '').trim()) {
+    throw new Error('没有可用的 DSH 命令。');
+  }
 
-  run({
-    command,
-    args: [
-      'plugin',
-      '--profile',
-      profile,
-      'add',
-      ...plan.install.map((item) => item.argument),
-    ],
-    timeoutMs: 180000,
-  });
+  if (plan.install.length > 0) {
+    run({
+      command,
+      args: [
+        'plugin',
+        '--profile',
+        profile,
+        'add',
+        ...plan.install.map((item) => item.argument),
+      ],
+      timeoutMs: 180000,
+    });
+  }
 
-  const finalState = inspectPanelProfile(profile, { homedir, env });
+  let finalState = inspectPanelProfile(profile, { homedir, env });
   const missing = plan.install.filter((item) => {
     const version = installedVersion(finalState, item.name)
       || (EXACT_VERSION.test(finalState.dependencies[item.name] || '')
@@ -180,10 +232,15 @@ function syncPanelProfilePlugins({
   if (missing.length > 0) {
     throw new Error(`插件同步命令已完成，但 ${profile} 仍缺少：${missing.map((item) => item.name).join('、')}。`);
   }
+  finalState = enableRuntimeBundles(profile, finalState, plan.runtimeBundles, { homedir, env });
+  const missingRuntimeBundles = plan.runtimeBundles.filter((name) => !finalState.bundles.includes(name));
+  if (missingRuntimeBundles.length > 0) {
+    throw new Error(`配置集 ${profile} 仍缺少运行时 bundle：${missingRuntimeBundles.join('、')}。`);
+  }
   return {
     ...plan,
     target: finalState,
-    synced: plan.install.map((item) => item.name),
+    synced: [...plan.install.map((item) => item.name), ...plan.runtimeBundles],
     unchanged: false,
   };
 }
@@ -253,5 +310,6 @@ module.exports = {
   planPanelPluginSync,
   preparePanelProfile,
   profileDirectory,
+  runtimeBundleAdditions,
   syncPanelProfilePlugins,
 };

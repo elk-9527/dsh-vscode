@@ -3,6 +3,15 @@
 本项目大体遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的写法，
 版本号使用 `主.次.修订`。
 
+## [0.2.3] — 2026-09-29
+
+### 修复
+
+- 修复 DSH 0.2 内置实验能力未同步的问题：桌面配置集中的官方运行时 bundle（包括提供
+  第四种 `auto` 权限的 `@deepseek-ai/dsh-experimental-auto-review`）现在会随注册表插件
+  一起启用到 `vscode-panel`。
+- 回归验收改为读取真实权限清单并确认存在 `auto`，不再只以 bundle 数量作为成功标准。
+
 ## [0.2.2] — 2026-09-29
 
 ### 修复

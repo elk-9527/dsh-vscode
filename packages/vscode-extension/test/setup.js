@@ -82,9 +82,12 @@ try {
     [
       '@deepseek-ai/dsh-base',
       '@deepseek-ai/dsh-web-app',
+      '@deepseek-ai/dsh-experimental-auto-review',
+      '@deepseek-ai/dsh-experimental-schedule-bundle',
       '@demo/alpha',
       'beta-plugin',
       'local-plugin',
+      'unresolved-manual-bundle',
       'dsh-acp-door',
     ],
     {
@@ -110,7 +113,12 @@ try {
   assert.equal(created.created, true);
   assert.equal(created.action, 'add');
   assert.equal(created.hasDoor, true);
-  assert.deepEqual(created.syncedPlugins, ['@demo/alpha', 'beta-plugin']);
+  assert.deepEqual(created.syncedPlugins, [
+    '@demo/alpha',
+    'beta-plugin',
+    '@deepseek-ai/dsh-experimental-auto-review',
+    '@deepseek-ai/dsh-experimental-schedule-bundle',
+  ]);
   assert.deepEqual(created.skippedPlugins.map((item) => item.name), ['local-plugin']);
   assert.deepEqual(calls[0], [
     '--profile',
@@ -128,14 +136,17 @@ try {
     '@demo/alpha@1.2.3',
     'beta-plugin@2.0.0',
   ]);
-  console.log('  PASS  创建自启配置时安装连接组件，并同步桌面端已启用的注册表插件');
+  console.log('  PASS  创建自启配置时安装连接组件，并同步注册表插件与 DSH 运行时 bundle');
 
   const target = inspectPanelProfile(profile, { homedir: root, env });
   assert.equal(target.dependencies['@demo/alpha'], '1.2.3');
   assert.equal(target.dependencies['beta-plugin'], '2.0.0');
+  assert.equal(target.bundles.includes('@deepseek-ai/dsh-experimental-auto-review'), true);
+  assert.equal(target.bundles.includes('@deepseek-ai/dsh-experimental-schedule-bundle'), true);
   assert.equal(target.bundles.includes('local-plugin'), false);
   assert.equal(target.bundles.includes('inactive-plugin'), false);
-  console.log('  PASS  同步固定到实际安装版本，跳过本地来源与未启用依赖');
+  assert.equal(target.bundles.includes('unresolved-manual-bundle'), false);
+  console.log('  PASS  同步固定到实际安装版本，跳过本地来源、未启用依赖与无法解析的手工 bundle');
 
   calls.length = 0;
   const updated = preparePanelProfile({
