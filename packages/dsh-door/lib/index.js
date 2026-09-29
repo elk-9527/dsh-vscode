@@ -32,6 +32,7 @@ import {
   FALLBACK_PRESETS,
   MOUNT_WAIT_MS,
   createOutboundRelay,
+  doorStreamNotification,
   doorSessionsError,
   doorSessionsMethod,
   doorSessionsResult,
@@ -150,7 +151,12 @@ function mountPresetOnNewSessions(child, { defaultPreset, state, diag }) {
     // 任何同步异常都会直接中断 session/new（实测遇到：
     // `cannot get property "agentPresets" without inject`）。
     try {
-      const sessionId = agent?.id;
+      const sessionId = agent?.session?.id ?? agent?.id;
+      if (typeof sessionId !== 'string' || !sessionId) {
+        throw new Error('agent/created 没有可识别的会话 id');
+      }
+      state.sessions.add(sessionId);
+      state.agents.add(agent);
       // 本次应当挂载的预设共有三种来源，优先级由高到低：
       //   1. 客户端在 session/new 或 session/resume 中指定的（_meta）；
       //   2. 本内核进程内记录的（该会话此前挂载过的预设）—— 断线重连时适用；
@@ -734,6 +740,10 @@ export function apply(ctx, config = {}) {
       get permissionHandler() {
         return permissionHandler;
       },
+      /** 仅属于该 TCP 客户端的会话；实时事件必须按此集合隔离。 */
+      sessions: new Set(),
+      /** 同一会话也可能被其它本机界面打开，故进一步按本连接创建的 agent 对象隔离。 */
+      agents: new WeakSet(),
     };
 
     // 出站方向增加一道「补充预设清单」的闸，入站方向增加一道「阻塞 prompt」的闸。
@@ -752,6 +762,15 @@ export function apply(ctx, config = {}) {
         // 清单需要在此处获取：只有取得内核服务之后才能「向内核查询有哪些预设」。
         state.listPromise = loadPresets(child, diag);
         mountPresetOnNewSessions(child, { defaultPreset: preset, state, diag });
+        // DSH 0.2 的标准 ACP 有意只投影已提交的完整消息；这里订阅同进程的
+        // transient stream，并只向创建/恢复这些会话的客户端发送正文与思考增量。
+        // DSH 0.1 不会触发该事件，因此无需版本分支即可自然回退。
+        child.on('agent/assistant-stream', ({ agent, frame } = {}) => {
+          const sessionId = agent?.session?.id ?? agent?.id;
+          if (!agent || !state.agents.has(agent) || !state.sessions.has(sessionId)) return;
+          const notification = doorStreamNotification(sessionId, frame);
+          if (notification) state.respond(notification);
+        }, { global: true });
         return acp.apply(child, { ...(modelRoute.selection ?? {}), stream });
       },
     });

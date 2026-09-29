@@ -10,9 +10,11 @@
 
 import {
   DOOR_META_KEY,
+  DOOR_STREAM_METHOD,
   FALLBACK_PRESETS,
   createOutboundRelay,
   doorSessionsResult,
+  doorStreamNotification,
   isNewSessionRequest,
   isResponseTo,
   normalizePresets,
@@ -187,9 +189,41 @@ const roundTrip = withPresetMeta(
 equal('点名什么，回来就是什么', readPresetMeta(roundTrip).current, 'minimal');
 
 // ─────────────────────────────────────────────────────────────
+section('8. doorStreamNotification：只放行安全的文本增量');
+const streamStart = doorStreamNotification('s1', { type: 'start', attemptId: 's1:1', turn: 2, step: 0 });
+equal('实时通知使用独立方法名', streamStart.method, DOOR_STREAM_METHOD);
+equal('start 只保留会话、attempt 与 kind', streamStart.params,
+  { sessionId: 's1', attemptId: 's1:1', kind: 'start' });
+equal('正文增量被规整', doorStreamNotification('s1', {
+  type: 'chunk', attemptId: 's1:1', chunk: { type: 'text-delta', index: 3, text: '你好' },
+}).params, { sessionId: 's1', attemptId: 's1:1', kind: 'text', block: 3, delta: '你好' });
+equal('思考增量被规整', doorStreamNotification('s1', {
+  type: 'chunk', attemptId: 's1:1', chunk: { type: 'reasoning-delta', index: 0, text: '分析' },
+}).params.kind, 'thinking');
+equal('提交结束带上最终事件类型', doorStreamNotification('s1', {
+  type: 'end', attemptId: 's1:1', outcome: { kind: 'committed', eventType: 'assistant/message', seq: 9 },
+}).params, {
+  sessionId: 's1', attemptId: 's1:1', kind: 'end', committed: true, eventType: 'assistant/message',
+});
+equal('放弃的 attempt 不虚报提交', doorStreamNotification('s1', {
+  type: 'end', attemptId: 's1:1', outcome: { kind: 'abandoned' },
+}).params.committed, false);
+equal('工具参数绝不透传', doorStreamNotification('s1', {
+  type: 'chunk', attemptId: 's1:1',
+  chunk: { type: 'tool-call-delta', index: 1, name: 'shell', argumentsDelta: '{"secret":1}' },
+}), undefined);
+equal('usage 等其它内部帧不透传', doorStreamNotification('s1', {
+  type: 'chunk', attemptId: 's1:1', chunk: { type: 'usage', inputTokens: 1 },
+}), undefined);
+equal('空增量不制造空更新', doorStreamNotification('s1', {
+  type: 'chunk', attemptId: 's1:1', chunk: { type: 'text-delta', index: 0, text: '' },
+}), undefined);
+equal('缺会话或 attempt 的坏帧被忽略', doorStreamNotification('', { type: 'start', attemptId: 'x' }), undefined);
+
+// ─────────────────────────────────────────────────────────────
 // 出站中继是异步管道，因此在 async 段内测试；总结在最后统一输出。
 async function relayTests() {
-  section('8. createOutboundRelay：写进来的行必须真的从 sink 出来');
+  section('9. createOutboundRelay：写进来的行必须真的从 sink 出来');
   const encoder = new TextEncoder();
   // 模拟 sink：接收字节并累积为一个字符串。真实 socket 在 web 化之后与此相同。
   const chunks = [];
@@ -205,6 +239,8 @@ async function relayTests() {
       replies: new Map(),
       closes: new Map(),
       applied: new Map(),
+      sessions: new Set(),
+      agents: new WeakSet(),
       sessionPresets: new Map(),
       defaultPreset: 'standard',
       listPromise: Promise.resolve(FALLBACK_PRESETS),
@@ -230,6 +266,7 @@ async function relayTests() {
   equal('清单里是后备四项', readPresetMeta(decorated).presets.length, FALLBACK_PRESETS.length);
   equal('current 报默认预设', readPresetMeta(decorated).current, 'standard');
   equal('sessionId 没被动过', decorated.result.sessionId, 's1');
+  check('成功建会话后加入本连接的实时事件隔离集合', state.sessions.has('s1'));
 
   // (3) 该插件自身的旁路应答（state.respond）与内核回复使用**同一个**写出通道，
   //     且先后顺序不会错乱 —— 两个来源交错写入会将一行 JSON 拆成两段。
@@ -328,11 +365,13 @@ async function relayTests() {
   state3.pending.set('s10', Promise.resolve());
   state3.resumes.set('s10', successfulResume);
   state3.sessionPresets.set('s10', 'minimal');
+  state3.sessions.add('s10');
   await writer3.write(encoder.encode('{"jsonrpc":"2.0","id":25,"result":{}}\n'));
   await flushRelay();
   check('关闭成功后删除关闭请求索引', !state3.closes.has(25));
   check('关闭成功后释放本连接的会话临时状态',
-    !state3.applied.has('s10') && !state3.pending.has('s10') && !state3.resumes.has('s10'));
+    !state3.applied.has('s10') && !state3.pending.has('s10') && !state3.resumes.has('s10') &&
+      !state3.sessions.has('s10'));
   equal('关闭成功后保留跨连接预设记忆', state3.sessionPresets.get('s10'), 'minimal');
 
   // 关闭失败意味着会话仍然有效，不可提前删掉它的状态。
@@ -371,7 +410,7 @@ try {
 // waitForMount：入站与出站两处等待共用的「等待，但必须有上限」。
 // 其防范的场景是「内核某个服务永不落定 → 消息被永久扣留、静默消失」——
 // 此类故障没有报错、没有日志，用户侧的表现只有"发出后没有响应"。
-section('9. waitForMount：等挂载，但绝不无限等');
+section('10. waitForMount：等挂载，但绝不无限等');
 
 /** 构造一个永不自行落定的 promise，并额外提供用于收尾的 resolve。 */
 function makeNever() {

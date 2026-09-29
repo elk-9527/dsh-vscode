@@ -258,6 +258,7 @@ check(
 
 const doorFrames = read('../dsh-door/lib/frames.js');
 const clientSource = read('src/door/client.js');
+const liveStreamSource = read('src/door/live-stream.js');
 const doorKey = /DOOR_META_KEY\s*=\s*'([^']+)'/.exec(doorFrames)?.[1];
 const clientKey = /PRESET_META_KEY\s*=\s*'([^']+)'/.exec(clientSource)?.[1];
 
@@ -385,6 +386,20 @@ check(
       read('../dsh-door/lib/kernel/permissions.js'),
     ),
   'dsh-door/lib/kernel/permissions.js 里没给 resolve()/会话查找打码',
+);
+const doorStreamMethod = /DOOR_STREAM_METHOD\s*=\s*'([^']+)'/.exec(doorFrames)?.[1];
+const clientStreamMethod = /DOOR_STREAM_METHOD\s*=\s*'([^']+)'/.exec(liveStreamSource)?.[1];
+check(
+  '实时输出的私有方法名在该插件与扩展侧完全一致',
+  doorStreamMethod === 'dsh-door/stream' && clientStreamMethod === doorStreamMethod,
+  `该插件=${doorStreamMethod} vs 扩展=${clientStreamMethod}`,
+);
+check(
+  '实时通道只投影正文和思考，不透传工具参数',
+  /chunk\.type === 'text-delta'/.test(doorFrames) &&
+    /chunk\.type === 'reasoning-delta'/.test(doorFrames) &&
+    !/argumentsDelta.*params/.test(doorFrames),
+  'frames.js 的实时通知过滤范围发生了变化',
 );
 
 // custom 是内核推导出的**展示状态**（附在清单末尾），不是可切换的目标：内核的
@@ -544,6 +559,7 @@ check(
   // 实际会被 VS Code 加载的文件：任何语法错误都会使整套功能静默失效。
   const { execFileSync } = require('node:child_process');
   const files = ['src/extension.js', 'src/panel/view.js', 'src/panel/html.js', 'src/door/client.js',
+    'src/door/live-stream.js',
     'src/door/desktop-cli-host.cjs',
     'src/door/setup.js',
     'src/door/locate.js', 'src/dsh/session.js', 'src/dsh/blocks.js', 'src/dsh/errors.js',

@@ -42,6 +42,7 @@ const suites = [
   { name: '编辑器上下文拼块（纯函数）', file: 'test/blocks.js', always: true },
   { name: '会话层边界（假客户端）', file: 'test/session.js', always: true },
   { name: 'ACP 客户端超时（真实 TCP）', file: 'test/client-timeout.js', always: true },
+  { name: 'DSH 0.2 实时输出与去重（纯函数）', file: 'test/live-stream.js', always: true },
   { name: '面板生命周期（假视图）', file: 'test/panel-lifecycle.js', always: true },
   { name: '本机边界与设置来源（纯函数）', file: 'test/security-boundaries.js', always: true },
   { name: '后台内核的归属与回收（假进程）', file: 'test/kernel-manager.js', always: true },
