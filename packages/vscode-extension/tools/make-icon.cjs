@@ -2,12 +2,12 @@
 /*
  * 生成市场使用的扩展图标 media/icon.png（128×128，VS Code 市场的要求）。
  *
- * 图形使用与活动栏一致的 DeepSeek 鲸鱼；市场版本增加冰蓝渐变底与一个小型终端提示符，
- * 用于区分“DeepSeek 本体”与“连接 DSH 的 VS Code 面板”。活动栏版本仍保持 currentColor，
- * 市场图标则必须为自带颜色的位图。
+ * 市场图标使用蓝发女仆形象，用于表达 DSH 的拟人化形象。
+ * 活动栏版本仍保持 currentColor 单色图形，
+ * 市场图标则使用自带颜色的位图。
  *
- * 因此此处将同一图形置于品牌色底上，使用**本机已安装的无头 Chrome** 渲染为
- * PNG（与 tools/shots.js 采用同一方式，不额外引入图形库，也不联网）。
+ * 高分辨率母版放在 tools/assets/icon-source.png；此脚本使用**本机已安装的无头 Chrome**
+ * 缩放为 PNG（与 tools/shots.js 采用同一方式，不额外引入图形库，也不联网）。
  *
  * 用法：node tools/make-icon.cjs
  */
@@ -19,78 +19,34 @@ const { findChrome, missingChromeMessage } = require('./chrome.cjs');
 const ROOT = path.join(__dirname, '..');
 const CHROME = findChrome();
 const OUT = path.join(ROOT, 'media', 'icon.png');
+const SOURCE = path.join(ROOT, 'tools', 'assets', 'icon-source.png');
 const STAGE = path.join(ROOT, 'build', 'icon');
-/** 冰蓝底色更接近 DeepSeek 官网的轻量视觉，同时保留足够的市场列表辨识度。 */
-const BG = '#eaf1ff';
 
 if (!fs.existsSync(CHROME)) {
   console.error(missingChromeMessage());
   process.exit(1);
 }
+if (!fs.existsSync(SOURCE)) {
+  console.error(`缺少图标母版：${SOURCE}`);
+  process.exit(1);
+}
 
-// 活动栏的单色鲸鱼原样嵌入，只在市场图标中替换为品牌蓝并放大。
-const GLYPH = fs
-  .readFileSync(path.join(ROOT, 'media', 'dsh.svg'), 'utf8')
-  .replace(/<!--[\s\S]*?-->/g, '')
-  .replace(/currentColor/g, '#4d6bfe')
-  .replace('<svg ', '<svg class="whale" width="108" height="92" ');
-
+// 使用 data URL，避免无头 Chrome 对本地文件访问策略的差异。
+const sourceDataUrl = `data:image/png;base64,${fs.readFileSync(SOURCE).toString('base64')}`;
 const html = `<!doctype html>
 <meta charset="utf-8">
 <style>
-  html, body { margin: 0; padding: 0; width: 128px; height: 128px; overflow: hidden; background: transparent; }
-  body {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .tile {
-    position: relative;
+  html, body {
+    margin: 0;
+    padding: 0;
     width: 128px;
     height: 128px;
     overflow: hidden;
-    border-radius: 26px;
-    background: linear-gradient(145deg, #ffffff 0%, ${BG} 58%, #d6e4ff 100%);
+    background: #ffffff;
   }
-  .whale {
-    position: absolute;
-    left: 8px;
-    top: 16px;
-    filter: drop-shadow(0 3px 4px rgba(77, 107, 254, 0.18));
-  }
-  .terminal {
-    position: absolute;
-    right: 9px;
-    bottom: 9px;
-    width: 32px;
-    height: 32px;
-    border-radius: 10px;
-    background: #18285f;
-    box-shadow: 0 3px 8px rgba(24, 40, 95, 0.24);
-  }
-  .terminal::before {
-    content: '';
-    position: absolute;
-    left: 9px;
-    top: 9px;
-    width: 9px;
-    height: 9px;
-    border-top: 4px solid #ffffff;
-    border-right: 4px solid #ffffff;
-    transform: rotate(45deg);
-  }
-  .terminal::after {
-    content: '';
-    position: absolute;
-    left: 9px;
-    right: 7px;
-    bottom: 7px;
-    height: 3px;
-    border-radius: 2px;
-    background: #68d8e8;
-  }
+  img { display: block; width: 128px; height: 128px; }
 </style>
-<div class="tile">${GLYPH}<span class="terminal"></span></div>
+<img src="${sourceDataUrl}" alt="">
 `;
 
 fs.mkdirSync(STAGE, { recursive: true });
@@ -132,4 +88,6 @@ if (png.subarray(1, 4).toString() !== 'PNG') {
   process.exit(1);
 }
 
-console.log(`✅ media/icon.png：128×128，${(png.length / 1024).toFixed(1)} KB，DeepSeek 蓝鲸鱼 + 终端标记，底色 ${BG}`);
+console.log(
+  `✅ media/icon.png：128×128，${(png.length / 1024).toFixed(1)} KB，蓝发女仆`,
+);

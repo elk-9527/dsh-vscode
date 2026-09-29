@@ -1,7 +1,7 @@
 {
   "name": "dsh-acp-panel",
   "displayName": "DSH ACP Panel",
-  "description": "把 DeepSeek Harness 带进 VS Code：对话、调用工具、切换权限并继续本机历史会话。",
+  "description": "在 VS Code 侧边栏使用 DeepSeek Harness：对话、调用工具、附加代码上下文，并切换模型、模式与权限。",
   "version": "0.2.1",
   "publisher": "Elk-ydy",
   "license": "MIT",
