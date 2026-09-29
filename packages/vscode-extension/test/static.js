@@ -338,12 +338,18 @@ check(
 );
 check(
   '完全权限必须附带确认步骤（该档位启用后不再逐条请求确认）',
-  /NEEDS_CONFIRM\s*=\s*new Set\(\['danger-full-access'\]\)/.test(panelPermission),
+  /NEEDS_CONFIRM\s*=\s*new Set\(\[[^\]]*'danger-full-access'/.test(panelPermission),
   'danger-full-access 没有进 NEEDS_CONFIRM',
 );
 check(
-  '面板**没有**把权限清单写死（插件添加的 auto-approval 等项必须随内核出现）',
-  // 允许出现在注释中（说明其来源），但不得出现在 BUILTIN 表中。
+  'DSH 0.2 的 Auto review 使用桌面端同级别的独立风险确认',
+  /NEEDS_CONFIRM\s*=\s*new Set\(\[[^\]]*'auto'/.test(panelPermission) &&
+    /AUTO_CONFIRM/.test(panelPermission) && /不使用沙箱/.test(panelPermission),
+  'auto 没有进入确认流程，或缺少无沙箱风险说明',
+);
+check(
+  '面板**没有**把第三方权限清单写死（auto-approval 等项必须随内核出现）',
+  // DSH 0.2 的官方 auto 需要专用标签与确认；第三方 auto-approval 仍不得写入 BUILTIN。
   !/'auto-approval'\s*:/.test(panelPermission),
   'src/dsh/permission.js 里出现了 auto-approval 的写死条目',
 );
@@ -807,6 +813,20 @@ check(
   check('端口归属：更换内核的路径只监听自身端口（否则会连回同一台）',
     /ownPortOnly[\s\S]{0,120}return \[cfg\.selfStartPort\]/.test(viewSource) &&
       /this\.ownPortOnly = true/.test(viewSource));
+  check('插件能力：vscode-panel 自启前会同步 desktop 中已启用的注册表插件',
+    /profile === 'vscode-panel'[\s\S]{0,500}syncPanelProfilePlugins\(\{ command, profile \}\)/.test(viewSource) &&
+      /planPanelPluginSync/.test(read('src/door/setup.js')));
+  check('插件能力：同步 DSH 运行时官方 bundle（不能只看 dependencies）',
+    /OFFICIAL_RUNTIME_BUNDLE/.test(read('src/door/setup.js')) &&
+      /runtimeBundleAdditions/.test(read('src/door/setup.js')) &&
+      /enableRuntimeBundles/.test(read('src/door/setup.js')));
+  check('插件能力：自启时通过 --patch 只读继承 desktop 的模型路由与插件配置',
+    /desktopProfilePatchArgs/.test(read('src/door/setup.js')) &&
+      /desktopProfilePatchArgs\(\{ profile \}\)/.test(viewSource) &&
+      /extraArgs:\s*\[\.\.\.inheritedConfigArgs,\s*\.\.\.this\.spawnArgs\]/.test(viewSource));
+  check('插件能力：同步不覆盖连接组件，也不自动复制本地或 Git 来源',
+    /isDoorPackage\(name\)/.test(read('src/door/setup.js')) &&
+      /file\|link\|workspace\|catalog\|git/.test(read('src/door/setup.js')));
 
   const soak = path.join(ROOT, 'tools', 'soak.cjs');
   check('有长时间运行的耐力测试（用于发现「能启动但存活时间短」这类问题）',

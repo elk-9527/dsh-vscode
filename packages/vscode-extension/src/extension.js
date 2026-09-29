@@ -146,15 +146,22 @@ function activate(context) {
                 `没有找到可运行的 DSH CLI。${failures.length ? `\n${failures.join('\n')}` : ''}`,
               );
             }
-            progress.report({ message: '创建配置并同步连接组件…' });
+            progress.report({ message: '创建配置并同步插件…' });
             await new Promise((resolve) => setImmediate(resolve));
             return preparePanelProfile({ command, profile });
           },
         );
+        const synced = Array.isArray(result.syncedPlugins) ? result.syncedPlugins.length : 0;
         const message = result.created
-          ? `已创建 ${profile} 并安装连接组件。`
-          : `已${result.action === 'update' ? '更新' : '安装'} ${profile} 的连接组件。`;
+          ? `已创建 ${profile}，并同步 ${synced} 个桌面端插件。`
+          : `已修复 ${profile}${synced ? `，并同步 ${synced} 个桌面端插件` : ''}。`;
         log('info', message);
+        if (Array.isArray(result.skippedPlugins) && result.skippedPlugins.length > 0) {
+          log(
+            'warn',
+            `以下插件使用本地或无法复现的来源，未自动同步：${result.skippedPlugins.map((item) => item.name).join('、')}`,
+          );
+        }
         const choice = await vscode.window.showInformationMessage(message, '重新连接');
         if (choice === '重新连接') await view.reconnect();
       } catch (error) {

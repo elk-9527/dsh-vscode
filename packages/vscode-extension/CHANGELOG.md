@@ -3,6 +3,36 @@
 本项目大体遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的写法，
 版本号使用 `主.次.修订`。
 
+## [0.2.4] — 2026-09-29
+
+### 修复
+
+- 修复“插件已安装但配置未继承”的根本缺口：自启 `vscode-panel` 时通过 DSH 的 `--patch`
+  只读加载 `desktop/cordis.patch.yml`，因此桌面端配置的模型路由、插件开关和插件参数在
+  Desktop 未运行时仍然生效。
+- 不复制或覆盖 `desktop` / `vscode-panel` 的 patch 文件；桌面配置更新后，下次启动后台内核
+  会直接读取最新内容。
+- 真实后台验收不再只检查某一个权限项：同时核对默认 provider 和完整模型分组，确认
+  OpenCode Go 的 28 个模型选项及其 ModLens 派生项均可由面板取得。
+
+## [0.2.3] — 2026-09-29
+
+### 修复
+
+- 修复 DSH 0.2 内置实验能力未同步的问题：桌面配置集中的官方运行时 bundle（包括提供
+  第四种 `auto` 权限的 `@deepseek-ai/dsh-experimental-auto-review`）现在会随注册表插件
+  一起启用到 `vscode-panel`。
+- 回归验收改为读取真实权限清单并确认存在 `auto`，不再只以 bundle 数量作为成功标准。
+
+## [0.2.2] — 2026-09-29
+
+### 修复
+
+- 修复只有 DSH Desktop 运行时才能使用其插件能力的问题：`vscode-panel` 在准备配置和自启前，
+  会读取 `desktop` 的已启用插件清单，并把注册表插件按实际安装版本同步到自启配置集。
+- 同步只补充或升级插件，不删除 `vscode-panel` 的独有插件，也不修改 `desktop`；本地路径、Git、
+  URL 等无法安全复现的来源会跳过并写入日志。
+
 ## [0.2.1] — 2026-09-29
 
 ### 新增
