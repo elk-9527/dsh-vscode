@@ -14,8 +14,14 @@ export function isDoorStatusRequest(frame) {
  *
  * `model` 只报告路由名称与来源；API key、环境变量、设置文件位置均不会进入协议。
  */
-export function doorStatusPayload({ model, permissionAvailable = false } = {}) {
+export function doorStatusPayload({
+  model,
+  historyKind = 'legacy-v3-disk',
+  permissionKind,
+} = {}) {
   const selection = model && model.selection;
+  const normalizedHistory =
+    historyKind === 'session-query' ? 'session-query' : 'legacy-v3-disk';
   return {
     version: DOOR_VERSION,
     model: {
@@ -27,7 +33,10 @@ export function doorStatusPayload({ model, permissionAvailable = false } = {}) {
     capabilities: {
       presets: true,
       history: true,
-      permissionPresets: Boolean(permissionAvailable),
+      historyKind: normalizedHistory,
+      sessionFormat: normalizedHistory === 'session-query' ? 4 : 3,
+      permissionPresets: Boolean(permissionKind),
+      ...(permissionKind ? { permissionKind } : {}),
     },
   };
 }

@@ -10,6 +10,7 @@ const suites = [
   ['端口与监听边界', 'port.js'],
   ['模型选择与状态', 'model-status.js'],
   ['权限预设旁路', 'permission.js'],
+  ['内核兼容适配器', 'kernel-adapters.js'],
   ['连接生命周期', 'lifecycle.js'],
 ];
 

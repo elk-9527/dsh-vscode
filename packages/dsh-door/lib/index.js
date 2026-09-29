@@ -45,7 +45,9 @@ import {
   sessionCloseTarget,
   waitForMount,
 } from './frames.js';
-import { DEFAULT_LIST_LIMIT, getSession, listSessions, resolveSessionsRoot } from './sessions.js';
+import { resolveSessionsRoot } from './sessions.js';
+import { createLegacyHistory, createSessionQueryHistory } from './kernel/history.js';
+import { createPermissionHandler } from './kernel/permissions.js';
 // 端口判定单独构成一个纯模块：否则必须载入整个插件（需 import 内核）才能测试该判定。
 import { LOOPBACK_HOST, resolveDoorHost, resolveDoorPort } from './port.js';
 import { resolveInitialModel } from './model.js';
@@ -58,18 +60,13 @@ import {
 } from './status.js';
 // 权限预设的旁路方法（纯帧工具与载荷规整），理由见该文件开头。
 import {
-  DOOR_ERR_NO_SESSION,
-  DOOR_ERR_UNKNOWN_PRESET,
   DOOR_PERMISSION_PREFIX,
   doorErrorCode,
   doorPermissionError,
   doorPermissionMethod,
   doorPermissionResult,
   isDoorPermissionRequest,
-  permissionError,
-  permissionPayload,
   permissionTarget,
-  settledPermission,
 } from './permission.js';
 
 export const name = 'acp-door';
@@ -348,7 +345,8 @@ function handleDoorStatus(line, state, diag) {
   if (!isDoorStatusRequest(frame)) return false;
   const result = doorStatusPayload({
     model: state.modelRoute,
-    permissionAvailable: Boolean(state.permissionHandler),
+    historyKind: state.sessionsHandler?.kind,
+    permissionKind: state.permissionHandler?.kind,
   });
   state.respond(doorStatusResult(frame.id, result));
   diag(
@@ -506,70 +504,6 @@ async function handleDoorPermission(line, state, diag) {
 }
 
 /**
- * 把内核的权限预设服务包装成该插件需要的两个动作。
- *
- * `service` 无法取得（该档未挂载权限预设）时返回 undefined —— 该插件照常工作，
- * 客户端只会收到「这个内核没有权限预设」的明确答复，而不是整个接入点不可用。
- *
- * @param {object} ctx 内核上下文（要 `sessions` 与 `permissionPresets`）。
- * @param {(message: string) => void} diag
- * @returns {{get: (id: string) => Promise<object>, set: (id: string, value: string) => Promise<object>}|undefined}
- */
-function makePermissionHandler(ctx, diag) {
-  const service = ctx.permissionPresets;
-  if (!service || typeof service.selectFor !== 'function' || typeof service.set !== 'function') {
-    diag('该内核没有 permissionPresets 服务，权限方法将明确返回「不支持」');
-    return undefined;
-  }
-  /** 读取一次：会话的权限投影 → 客户端需要的载荷。 */
-  const read = (session) =>
-    permissionPayload({
-      currentValue: service.current(session),
-      options: service.selectFor(service.permissionState(session)).options,
-      defaultPreset: service.defaultPreset,
-    });
-  /** 按 id 查找存活的会话；找不到时**携带自身的错误码**明确说明情形。 */
-  const sessionOf = (id) => {
-    const session = ctx.sessions?.get?.(id);
-    if (!session) {
-      // 标记 -32003：客户端需要与「名字不存在」区分（前者应重新打开会话，后者应更换选项）。
-      throw permissionError(
-        DOOR_ERR_NO_SESSION,
-        `这个内核里没有会话 ${id}（可能它是别的内核建的，或已被关闭）`,
-      );
-    }
-    return session;
-  };
-  return {
-    async get(id) {
-      return read(sessionOf(id));
-    },
-    async set(id, value) {
-      const session = sessionOf(id);
-      // 先经 resolve 校验：名称不正确时内核的原话最为准确（会列出所有可用预设名）。
-      // 单独包一层仅为给「名字不存在」标记 -32002 —— 不使其混入 -32000 那一类，
-      // 客户端需要依据错误码决定输出哪一句提示。
-      //
-      // 同时说明客户端不应发送「展示项」的原因：内核的清单中 `custom` 是
-      // 「当前配置组合不匹配任何预设」的展示态，`resolve('custom')` 会在该处抛出异常。
-      try {
-        service.resolve(value);
-      } catch (error) {
-        throw permissionError(
-          DOOR_ERR_UNKNOWN_PRESET,
-          error && error.message ? error.message : String(error),
-        );
-      }
-      service.set(session, value);
-      const payload = read(session);
-      // 投影完成折算之前读取到的可能仍是旧值 —— 以刚切换的值为准（见 settledPermission）。
-      payload.currentValue = settledPermission(payload.currentValue, value);
-      return payload;
-    },
-  };
-}
-
-/**
  * 若该行属于尚未完成预设挂载的会话的 `session/prompt`，则等待其完成后再放行。
  *
  * **需要等待，但必须设置上限**（MOUNT_WAIT_MS，与出站方向使用同一数值）。原因：
@@ -679,22 +613,20 @@ export function apply(ctx, config = {}) {
     typeof config.sessionsDir === 'string' && config.sessionsDir
       ? config.sessionsDir
       : resolveSessionsRoot();
-  const sessionsHandler = {
-    /** 列出历史会话（按修改时间从新到旧）。 */
-    async list(params = {}) {
-      const limit =
-        typeof params.limit === 'number' && Number.isFinite(params.limit) && params.limit > 0
-          ? Math.min(Math.floor(params.limit), 500)
-          : DEFAULT_LIST_LIMIT;
-      const { sessions, skipped, error } = listSessions(sessionsRoot, { limit });
-      if (error) throw new Error(error);
-      return { sessions, skipped };
-    },
-    /** 获取一段会话的名片与回放。 */
-    async get(id) {
-      return getSession(sessionsRoot, id, {});
-    },
-  };
+  const legacySessionsHandler = createLegacyHistory(sessionsRoot);
+  let sessionsHandler = legacySessionsHandler;
+  ctx.inject(['sessionQuery'], (queryCtx) => {
+    const handler = createSessionQueryHistory(queryCtx.sessionQuery, diag);
+    if (!handler) {
+      diag('sessionQuery 服务存在，但接口版本无法识别，继续使用旧版 v3 只读路径');
+      return undefined;
+    }
+    sessionsHandler = handler;
+    diag('历史会话已接入内核 sessionQuery 服务');
+    return () => {
+      if (sessionsHandler === handler) sessionsHandler = legacySessionsHandler;
+    };
+  });
 
   /**
    * 权限预设（`dsh-door/permission/get|set`）。
@@ -707,8 +639,8 @@ export function apply(ctx, config = {}) {
    */
   let permissionHandler;
   ctx.inject(['permissionPresets'], (pctx) => {
-    permissionHandler = makePermissionHandler(pctx, diag);
-    diag('已接入内核的权限预设服务');
+    permissionHandler = createPermissionHandler(pctx, diag);
+    if (permissionHandler) diag(`已接入内核的权限预设服务（${permissionHandler.kind}）`);
     return () => {
       permissionHandler = undefined;
     };
@@ -791,7 +723,9 @@ export function apply(ctx, config = {}) {
       /** 可用预设清单；连接挂载内核服务后才有值。 */
       listPromise: undefined,
       /** 该插件自身的历史会话方法（见 handleDoorSessions）。 */
-      sessionsHandler,
+      get sessionsHandler() {
+        return sessionsHandler;
+      },
       /** 本连接的新会话初始模型及来源（状态方法与 ACP 桥共用同一个判定结果）。 */
       modelRoute,
       /** 该插件自身的权限预设方法（见 handleDoorPermission）；服务缺席时为 undefined。 */
