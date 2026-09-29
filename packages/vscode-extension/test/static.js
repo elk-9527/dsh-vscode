@@ -820,6 +820,10 @@ check(
     /OFFICIAL_RUNTIME_BUNDLE/.test(read('src/door/setup.js')) &&
       /runtimeBundleAdditions/.test(read('src/door/setup.js')) &&
       /enableRuntimeBundles/.test(read('src/door/setup.js')));
+  check('插件能力：自启时通过 --patch 只读继承 desktop 的模型路由与插件配置',
+    /desktopProfilePatchArgs/.test(read('src/door/setup.js')) &&
+      /desktopProfilePatchArgs\(\{ profile \}\)/.test(viewSource) &&
+      /extraArgs:\s*\[\.\.\.inheritedConfigArgs,\s*\.\.\.this\.spawnArgs\]/.test(viewSource));
   check('插件能力：同步不覆盖连接组件，也不自动复制本地或 Git 来源',
     /isDoorPackage\(name\)/.test(read('src/door/setup.js')) &&
       /file\|link\|workspace\|catalog\|git/.test(read('src/door/setup.js')));

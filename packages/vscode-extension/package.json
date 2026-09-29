@@ -2,7 +2,7 @@
   "name": "dsh-acp-panel",
   "displayName": "DSH ACP Panel",
   "description": "在 VS Code 侧边栏使用 DeepSeek Harness：对话、调用工具、附加代码上下文，并切换模型、模式与权限。",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "publisher": "Elk-ydy",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -192,7 +192,7 @@
           "type": "string",
           "default": "vscode-panel",
           "scope": "machine",
-          "description": "自行启动内核时使用哪个配置集。默认 vscode-panel。不要填 desktop：该配置集由桌面端独占，命令行无法启动。默认配置集会在自启前同步桌面端已启用的注册表插件以及当前 DSH 运行时自带的官方 bundle；本地路径或 Git 来源不会自动复制。启动失败时，面板会在 $DSH_HOME/profiles 中另找一个已安装连接组件的网页配置集继续尝试。"
+          "description": "自行启动内核时使用哪个配置集。默认 vscode-panel。不要填 desktop：该配置集由桌面端独占，命令行无法启动。默认配置集会同步桌面端已启用的注册表插件和运行时 bundle，并只读加载 desktop 的模型路由、插件开关与参数；本地路径或 Git 来源不会自动复制。启动失败时，面板会在 $DSH_HOME/profiles 中另找一个已安装连接组件的网页配置集继续尝试。"
         },
         "dshPanel.dshCommand": {
           "type": "string",

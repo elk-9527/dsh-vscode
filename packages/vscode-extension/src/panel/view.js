@@ -30,7 +30,7 @@ const {
   redactSensitiveOutput,
 } = require('../door/locate');
 const { resolveLoopbackHost } = require('../door/endpoint');
-const { syncPanelProfilePlugins } = require('../door/setup');
+const { desktopProfilePatchArgs, syncPanelProfilePlugins } = require('../door/setup');
 const { renderHtml, makeNonce } = require('../panel/html');
 const localSessions = require('../dsh/sessions');
 const { kernelManager } = require('../panel/kernel-manager');
@@ -519,7 +519,7 @@ class DshPanelView {
         && !syncAttempts.has(syncKey)
       ) {
         syncAttempts.add(syncKey);
-        this.post({ type: 'status', state: 'connecting', detail: '正在同步插件…' });
+        this.post({ type: 'status', state: 'connecting', detail: '正在同步插件与配置…' });
         try {
           const result = syncPanelProfilePlugins({ command, profile });
           syncedProfiles.add(profile);
@@ -540,6 +540,15 @@ class DshPanelView {
       }
       let entry;
       try {
+        /*
+         * desktop 的插件配置（模型路由、开关、插件参数）不在 package.json，而在
+         * cordis.patch.yml。自启实例通过 DSH 自身的 --patch 只读叠加这份配置；
+         * 测试传入的覆盖参数放在最后，以便测试端口等显式要求仍拥有最高优先级。
+         */
+        const inheritedConfigArgs = desktopProfilePatchArgs({ profile });
+        if (inheritedConfigArgs.length > 0) {
+          this.log('info', `自启 ${profile} 将只读继承 desktop 的插件配置与模型路由`);
+        }
         // 交由 manager 启动并登记：这样"视图销毁"不会终止该进程，另一个窗口也可以复用。
         // 接入点固定在面板自身的端口上（该插件读取 DSH_ACP_DOOR_PORT，见 dsh-door/lib/port.js）。
         // 配置集中的 port 是**默认值**，不是命令；内核由哪一方启动，端口即由该方决定。
@@ -549,7 +558,7 @@ class DshPanelView {
           command,
           profile,
           log: this.log,
-          extraArgs: this.spawnArgs,
+          extraArgs: [...inheritedConfigArgs, ...this.spawnArgs],
         });
       } catch (error) {
         failures.push(`「${redactSensitiveOutput(command)}」无法启动：${this.errText(error)}`);

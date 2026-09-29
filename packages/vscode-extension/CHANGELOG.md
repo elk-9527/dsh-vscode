@@ -3,6 +3,18 @@
 本项目大体遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的写法，
 版本号使用 `主.次.修订`。
 
+## [0.2.4] — 2026-09-29
+
+### 修复
+
+- 修复“插件已安装但配置未继承”的根本缺口：自启 `vscode-panel` 时通过 DSH 的 `--patch`
+  只读加载 `desktop/cordis.patch.yml`，因此桌面端配置的模型路由、插件开关和插件参数在
+  Desktop 未运行时仍然生效。
+- 不复制或覆盖 `desktop` / `vscode-panel` 的 patch 文件；桌面配置更新后，下次启动后台内核
+  会直接读取最新内容。
+- 真实后台验收不再只检查某一个权限项：同时核对默认 provider 和完整模型分组，确认
+  OpenCode Go 的 28 个模型选项及其 ModLens 派生项均可由面板取得。
+
 ## [0.2.3] — 2026-09-29
 
 ### 修复

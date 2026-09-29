@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const {
+  desktopProfilePatchArgs,
   inspectPanelProfile,
   planPanelPluginSync,
   preparePanelProfile,
@@ -101,6 +102,18 @@ try {
   writeInstalled(sourceProfile, '@demo/alpha', '1.2.3');
   writeInstalled(sourceProfile, 'beta-plugin', '2.0.0');
   writeInstalled(sourceProfile, 'local-plugin', '3.0.0');
+  const desktopPatch = path.join(directoryOf(sourceProfile), 'cordis.patch.yml');
+  fs.writeFileSync(desktopPatch, '- id: llm-pi-ai\n  config: {}\n');
+
+  assert.deepEqual(
+    desktopProfilePatchArgs({ profile, sourceProfile, homedir: root, env }),
+    ['--patch', desktopPatch],
+  );
+  assert.deepEqual(
+    desktopProfilePatchArgs({ profile: 'custom-web', sourceProfile, homedir: root, env }),
+    [],
+  );
+  console.log('  PASS  自启 vscode-panel 只读叠加 desktop 配置文件，不改写目标文件');
 
   assert.equal(inspectPanelProfile(profile, { homedir: root, env }).exists, false);
   const created = preparePanelProfile({

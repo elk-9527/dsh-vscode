@@ -17,6 +17,32 @@ function profileDirectory(profile, { homedir = os.homedir(), env = process.env }
   return path.join(home, 'profiles', profile);
 }
 
+/**
+ * 自启 vscode-panel 时只读加载 desktop 的配置覆盖层。
+ *
+ * 插件包与 bundle 只决定“代码是否存在”；模型路由、插件开关和插件参数实际保存在
+ * profile 的 cordis.patch.yml 中。通过 DSH 自身的 `--patch` 叠加源文件，既能使用
+ * desktop 的当前配置，又不复制、不覆盖任何一边的文件。
+ */
+function desktopProfilePatchArgs({
+  profile = 'vscode-panel',
+  sourceProfile = 'desktop',
+  homedir = os.homedir(),
+  env = process.env,
+} = {}) {
+  if (!SAFE_PROFILE.test(String(profile || '')) || !SAFE_PROFILE.test(String(sourceProfile || ''))) {
+    throw new Error('配置继承使用的配置集名称不合法。');
+  }
+  if (profile !== 'vscode-panel' || profile === sourceProfile) return [];
+  const patch = path.join(profileDirectory(sourceProfile, { homedir, env }), 'cordis.patch.yml');
+  try {
+    if (!fs.statSync(patch).isFile()) return [];
+  } catch {
+    return [];
+  }
+  return ['--patch', patch];
+}
+
 function inspectPanelProfile(profile, options = {}) {
   const directory = profileDirectory(profile, options);
   const manifest = path.join(directory, 'package.json');
@@ -306,6 +332,7 @@ function preparePanelProfile({
 }
 
 module.exports = {
+  desktopProfilePatchArgs,
   inspectPanelProfile,
   planPanelPluginSync,
   preparePanelProfile,
