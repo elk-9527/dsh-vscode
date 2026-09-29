@@ -24,6 +24,7 @@ const { decorateOptions, currentLabel, explainPermissionFailure, DISPLAY_ONLY } 
 const {
   probePort,
   dshCommandCandidates,
+  runningDesktopExecutables,
   explainKernelFailure,
   panelProfileCandidates,
   redactSensitiveOutput,
@@ -58,10 +59,12 @@ class DshPanelView {
    *   `--patch`，把接入点指向其它端口，这样测试「从零启动」时不需要占用 47821
    *   （桌面端运行时该端口上已存在接入点，否则该测试只能跳过）。
    */
-  constructor({ extensionUri, log, spawnArgs = [], kernels }) {
+  constructor({ extensionUri, log, spawnArgs = [], kernels, desktopExecutables = [] }) {
     this.extensionUri = extensionUri;
     this.log = log;
     this.spawnArgs = spawnArgs;
+    /** 曾经发现过的 DSH Desktop 安装位置；用于桌面端关闭后的自启。 */
+    this.desktopExecutables = desktopExecutables;
     /**
      * 后台内核的归属 —— 归**扩展**所有，不属于本视图（见 kernel-manager.js 开头）。
      *
@@ -387,7 +390,16 @@ class DshPanelView {
    * 仅测试「命令不可用」这一条路径）。
    */
   candidatesFor(cfg) {
-    return dshCommandCandidates({ dshCommand: cfg.dshCommand, homedir: os.homedir() });
+    const desktops = [
+      ...this.desktopExecutables,
+      ...runningDesktopExecutables(),
+    ].filter((value, index, all) => value && all.indexOf(value) === index);
+    return dshCommandCandidates({
+      dshCommand: cfg.dshCommand,
+      homedir: os.homedir(),
+      desktopExecutables: desktops,
+      extensionDir: path.resolve(__dirname, '..', '..'),
+    });
   }
 
   /**

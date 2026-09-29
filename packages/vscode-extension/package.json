@@ -97,6 +97,10 @@
         "title": "DSH：停止后台内核"
       },
       {
+        "command": "dshPanel.setupProfile",
+        "title": "DSH：准备或修复自启配置"
+      },
+      {
         "command": "dshPanel.attachFile",
         "title": "DSH：把当前文件带进对话",
         "icon": "$(file-add)"
@@ -137,6 +141,9 @@
         },
         {
           "command": "dshPanel.stopKernel"
+        },
+        {
+          "command": "dshPanel.setupProfile"
         },
         {
           "command": "dshPanel.attachSelection",

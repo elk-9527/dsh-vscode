@@ -101,7 +101,7 @@ function redactSensitiveOutput(value) {
  * @param {string} options.homedir 用户主目录。
  * @returns {string[]} 去重后的候选清单（可能为空）。
  */
-function dshCommandCandidates({ dshCommand, homedir }) {
+function dshCommandCandidates({ dshCommand, homedir, desktopExecutables = [], extensionDir } = {}) {
   const list = [];
   const configured = String(dshCommand || '').trim();
   if (configured) list.push(configured);
@@ -116,7 +116,94 @@ function dshCommandCandidates({ dshCommand, homedir }) {
     'bin.js',
   );
   if (bin && fs.existsSync(bin)) list.push(`node ${bin}`);
+  for (const executable of desktopExecutables) {
+    const desktopCommand = desktopDshCommand(executable, { extensionDir });
+    if (desktopCommand) list.push(desktopCommand);
+  }
   return [...new Set(list)];
+}
+
+/**
+ * 从一个桌面端安装目录构造可持续运行的 dsh CLI 命令。
+ *
+ * DSH Desktop 0.2 将 CLI 放进 app.asar，不再生成旧版的全局 dsh.cmd。直接设置
+ * `ELECTRON_RUN_AS_NODE=1` 执行该脚本时，Electron 44 会在脚本初始化后退出，即使
+ * 内核仍持有监听句柄。这里改用桌面端随附的真正 Node 运行一个很小的代理；代理以
+ * IPC fork 启动 Electron/Node 子进程，IPC 通道会维持其生命周期。这样既不复制
+ * app.asar，也不依赖用户另外安装 Node 或把 dsh 放进 PATH。
+ */
+function desktopDshCommand(executable, { extensionDir } = {}) {
+  const exe = String(executable || '').trim();
+  if (process.platform !== 'win32' || !existsAsFile(exe)) return undefined;
+  const installDir = path.dirname(exe);
+  const resources = path.join(installDir, 'resources');
+  const appAsar = path.join(resources, 'app.asar');
+  const node = path.join(
+    resources,
+    'runtime',
+    'primary-runtime',
+    'dependencies',
+    'node',
+    'bin',
+    'node.exe',
+  );
+  const proxy = path.join(
+    extensionDir || path.resolve(__dirname, '..', '..'),
+    'src',
+    'door',
+    'desktop-cli-host.cjs',
+  );
+  if (!existsAsFile(appAsar) || !existsAsFile(node) || !existsAsFile(proxy)) return undefined;
+  const cli = path.join(appAsar, 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js');
+  return [node, proxy, exe, cli].map(quoteArg).join(' ');
+}
+
+/**
+ * 找出当前机器上的 DSH Desktop 可执行文件。
+ *
+ * 先查明确环境变量和标准安装目录；若桌面端正在运行，再只读查询进程路径，以覆盖
+ * `D:\\programs\\...` 这类自定义目录。查询失败不会影响普通 dsh 候选。
+ */
+function runningDesktopExecutables({ env = process.env, platform = process.platform } = {}) {
+  if (platform !== 'win32') return [];
+  const list = [];
+  const push = (candidate) => {
+    const value = String(candidate || '').trim();
+    if (
+      value &&
+      /deepseek harness\.exe$/i.test(value) &&
+      existsAsFile(value) &&
+      !list.some((item) => item.toLowerCase() === value.toLowerCase())
+    ) {
+      list.push(value);
+    }
+  };
+
+  push(env.DEEPSEEK_HARNESS_EXECUTABLE);
+  for (const root of [env.LOCALAPPDATA, env.ProgramFiles, env['ProgramFiles(x86)']]) {
+    if (root) push(path.join(root, 'DeepSeek Harness', 'DeepSeek Harness.exe'));
+  }
+
+  try {
+    const powershell = env.SystemRoot
+      ? path.join(env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+      : 'powershell.exe';
+    const output = execFileSync(
+      powershell,
+      [
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        "Get-Process -Name 'DeepSeek Harness' -ErrorAction SilentlyContinue | ForEach-Object { $_.Path }",
+      ],
+      { encoding: 'utf8', timeout: 2500, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+    for (const line of String(output || '').split(/\r?\n/)) push(line);
+  } catch {
+    // PowerShell 不可用或进程路径不可读：保留已经发现的标准安装目录即可。
+  }
+  return list;
 }
 
 /**
@@ -674,6 +761,8 @@ module.exports = {
   commandLine,
   redactSensitiveOutput,
   dshCommandCandidates,
+  desktopDshCommand,
+  runningDesktopExecutables,
   explainKernelFailure,
   panelProfileCandidates,
 };
