@@ -49,6 +49,13 @@ import {
 import { resolveSessionsRoot } from './sessions.js';
 import { createLegacyHistory, createSessionQueryHistory } from './kernel/history.js';
 import { createPermissionHandler } from './kernel/permissions.js';
+import { ACP_RUNTIME_VERSION } from './kernel/runtime.js';
+import { IdeBridge } from './bridge/runtime.js';
+import { createEndpoint } from './bridge/endpoint.js';
+import { PREFIX as BRIDGE_PREFIX } from './bridge/protocol.js';
+import { bridgeTransport } from './bridge/transport.js';
+import { managedLifetime } from './bridge/managed-lifetime.js';
+import { withAcpApprovalPriority } from './kernel/acp-context.js';
 // 端口判定单独构成一个纯模块：否则必须载入整个插件（需 import 内核）才能测试该判定。
 import { LOOPBACK_HOST, resolveDoorHost, resolveDoorPort } from './port.js';
 import { resolveInitialModel } from './model.js';
@@ -157,6 +164,7 @@ function mountPresetOnNewSessions(child, { defaultPreset, state, diag }) {
       }
       state.sessions.add(sessionId);
       state.agents.add(agent);
+      state.agentsBySession?.set(sessionId, agent);
       // 本次应当挂载的预设共有三种来源，优先级由高到低：
       //   1. 客户端在 session/new 或 session/resume 中指定的（_meta）；
       //   2. 本内核进程内记录的（该会话此前挂载过的预设）—— 断线重连时适用；
@@ -320,6 +328,7 @@ function gatePrompts(source, state, diag) {
           buffer = buffer.slice(index + 1);
           // 该插件自身的方法（历史会话 / 权限预设）在此处就地应答、不转发内核；
           // 其余帧照旧走闸。
+          if (line.includes(BRIDGE_PREFIX) && await state.bridge?.handle(parseLine(line), state)) continue;
           if (line.includes(DOOR_STATUS_METHOD)) {
             const handled = handleDoorStatus(line, state, diag);
             if (handled) continue;
@@ -352,7 +361,11 @@ function handleDoorStatus(line, state, diag) {
   const result = doorStatusPayload({
     model: state.modelRoute,
     historyKind: state.sessionsHandler?.kind,
+    acpVersion: ACP_RUNTIME_VERSION,
     permissionKind: state.permissionHandler?.kind,
+    bridge: state.bridge?.endpoint ? { protocolVersion: 1, catalog: true, operations: true, resume: true, auth: 'endpoint-file-v1' } : undefined,
+    instanceId: state.bridge?.endpoint?.instanceId,
+    connectionCount: state.connectionCount?.(),
   });
   state.respond(doorStatusResult(frame.id, result));
   diag(
@@ -626,8 +639,14 @@ export function apply(ctx, config = {}) {
   ctx.inject(['sessionQuery'], (queryCtx) => {
     const handler = createSessionQueryHistory(queryCtx.sessionQuery, diag);
     if (!handler) {
-      diag('sessionQuery 服务存在，但接口版本无法识别，继续使用旧版 v3 只读路径');
-      return undefined;
+      diag('sessionQuery 服务存在，但接口版本无法识别，历史方法明确返回不支持');
+      const unavailable = {
+        kind: 'unavailable',
+        async list() { throw new Error('当前内核的历史接口无法识别'); },
+        async get() { throw new Error('当前内核的历史接口无法识别'); },
+      };
+      sessionsHandler = unavailable;
+      return () => { if (sessionsHandler === unavailable) sessionsHandler = legacySessionsHandler; };
     }
     sessionsHandler = handler;
     diag('历史会话已接入内核 sessionQuery 服务');
@@ -656,6 +675,9 @@ export function apply(ctx, config = {}) {
 
   /** 每个连接对应一份 ACP 桥；断开时逐个拆除。 */
   const live = new Set();
+  const bridge = new IdeBridge();
+  const lifetime = managedLifetime({ bridge, live });
+  ctx.provide('ideBridge', bridge);
 
   /**
    * sessionId → 该会话使用的预设。**内核级**，所有连接共享。
@@ -700,7 +722,6 @@ export function apply(ctx, config = {}) {
     }
 
     // 同一个 socket 的两个方向：一个传给 ACP 读取，一个供 ACP 写入。
-    const { readable, writable } = Duplex.toWeb(socket);
 
     // 本连接共享的状态。置于此处而非模块级的原因：一个内核可能同时接入
     // 多个客户端（VS Code 面板 + 试验台 + …），任一方均不可见其他方的点名。
@@ -744,7 +765,11 @@ export function apply(ctx, config = {}) {
       sessions: new Set(),
       /** 同一会话也可能被其它本机界面打开，故进一步按本连接创建的 agent 对象隔离。 */
       agents: new WeakSet(),
+      agentsBySession: new Map(),
+      bridge,
+      connectionCount: () => live.size,
     };
+    const { readable, writable } = bridgeTransport(socket, state);
 
     // 出站方向增加一道「补充预设清单」的闸，入站方向增加一道「阻塞 prompt」的闸。
     const stream = ndJsonStream(
@@ -771,7 +796,7 @@ export function apply(ctx, config = {}) {
           const notification = doorStreamNotification(sessionId, frame);
           if (notification) state.respond(notification);
         }, { global: true });
-        return acp.apply(child, { ...(modelRoute.selection ?? {}), stream });
+        return acp.apply(withAcpApprovalPriority(child), { ...(modelRoute.selection ?? {}), stream });
       },
     });
 
@@ -780,15 +805,15 @@ export function apply(ctx, config = {}) {
 
     const entry = { socket, teardown };
     live.add(entry);
+    lifetime.touch();
 
     const close = () => {
       if (!live.delete(entry)) return;
+      bridge.detach(state);
       diag('客户端已断开');
-      try {
-        teardown();
-      } catch (error) {
+      void bridge.idle(state).then(() => { teardown(); lifetime.schedule(); }).catch((error) => {
         ctx.logger?.warn?.(`acp-door: 拆除连接失败：${String(error)}`);
-      }
+      });
     };
 
     socket.on('close', close);
@@ -819,6 +844,9 @@ export function apply(ctx, config = {}) {
     server.listen(port, host, () => {
       const address = server.address();
       const shown = typeof address === 'object' && address ? address.port : port;
+      try { bridge.endpoint = createEndpoint(shown); }
+      catch { ctx.logger?.warn?.('acp-door: 无法准备受保护的本机鉴权文件，插件能力调用已禁用'); }
+      lifetime.schedule(Math.max(120000, Number(process.env.DSH_BRIDGE_OWNED_IDLE_MS) || 0));
       const configuredModel = provider && model ? `${provider}/${model}` : '跟随 DSH 当前默认模型';
       diag(`开始监听 ${host}:${shown}，preset=${preset}，model=${configuredModel}`);
       ctx.logger?.info?.(`acp-door: 正在监听 ${host}:${shown}`);
@@ -831,6 +859,8 @@ export function apply(ctx, config = {}) {
 
   ctx.on('dispose', () => {
     disposed = true;
+    lifetime.dispose();
+    bridge.dispose();
     diag('该插件已被卸载');
     const closed = disposeLiveConnections(live, (phase, error) => {
       const text = `acp-door: 卸载时清理${phase === 'socket' ? '连接' : '连接桥'}失败：${String(error)}`;

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { withAcpApprovalPriority } from '../lib/kernel/acp-context.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -25,6 +26,19 @@ async function check(name, fn) {
   passed += 1;
   console.log(`  PASS  ${name}`);
 }
+
+await check('批准订阅优先级不改变作用域，其他订阅与服务保持原状', () => {
+  const calls = [];
+  const service = {};
+  const ctx = { service, on(...args) { assert.equal(this, ctx); calls.push(args); } };
+  const adapted = withAcpApprovalPriority(ctx);
+  const listener = () => {};
+  adapted.on('approval/request', listener, { global: false });
+  adapted.on('session/event', listener);
+  assert.deepEqual(calls[0], ['approval/request', listener, { global: false, prepend: true }]);
+  assert.deepEqual(calls[1], ['session/event', listener, undefined]);
+  assert.equal(adapted.service, service);
+});
 
 const header = {
   version: 4,
