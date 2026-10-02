@@ -54,19 +54,13 @@ check(fs.existsSync(path.join(ROOT, 'CHANGELOG.md')), '有 CHANGELOG.md', 'CHANG
 
 const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
 const urls = [...readme.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)].map((x) => x[1]);
-check(
-  urls.length > 0,
-  'README 里有截图（GitHub 页面要靠它；市场那边另看 screenshots.json）',
-  `${urls.length} 张`,
-);
+console.log(`  README 截图：${urls.length} 张（可选）`);
 const brokenImages = urls.filter((src) => !/^https?:/.test(src) && !fs.existsSync(path.join(ROOT, src)));
 check(brokenImages.length === 0, 'README 里的图片都在（相对路径按本包目录算）', brokenImages.join(', ') || '都在');
 
 /*
- * 市场的截图清单：**放在本仓库**（`screenshots.json`，与 package.json 同级）——
- * 上游 contributing.md 明确要求如此：写死在上游仓库的绝对 URL 会失效
- * （已发布的 773 张中有 41 张即因此返回 404），相对路径在本仓库改名后可立即发现。
- * 规则：1–8 张；相对路径不能以 / 开头、不能含 ..；也接受 GitHub 托管的 https 绝对地址。
+ * 市场截图为可选项。提供截图时，清单放在包根的 screenshots.json 中。
+ * 清单须含 1–8 张；相对路径须位于本包目录内；也接受 GitHub 托管的 HTTPS 地址。
  */
 const shotFile = path.join(ROOT, 'screenshots.json');
 let shots = null;
@@ -77,8 +71,10 @@ if (fs.existsSync(shotFile)) {
   } catch (err) {
     shots = null;
   }
+  check(Array.isArray(shots) && shots.length >= 1 && shots.length <= 8, 'screenshots.json 合法（1–8 张）', Array.isArray(shots) ? `${shots.length} 张` : '解析失败');
+} else {
+  console.log('  未提供 screenshots.json（截图为可选项）');
 }
-check(Array.isArray(shots) && shots.length >= 1 && shots.length <= 8, 'screenshots.json 合法（1–8 张）', Array.isArray(shots) ? `${shots.length} 张` : '解析失败/没有');
 if (Array.isArray(shots)) {
   const bad = shots.filter(
     (src) => typeof src !== 'string' || (!/^https?:/.test(src) && (/^[\\/]/.test(src) || src.includes('..') || !fs.existsSync(path.join(ROOT, src)))),

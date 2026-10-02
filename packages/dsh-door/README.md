@@ -1,14 +1,9 @@
 # dsh-acp-door
 
-在**正在运行的** DeepSeek Harness 内核上额外提供 **ACP 接入点**（只监听 `127.0.0.1`），
-使外部程序（VS Code 面板）能够驱动**同一个** DSH —— 同一套配置、同一份记忆、
-同一套工具、同一份会话记录。
+连接本机 DSH 与 VS Code 等外部程序，共用模型、工具、记忆和会话。支持历史查看和权限切换。
 
-![VS Code 面板通过 ACP 接入点插件连接同一个 DSH](assets/panel-chat.png)
+需要已安装并运行的 DeepSeek Harness，以及支持 ACP 的外部客户端。接入点仅供本机使用；安装后需重启对应的 DSH 内核。
 
-| 权限模式（ACP 接入点插件对外暴露内核的权限预设） |
-| --- |
-| ![权限选择器](assets/panel-permission.png) |
 
 <details>
 <summary>English</summary>
