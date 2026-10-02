@@ -92,8 +92,8 @@ const entry = [
   `name: ${owner}/${repo}${dir ? '#dsh-door' : ''}`,
   'category: dev',
   'description:',
-  "  en: 'Loopback-only ACP door for DeepSeek Harness: attach an external client (such as the DSH Panel VS Code extension) to the kernel you already have running, exposing session listing and permission presets.'",
-  '  zh: 为正在运行的 DeepSeek Harness 内核新增一个仅监听本机回环地址的 ACP 接入点，供外部客户端（如 VS Code 的 DSH 面板）连接同一个内核，并接出会话列表与权限预设。',
+  "  en: 'Connect VS Code and other local clients to DSH, sharing its models, tools, memory and sessions. Browse history, change permission modes and call capabilities registered by DSH plugins.'",
+  '  zh: 连接本机 DSH 与 VS Code 等外部程序，共用模型、工具、记忆和会话。支持历史查看、权限切换及已注册插件的能力调用。',
 ].join('\n');
 
 console.log('\n  ── 上架精选列表要提的那个文件 ───────────────────────────');
