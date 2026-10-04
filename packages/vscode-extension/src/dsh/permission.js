@@ -13,8 +13,8 @@
  *
  *   - `read-only` / `workspace-write` / `danger-full-access` 来自
  *     `@deepseek-ai/dsh-base`；
- *   - `auto-approval` 由 `dsh-auto-approval-plugin` 插件加入该表
- *     （该插件先重述整张表，再追加自身对应的一项）；
+ *   - DSH 0.2 的 `auto` 由 `@deepseek-ai/dsh-experimental-auto-review`
+ *     在运行时注册；其他插件也可以贡献自己的预设；
  *   - 用户也可在 `cordis.patch.yml` 中添加自定义预设。
  *
  * 因此面板不得硬编码清单：一旦硬编码，用户安装插件或添加预设后，面板中会缺少
@@ -31,7 +31,7 @@
  * 说明为本仓库撰写的中文：内核返回的说明是英文（例如 `Read files anywhere; no
  * modifications allowed.`），桌面端中文界面中也保留该英文，即桌面端未作翻译。
  * 本面板界面全部为中文，英文说明与整体语言不一致，因此在此翻译为中文。
- * 自定义预设（含 `auto-approval` 等由插件添加的预设）一律原样使用内核给出的
+ * 自定义预设（含 `auto` 等由插件添加的预设）一律原样使用内核给出的
  * name/description：由他人命名的内容不作改动。
  */
 const BUILTIN = {
@@ -46,6 +46,10 @@ const BUILTIN = {
   'danger-full-access': {
     label: '完全权限',
     description: '读写任意文件均不再请求确认，仅应在信任当前任务时使用。',
+  },
+  auto: {
+    label: 'Auto review',
+    description: '无沙箱运行；每次原生工具调用和 PTC 内层调用前由同一模型进行实验性审查。',
   },
   custom: {
     label: '自定义',
@@ -62,7 +66,7 @@ const BUILTIN = {
  * 而是 `@deepseek-ai/dsh-base` 中「无批准的全盘访问」预设的 id；
  * 改名即改变语义，届时此处也应同步修改。
  */
-const NEEDS_CONFIRM = new Set(['danger-full-access']);
+const NEEDS_CONFIRM = new Set(['danger-full-access', 'auto']);
 
 /**
  * 仅用于展示、不可作为切换目标的值。
@@ -102,6 +106,19 @@ const CONFIRM = {
   cancel: '取消',
 };
 
+/** DSH 0.2 桌面端对实验性 Auto review 使用的独立风险确认。 */
+const AUTO_CONFIRM = {
+  title: '确认启用 Auto review（实验）？',
+  body: 'Auto review 不使用沙箱。每次原生工具调用和 PTC 内层调用前，都会由与当前智能体相同的模型进行审查；审查拒绝的调用仍需由你决定。此功能可能误放行或误拒绝，并会消耗额外 token。',
+  accept: '启用 Auto review',
+  cancel: '取消',
+};
+
+const CONFIRM_BY_PRESET = {
+  'danger-full-access': CONFIRM,
+  auto: AUTO_CONFIRM,
+};
+
 /** 未知预设的后备标签（内核未提供 name 时使用）。 */
 function fallbackLabel(value) {
   return typeof value === 'string' && value ? value : '（未知）';
@@ -128,14 +145,14 @@ function decorateOptions(options, currentValue) {
     const builtin = BUILTIN[value];
     const item = {
       value,
-      // 内置项使用中文标签；其他来源（如 auto-approval）原样使用内核提供的 name。
+      // 内置项使用中文标签；其他来源（如 auto）原样使用内核提供的 name。
       label: builtin ? builtin.label : option.name ? option.name : fallbackLabel(value),
       // 展示项（custom）保留在清单中，但界面不得为其绑定点击处理。
       selectable: !DISPLAY_ONLY.has(value),
       needsConfirm: NEEDS_CONFIRM.has(value),
       active: value === currentValue,
     };
-    if (item.needsConfirm) item.confirm = CONFIRM;
+    if (item.needsConfirm) item.confirm = CONFIRM_BY_PRESET[value];
     const description = builtin
       ? builtin.description
       : typeof option.description === 'string'
@@ -229,6 +246,7 @@ function explainPermissionFailure({ code, message } = {}) {
 }
 
 module.exports = {
+  AUTO_CONFIRM,
   BUILTIN,
   CONFIRM,
   DISPLAY_ONLY,

@@ -4,14 +4,15 @@
  * 权限预设的「界面翻译」层（纯函数，见 src/dsh/permission.js）。
  *
  * 本层用于固定**与桌面端一致**这一约束：
- *   - 清单不写死：内核返回什么就显示什么（用户安装 Auto Approval 等插件，
+ *   - 清单不写死：内核返回什么就显示什么（DSH 0.2 注册 Auto review、用户安装权限插件，
  *     或在 cordis.patch.yml 中添加预设时，面板必须一并出现）；
  *   - 内置三项的**中文标签与桌面端逐字一致**（仅可查看/工作区内修改/完全权限），
  *     自定义项一律使用内核提供的 name（由他人命名的内容不作改动）；
- *   - 「完全权限」必须附带确认文案，且文案只有一份（扩展中的那一份）。
+ *   - 「完全权限」与 Auto review 必须附带各自的确认文案。
  */
 
 const {
+  AUTO_CONFIRM,
   BUILTIN,
   CONFIRM,
   DISPLAY_ONLY,
@@ -39,12 +40,12 @@ function section(title) {
   console.log(`\n── ${title} ───────────────────────────────────────`);
 }
 
-/** 本机上那份真实的清单（dsh-base 三项 + auto-approval 插件添加的一项）。 */
+/** DSH 0.2 的真实清单（dsh-base 三项 + auto-review 运行时注册的一项）。 */
 const REAL = [
   { value: 'read-only', name: 'read-only' },
   { value: 'workspace-write', name: 'workspace-write' },
-  { value: 'auto-approval', name: 'Auto Approval' },
   { value: 'danger-full-access', name: 'danger-full-access' },
+  { value: 'auto', name: 'auto' },
 ];
 
 section('1. 内置那三项的中文标签（跟桌面端逐字一致）');
@@ -54,6 +55,7 @@ section('1. 内置那三项的中文标签（跟桌面端逐字一致）');
   check('read-only → 仅可查看', byValue['read-only'].label === '仅可查看', byValue['read-only'].label);
   check('workspace-write → 工作区内修改', byValue['workspace-write'].label === '工作区内修改');
   check('danger-full-access → 完全权限', byValue['danger-full-access'].label === '完全权限');
+  check('auto → Auto review（与 DSH 0.2 桌面端一致）', byValue.auto.label === 'Auto review');
   check('三项都带中文说明（内核给出的是英文，此处翻译为中文）',
     Boolean(byValue['read-only'].description && byValue['workspace-write'].description &&
       byValue['danger-full-access'].description));
@@ -61,10 +63,12 @@ section('1. 内置那三项的中文标签（跟桌面端逐字一致）');
     !Object.values(byValue).some((item) => /anywhere|permitted|prompts/.test(item.description || '')));
 }
 
-section('2. 自定义项（含插件添加的项）原样使用内核提供的名称');
+section('2. 除 DSH 0.2 特殊项之外，自定义预设原样使用内核提供的名称');
 {
-  const decorated = decorateOptions(REAL, 'read-only');
-  const auto = decorated.find((item) => item.value === 'auto-approval');
+  const auto = decorateOptions(
+    [{ value: 'auto-approval', name: 'Auto Approval' }],
+    'auto-approval',
+  )[0];
   check('auto-approval 的标签就是内核给的 Auto Approval（不替他改名）',
     auto.label === 'Auto Approval', auto.label);
   check('插件添加的项不带中文说明（插件未提供时留空）', auto.description === undefined);
@@ -80,19 +84,24 @@ section('2. 自定义项（含插件添加的项）原样使用内核提供的�
 
 section('3. 当前项与确认步骤');
 {
-  const decorated = decorateOptions(REAL, 'auto-approval');
+  const decorated = decorateOptions(REAL, 'auto');
   check('只有一个 active', decorated.filter((item) => item.active).length === 1);
-  check('active 落在当前值上', decorated.find((item) => item.active).value === 'auto-approval');
+  check('active 落在当前值上', decorated.find((item) => item.active).value === 'auto');
   const danger = decorated.find((item) => item.value === 'danger-full-access');
+  const auto = decorated.find((item) => item.value === 'auto');
   check('完全权限要确认', danger.needsConfirm === true);
   check('确认文案随选项一并发送（webview 中不另存一份）',
     danger.confirm && danger.confirm.title === CONFIRM.title && danger.confirm.accept === CONFIRM.accept);
   check('确认文案为中文表述（不是「Are you sure?」）',
     /完全权限/.test(CONFIRM.title) && /不再逐条询问/.test(CONFIRM.body));
-  check('另外三档不需要确认',
-    decorateOptions(REAL, 'read-only').filter((item) => item.needsConfirm).length === 1);
-  check('NEEDS_CONFIRM 只包含 danger-full-access 这一个 id', NEEDS_CONFIRM.size === 1 &&
-    NEEDS_CONFIRM.has('danger-full-access'));
+  check('Auto review 也要独立确认', auto.needsConfirm === true &&
+    auto.confirm?.title === AUTO_CONFIRM.title && auto.confirm?.accept === AUTO_CONFIRM.accept);
+  check('Auto review 的确认明确说明无沙箱、实验性与额外 token',
+    /不使用沙箱/.test(AUTO_CONFIRM.body) && /实验/.test(AUTO_CONFIRM.title) && /token/.test(AUTO_CONFIRM.body));
+  check('只读与工作区修改不需要确认',
+    decorateOptions(REAL, 'read-only').filter((item) => item.needsConfirm).length === 2);
+  check('NEEDS_CONFIRM 只包含 danger-full-access 与 auto', NEEDS_CONFIRM.size === 2 &&
+    NEEDS_CONFIRM.has('danger-full-access') && NEEDS_CONFIRM.has('auto'));
 }
 
 section('4. 当前值不在清单里（内核的 custom 状态）');
