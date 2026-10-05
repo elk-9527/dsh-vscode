@@ -1,0 +1,11 @@
+{
+  "name": "dsh-bridge-echo-example",
+  "version": "0.1.0",
+  "type": "commonjs",
+  "main": "index.js",
+  "license": "MIT",
+  "dependencies": { "dsh-ide-bridge-sdk": "0.1.0" },
+  "peerDependencies": { "@deepseek-ai/cordis": "^4.0.4" },
+  "files": ["index.js", "cordis.patch.yml"],
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+}

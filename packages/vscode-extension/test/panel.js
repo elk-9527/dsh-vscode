@@ -22,7 +22,7 @@ const TEST_EXTENSION_URI = { fsPath: path.resolve(__dirname, '..') };
 const openedLinks = [];
 const configValues = {
   host: '127.0.0.1',
-  port: 47821,
+  port: Number(process.env.DSH_PANEL_PORT || 47821),
   // ⚠️ 自启端口**有意不使用默认的 47831**：该路径的前提是「端口上必须没有监听」，
   // 而 47831 正是面板自启内核的默认端口；用户自行开着 VS Code 面板时，该端口上
   // 即有一个正在使用的内核（实测遇到：§8.5 直接连上了它，于是「命令错误」

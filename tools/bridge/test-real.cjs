@@ -26,10 +26,11 @@ async function run() {
       for (const name of ['package.json','pnpm-lock.yaml','pnpm-workspace.yaml','cordis.yml','cordis.patch.yml']) if(fs.existsSync(path.join(directory,name))) fs.copyFileSync(path.join(directory,name),path.join(backup,name));
     } else locate.runDshSync({command:runtime.command,args:['--profile',profile,'--from-default-profile','web','--dump-config']});
     const pilots = JSON.parse(fs.readFileSync(path.join(ROOT,'build/ide-bridge/pilots/manifest.json')));
-    const candidates = [path.join(ROOT,`build/dsh-acp-door-${versions().door}.tgz`),...pilots.map(p=>path.join(ROOT,p.file))].map(file=>{
+    const candidates = [path.join(ROOT,`build/dsh-acp-door-${versions().door}.tgz`),require('./packages.cjs').packSdk(folder),...pilots.map(p=>path.join(ROOT,p.file))].map(file=>{
       const persistent=path.join(ROOT,'build/install',`${path.basename(file,'.tgz')}-${sha256(file).slice(0,16)}.tgz`);
       fs.mkdirSync(path.dirname(persistent),{recursive:true}); if(!fs.existsSync(persistent)) fs.copyFileSync(file,persistent); return persistent;
     });
+    require('./packages.cjs').pinSdk(directory, candidates[1]);
     locate.runDshSync({command:runtime.command,args:['plugin','--profile',profile,'add',...candidates.map(file=>`file:${file.replace(/\\/g,'/')}`)],timeoutMs:180000});
     for(const pilot of pilots) assert.equal(sha256(path.join(directory,'node_modules',pilot.name,'lib/index.js')),sha256(path.join(ROOT,'build/ide-bridge/pilots',`${pilot.key}-${pilot.candidate}`,'lib/index.js')));
     const manifestFile = path.join(directory,'package.json'), manifest = JSON.parse(fs.readFileSync(manifestFile));

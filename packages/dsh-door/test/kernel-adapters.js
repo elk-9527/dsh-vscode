@@ -123,6 +123,25 @@ await check('sessionQuery get 校验 id，并把找不到会话改成人话', as
   await assert.rejects(() => handler.get('missing'), /找不到会话 missing/);
 });
 
+await check('批量标题列表不重复读取完整正文，单条回放仍保留完整统计', async () => {
+  let fullReads = 0, batches = 0;
+  const handler = createSessionQueryHistory({
+    async listSessions() { return Array.from({ length: 400 }, (_, index) => ({ header: { ...header, id: `batch-${index}` } })); },
+    async readTitleSnapshots(ids) {
+      batches++; assert.equal(ids.length, 200);
+      return ids.map((sessionId, index) => index === 1 ? { sessionId, status: 'rejected', reason: new Error('unavailable') }
+        : { sessionId, status: 'fulfilled', value: { session: { ...header, id: sessionId }, title: { title: 'Batch title' } } });
+    },
+    async readSession(id) { fullReads++; return { session: { ...header, id }, events }; },
+  });
+  const listed = await handler.list({ limit: 200 });
+  assert.equal(batches, 1); assert.equal(fullReads, 0); assert.equal(listed.skipped, 200);
+  assert.equal(listed.sessions[0].title, 'Batch title'); assert.equal(listed.sessions[0].summaryPartial, true);
+  assert.equal(listed.sessions[1].id, 'batch-1'); assert(listed.sessions[1].decodeError);
+  const replay = await handler.get('batch-0'); assert.equal(fullReads, 1); assert.equal(replay.card.turns, 1);
+  assert.equal(replay.card.summaryPartial, undefined);
+});
+
 await check('旧版历史回退在首次启动的空目录上返回空列表', async () => {
   const root = path.join(os.tmpdir(), `dsh-door-empty-${process.pid}-${Date.now()}`);
   try {

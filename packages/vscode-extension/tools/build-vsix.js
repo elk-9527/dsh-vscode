@@ -46,6 +46,7 @@ function copyInto(from, to) {
 const CONTENT_TYPES = {
   '.json': 'application/json',
   '.js': 'application/javascript',
+  '.ts': 'text/plain',
   '.mjs': 'application/javascript',
   '.css': 'text/css',
   '.svg': 'image/svg+xml',

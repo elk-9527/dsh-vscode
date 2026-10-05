@@ -360,7 +360,7 @@ check(
 );
 check(
   '会话一定下来就去读一次权限（换内核/换会话都可能不一样）',
-  /session\.on\('session'[\s\S]{0,220}refreshPermission\(\)/.test(viewSource),
+  /(?:session\.on|onSession)\('session'[\s\S]{0,220}refreshPermission\(\)/.test(viewSource),
   'view.js 的 wire() 里没有在 session 事件上刷新权限',
 );
 

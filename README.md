@@ -6,8 +6,9 @@
 
 本仓库由两个组成部分构成，两者都需要安装。
 
-功能候选版为面板 `0.5.0`、接入点 `0.2.0`：“工具”视图提供代码审查和只读技能浏览，运行记录支持恢复、重试、清理及将报告显式带入对话；保留稳定刷新与内置技能正文读取修复。
+功能候选版为面板 `0.6.0`、接入点 `0.2.1`：“工具”视图提供代码审查和技能浏览，更多菜单提供文件技能管理；运行记录支持恢复、重试、清理及将报告显式带入对话。可选原生 `@dsh` Chat 与完整会话 API 集成在同一个主扩展中，继续保持一个活动栏入口。
 两个试点插件需要安装带 Bridge 注册补丁的本地候选包；市场中的原版插件继续保留原有入口。
+提供方 SDK `0.1.0` 候选包含类型、注册与校验助手、模拟宿主和独立示例，见 [SDK 文档](packages/dsh-bridge-sdk/README.md)。注册表发布与本地候选验收分别记录。
 
 当前维护版本覆盖 DSH `0.1.5-rc.2`、`0.2.0-rc.1` 与 `0.2.0-rc.2`；验收状态见
 [`compat/versions.json`](compat/versions.json)。DSH 0.2 使用 v4 会话格式和
@@ -17,6 +18,7 @@
 | --- | --- | --- |
 | [`packages/vscode-extension`](packages/vscode-extension)（`dsh-panel`） | VS Code 扩展：侧边栏面板，本身即 ACP 客户端 | VS Code 市场 / `.vsix` |
 | [`packages/dsh-door`](packages/dsh-door)（`dsh-acp-door`） | DSH 插件：在运行中的内核上提供仅监听 `127.0.0.1` 的 ACP 接入点 | `dsh plugin add` / DSH 插件市场 |
+| [`packages/dsh-bridge-sdk`](packages/dsh-bridge-sdk) | 第三方 Provider 类型、注册、契约验证及技能文件助手 | 插件的 npm 依赖；当前为本地候选 |
 
 ## 为什么需要两个组成部分
 

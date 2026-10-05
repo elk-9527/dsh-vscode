@@ -388,7 +388,7 @@
     const when = fmtSessionTime(card.lastTime || card.mtime);
     const bits = [
       when,
-      `${card.turns || 0} 回合`,
+      card.summaryPartial ? '' : `${card.turns || 0} 回合`,
       tailPath(card.cwd),
       card.preset && card.preset !== 'standard' ? card.preset : '',
     ].filter(Boolean);

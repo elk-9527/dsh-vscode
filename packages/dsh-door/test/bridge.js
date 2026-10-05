@@ -18,6 +18,7 @@ const descriptor = { id: 'test.run', title: '测试运行', kind: 'action', risk
   supportsCancellation: true, inputSchema: { type: 'object', properties: { label: { type: 'string', maxLength: 5 } }, additionalProperties: false } };
 const dispose = bridge.registerProvider({ id: 'test', name: '测试', version: '1.0.0', capabilities: [descriptor], invoke: async (_id, _input, context) => {
   calls++; context.emit({ type: 'progress', payload: { message: '运行中' } });
+  assert.equal(context.clientId, 'a'); assert.equal(context.userInitiated, true); assert.equal(context.approved, false);
   return new Promise(resolve => { complete = resolve; context.signal.addEventListener('abort', () => resolve({ cancelled: true }), { once: true }); });
 } });
 const request = { requestId: 'req1', capabilityId: 'test.run', input: { label: 'test' }, context: { cwd: home, sessionId: 's1', workspaceTrusted: true, userInitiated: true } };

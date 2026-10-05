@@ -43,11 +43,15 @@ async function run() {
       const file = path.join(sourceProfile, name); if (fs.existsSync(file)) fs.copyFileSync(file, path.join(profile, name));
     }
     // 在隔离配置集中由正式插件管理器安装，避免复制依赖后沿用原虚拟仓库位置。
+    const sdkFile = require('./packages.cjs').packSdk(folder);
+    const doorPacked = JSON.parse(locate.runDshSync({ command: 'npm', args: ['pack', path.join(ROOT, 'packages/dsh-door'), '--pack-destination', folder, '--json'] }));
+    const pilotFiles = JSON.parse(fs.readFileSync(path.join(ROOT, 'build/ide-bridge/pilots/manifest.json'), 'utf8')).map(item => path.join(ROOT, item.file));
     const skillPilot = JSON.parse(fs.readFileSync(path.join(ROOT, 'build/ide-bridge/pilots/manifest.json'), 'utf8')).find(item => item.key === 'skills');
     const pilotFile = path.join(ROOT, skillPilot.file); assert.equal(sha256(pilotFile), skillPilot.packageSha256);
     const previousHome = process.env.DSH_HOME;
+    require('./packages.cjs').pinSdk(profile, sdkFile);
     process.env.DSH_HOME = home;
-    try { locate.runDshSync({ command: runtime.command, args: ['plugin', '--profile', 'scenario', 'add', `file:${pilotFile.replace(/\\/g, '/')}`], timeoutMs: 180000 }); }
+    try { locate.runDshSync({ command: runtime.command, args: ['plugin', '--profile', 'scenario', 'add', ...[sdkFile, path.join(folder, doorPacked[0].filename), ...pilotFiles].map(file => `file:${file.replace(/\\/g, '/')}`)], timeoutMs: 180000 }); }
     finally { if (previousHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previousHome; }
     const credentials = path.join(originalHome, '.credentials.yaml'); if (fs.existsSync(credentials)) fs.copyFileSync(credentials, path.join(home, '.credentials.yaml'));
     const patch = path.join(folder, 'model.patch.yml'); fs.copyFileSync(sourcePatch, patch);
@@ -56,7 +60,7 @@ async function run() {
     for (const name of ['dsh-acp-door', '@michengai/dsh-code-review', '@linxin666/dsh-client-ui-skill-explorer']) {
       pilotVersions[name] = JSON.parse(fs.readFileSync(path.join(profile, 'node_modules', name, 'package.json'), 'utf8')).version;
     }
-    assert.equal(pilotVersions['dsh-acp-door'], '0.2.0');
+    assert.equal(pilotVersions['dsh-acp-door'], require('../../packages/dsh-door/package.json').version);
     assert.equal(pilotVersions[skillPilot.name], skillPilot.candidate);
     report.runtime = { dsh: runtime.version, distribution: runtime.distribution, packages: pilotVersions };
     port = await freePort();
@@ -84,9 +88,9 @@ async function run() {
     const target = path.join(extensions, extensionName);
     for (const file of shipFiles(source)) { const destination = path.join(target, file); fs.mkdirSync(path.dirname(destination), { recursive: true }); fs.copyFileSync(path.join(source, file), destination); assert.equal(sha256(destination), sha256(path.join(source, file))); }
     const entry = path.join(target, 'src/extension.js'), originalEntry = fs.readFileSync(entry, 'utf8');
-    assert.equal(originalEntry.split('  return Object.freeze({').length, 2);
-    fs.writeFileSync(entry, originalEntry.replace('  return Object.freeze({',
-      "  process[Symbol.for('dsh.scenario.observer')] = { nativeViews, view, context, vscode };\r\n  return Object.freeze({"));
+    assert.equal(originalEntry.split('  return api.exports;').length, 2);
+    fs.writeFileSync(entry, originalEntry.replace('  return api.exports;',
+      "  process[Symbol.for('dsh.scenario.observer')] = { nativeViews, view, context, vscode, chatRegistration };\r\n  return api.exports;"));
     report.extensionArtifact = { source: candidate ? 'candidate-vsix' : 'installed', version: manifest.version, shippedFiles: shipFiles(source).length, copiedBytesMatchArtifactBeforeInstrumentation: true,
       runtimeFilesInstrumented: ['src/extension.js'], observerStatementAddedOnlyInIsolation: true, productBehaviorReplaced: false };
     fs.mkdirSync(path.join(userData, 'User/globalStorage'), { recursive: true });

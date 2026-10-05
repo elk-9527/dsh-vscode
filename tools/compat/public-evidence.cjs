@@ -11,7 +11,7 @@ function publicEvidence(report) {
   const source = report.source || {}, runtime = report.runtime || {};
   return { schemaVersion: 1, status: status(report.status),
     source: { commit: clean(source.commit, /^[a-f0-9]{40}$/), fingerprint: digest(source.fingerprint) },
-    packages: { panel: version(report.packages?.panel), door: version(report.packages?.door) },
+    packages: { panel: version(report.packages?.panel), door: version(report.packages?.door), sdk: version(report.packages?.sdk) },
     runtime: { version: version(runtime.version), acpVersion: version(runtime.acpVersion), distribution: clean(runtime.distribution, /^(?:desktop|npm)$/) },
     stages: (Array.isArray(report.stages) ? report.stages : []).map(stage => ({ name: clean(stage.name, /^[a-z][a-z0-9-]{0,63}$/), status: status(stage.status) })).filter(stage => stage.name && stage.status),
     artifacts: (Array.isArray(report.artifacts) ? report.artifacts : []).map(item => ({ kind: clean(item.kind, /^(?:tgz|vsix|pilot)$/), sha256: digest(item.sha256) })).filter(item => item.kind && item.sha256),

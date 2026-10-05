@@ -25,6 +25,10 @@ const withDsh = args.includes('--all');
 const strict = args.includes('--strict');
 
 const suites = [
+  { name: 'Provider SDK 与技能写入恢复', file: '../dsh-bridge-sdk/test/contracts.js', always: true },
+  { name: '公共会话 API 与取消边界', file: 'test/public-api.js', always: true },
+  { name: '原生 Chat 与面板联动', file: 'test/native-chat.js', always: true },
+  { name: '技能草稿预览与确认', file: 'test/skill-management.js', always: true },
   { name: 'Bridge 运行与鉴权', file: '../dsh-door/test/bridge.js', always: true },
   { name: '共享连接与审查投影', file: 'test/bridge-service.js', always: true },
   { name: '配置诊断与精确版本安装', file: 'test/bridge-profiles.js', always: true },

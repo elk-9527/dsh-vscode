@@ -11,52 +11,52 @@
       "distribution": "npm",
       "status": "passed",
       "evidence": [
-        "compat/evidence/public-dsh-0.1.5-rc.2-npm-door-0.2.0-panel-0.4.0.json"
+        "compat/evidence/public-dsh-0.1.5-rc.2-npm-door-0.2.1-panel-0.6.0.json"
       ],
-      "door": "0.2.0",
-      "panel": "0.4.0",
+      "door": "0.2.1",
+      "panel": "0.6.0",
       "acp": "0.1.5-rc.3",
-      "testedAt": "2026-10-04T02:37:11.848Z",
-      "fingerprint": "1e089f62f45a69deea09eaaf1fcdcfab2f93755aa84b6d14f6841e12eec3f47f"
+      "testedAt": "2026-10-05T16:45:41.306Z",
+      "fingerprint": "dedec87e4ec01f78f006ee2bfc7670d2a1d094c7b82e812bcc9d1e4e00a57470"
     },
     {
       "dsh": "0.2.0-rc.1",
       "distribution": "npm",
       "status": "passed",
       "evidence": [
-        "compat/evidence/public-dsh-0.2.0-rc.1-npm-door-0.2.0-panel-0.4.0.json"
+        "compat/evidence/public-dsh-0.2.0-rc.1-npm-door-0.2.1-panel-0.6.0.json"
       ],
-      "door": "0.2.0",
-      "panel": "0.4.0",
+      "door": "0.2.1",
+      "panel": "0.6.0",
       "acp": "0.2.0-rc.1",
-      "testedAt": "2026-10-04T02:37:26.413Z",
-      "fingerprint": "1e089f62f45a69deea09eaaf1fcdcfab2f93755aa84b6d14f6841e12eec3f47f"
+      "testedAt": "2026-10-05T16:45:52.535Z",
+      "fingerprint": "dedec87e4ec01f78f006ee2bfc7670d2a1d094c7b82e812bcc9d1e4e00a57470"
     },
     {
       "dsh": "0.2.0-rc.2",
       "distribution": "npm",
       "status": "passed",
       "evidence": [
-        "compat/evidence/public-dsh-0.2.0-rc.2-npm-door-0.2.0-panel-0.4.0.json"
+        "compat/evidence/public-dsh-0.2.0-rc.2-npm-door-0.2.1-panel-0.6.0.json"
       ],
-      "door": "0.2.0",
-      "panel": "0.4.0",
+      "door": "0.2.1",
+      "panel": "0.6.0",
       "acp": "0.2.0-rc.2",
-      "testedAt": "2026-10-04T02:37:40.998Z",
-      "fingerprint": "1e089f62f45a69deea09eaaf1fcdcfab2f93755aa84b6d14f6841e12eec3f47f"
+      "testedAt": "2026-10-05T16:46:03.561Z",
+      "fingerprint": "dedec87e4ec01f78f006ee2bfc7670d2a1d094c7b82e812bcc9d1e4e00a57470"
     },
     {
       "dsh": "0.2.0-rc.2",
       "distribution": "desktop",
       "status": "passed",
       "evidence": [
-        "compat/evidence/public-dsh-0.2.0-rc.2-desktop-door-0.2.0-panel-0.4.0.json"
+        "compat/evidence/public-dsh-0.2.0-rc.2-desktop-door-0.2.1-panel-0.6.0.json"
       ],
-      "door": "0.2.0",
-      "panel": "0.4.0",
+      "door": "0.2.1",
+      "panel": "0.6.0",
       "acp": "0.2.0-rc.2",
-      "testedAt": "2026-10-04T02:37:53.186Z",
-      "fingerprint": "1e089f62f45a69deea09eaaf1fcdcfab2f93755aa84b6d14f6841e12eec3f47f"
+      "testedAt": "2026-10-05T16:46:15.827Z",
+      "fingerprint": "dedec87e4ec01f78f006ee2bfc7670d2a1d094c7b82e812bcc9d1e4e00a57470"
     }
   ]
 }

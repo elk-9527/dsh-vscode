@@ -375,6 +375,7 @@ class DshPanelView {
     // 而不是把一串空格作为路径发送。
     const configured = String(this.config().cwd || '').trim();
     if (configured) return configured;
+    if (this.sessionCwd && vscode.workspace.getWorkspaceFolder?.(vscode.Uri.file(this.sessionCwd))) return this.sessionCwd;
     const folders = vscode.workspace.workspaceFolders;
     if (folders && folders.length > 0) return folders[0].uri.fsPath;
     return require('node:os').homedir();
@@ -890,20 +891,24 @@ class DshPanelView {
 
   /** 把会话与客户端的事件转发到界面。 */
   wire(session, client) {
-    session.on('user', (payload) => this.post({ type: 'user', text: payload.text }));
-    session.on('assistant', (payload) => this.post({ type: 'assistant', id: payload.id }));
-    session.on('text', (payload) => this.post({ type: 'text', id: payload.id, delta: payload.delta }));
-    session.on('thinking', (payload) =>
+    this.unwire(session);
+    const handlers = [];
+    this.sessionBindings ||= new Map();
+    const onSession = (name, listener) => { session.on(name, listener); handlers.push(() => session.off(name, listener)); };
+    onSession('user', (payload) => this.post({ type: 'user', text: payload.text }));
+    onSession('assistant', (payload) => this.post({ type: 'assistant', id: payload.id }));
+    onSession('text', (payload) => this.post({ type: 'text', id: payload.id, delta: payload.delta }));
+    onSession('thinking', (payload) =>
       this.post({ type: 'thinking', id: payload.id, delta: payload.delta }),
     );
-    session.on('tool', (payload) => this.post({ type: 'tool', id: payload.id, tool: payload.tool }));
-    session.on('done', (payload) => this.post({ type: 'done', id: payload.id, status: payload.status }));
-    session.on('usage', (payload) =>
+    onSession('tool', (payload) => this.post({ type: 'tool', id: payload.id, tool: payload.tool }));
+    onSession('done', (payload) => this.post({ type: 'done', id: payload.id, status: payload.status }));
+    onSession('usage', (payload) =>
       this.post({ type: 'usage', used: payload.used, size: payload.size }),
     );
-    session.on('config', (payload) => this.post({ type: 'config', configOptions: payload.configOptions }));
-    session.on('presets', (payload) => this.onPresets(payload));
-    session.on('busy', (payload) => {
+    onSession('config', (payload) => this.post({ type: 'config', configOptions: payload.configOptions }));
+    onSession('presets', (payload) => this.onPresets(payload));
+    onSession('busy', (payload) => {
       this.post({ type: 'busy', busy: payload.busy });
       this.post({
         type: 'status',
@@ -911,14 +916,16 @@ class DshPanelView {
         detail: payload.busy ? '工作中…' : '就绪',
       });
     });
-    session.on('session', (payload) => {
+    onSession('session', (payload) => {
       this.log('info', `当前会话 ${payload.sessionId}`);
       // 会话确定后（新建/恢复/切换内核）读取一次权限：权限属于内核状态，
       // 更换内核或更换会话时取值可能不同，不能沿用上一次的结果。
       void this.refreshPermission();
     });
 
-    client.on('permission', (requestId, params) => {
+    const onPermission = (requestId, params) => {
+      if (params?.sessionId && params.sessionId !== session.sessionId) return;
+      if (session.externalPermissionHandler) return;
       // 视图可能在模型发出权限请求之前被折叠/销毁。此时没有人能够点击选项，
       // 必须立即回“取消”；仅把消息 post() 给不存在的视图会使内核永久等待。
       if (!this.view) {
@@ -928,8 +935,10 @@ class DshPanelView {
       }
       this.pendingPermissionRequests.set(requestId, { client, session, params });
       this.showNextPendingPermissionRequest();
-    });
+    };
+    client.on('permission', onPermission); handlers.push(() => client.off('permission', onPermission));
     const onClose = (reason) => {
+      this.unwire(session);
       this.clientCloseHandlers.delete(client);
       client.off('close', onClose);
       this.dropPendingPermissionRequests(client);
@@ -949,6 +958,22 @@ class DshPanelView {
     };
     this.clientCloseHandlers.set(client, onClose);
     client.on('close', onClose);
+    handlers.push(() => { client.off('close', onClose); if (this.clientCloseHandlers.get(client) === onClose) this.clientCloseHandlers.delete(client); });
+    this.sessionBindings.set(session, handlers);
+  }
+  unwire(session) { for (const dispose of this.sessionBindings?.get(session) || []) dispose(); this.sessionBindings?.delete(session); }
+
+  /** 同一连接的活动会话直接交给面板，不重复 session/resume。 */
+  async adoptSession(session, { cwd, preset } = {}) {
+    if (!vscode.workspace.isTrusted || !vscode.workspace.getWorkspaceFolder(vscode.Uri.file(cwd))) throw new Error('会话目录不在受信任工作区');
+    if (session.client !== this.connections.client || !session.client.isConnected || this.session?.busy || session.busy) throw new Error('当前无法切换会话');
+    if (this.session !== session) {
+      this.cancelPendingPermissionRequests(undefined, '切换会话'); this.unwire(this.session);
+      this.session = session; this.client = session.client; this.wire(session, session.client); this.connections.setSession('panel', session);
+    }
+    this.sessionCwd = cwd; this.preset = preset; this.turnSent = session.messages.size > 0;
+    this.resumeTarget = undefined; this.post({ type: 'meta', cwd });
+    await this.sendHistoryReplay(session.sessionId); await this.refreshPermission(); this.pushSnapshot();
   }
 
   /**
@@ -1039,7 +1064,8 @@ class DshPanelView {
     if (!session) return;
     // 自此该会话已「发送过消息」：更换预设时不能再静默重新开启该会话。
     this.turnSent = true;
-    await session.send(text, { attachments: items });
+    if (typeof this.connections.runSession === 'function') await this.connections.runSession(session, () => session.send(text, { attachments: items }));
+    else await session.send(text, { attachments: items });
   }
 
   // ── 历史会话 ──────────────────────────────────────────
@@ -1144,18 +1170,20 @@ class DshPanelView {
    * 而无记录（或仅有记录而无上下文）都属于不完整的结果。resume 失败（内核已重启、
    * 内存中不存在该会话）时明确说明「以上仅为回放」，不将回放表示为恢复成功。
    */
-  async resumeHistory(id) {
+  async resumeHistory(id, options = {}) {
     const session = this.session || await this.ensureConnection();
     if (!session) return;
     if (session.busy) {
       this.post({ type: 'notice', text: '当前正在工作，结束后再进行恢复。' });
       return;
     }
+    if (options.cwd && (!vscode.workspace.isTrusted || !vscode.workspace.getWorkspaceFolder(vscode.Uri.file(options.cwd)))) throw new Error('恢复目录不在受信任工作区');
     // 忙碌判断必须早于回放：回放会清空当前转录。若先回放再拒绝恢复，
     // 用户正在进行的回答会被历史内容覆盖，随后到达的增量又混进回放中。
     await this.sendHistoryReplay(id);
     try {
-      await session.resume(String(id || ''), this.workdir(), { preset: this.wantedPreset() });
+      await session.resume(String(id || ''), options.cwd || this.workdir(), { preset: options.preset || this.wantedPreset() });
+      if (options.cwd) { this.sessionCwd = options.cwd; this.post({ type: 'meta', cwd: options.cwd }); }
       this.turnSent = true;
       this.resumeTarget = undefined;
       this.post({ type: 'notice', text: '已恢复该历史会话。' });
@@ -1619,6 +1647,7 @@ class DshPanelView {
   teardown() {
     this.cancelPendingPermissionRequests(undefined, '连接正在关闭');
     if (this.session) {
+      this.unwire(this.session);
       this.session.dispose();
       this.session = undefined;
     }

@@ -127,7 +127,7 @@ export class IdeBridge {
     const controller = new AbortController();
     if (item.kind === 'resource') {
       return { mode: 'immediate', value: jsonValue(await provider.invoke(item.id, input, {
-        cwd, sessionId: context.sessionId, agent, workspaceTrusted: context.workspaceTrusted === true, signal: controller.signal, emit() {},
+        cwd, sessionId: context.sessionId, agent, clientId: state.bridgeOwner, userInitiated: context.userInitiated === true, approved: context.approved === true, workspaceTrusted: context.workspaceTrusted === true, signal: controller.signal, emit() {},
       })) };
     }
     if ([...this.operations.values()].filter(op => !terminal(op.status)).length >= 32 || this.operations.size >= 1000) fail(-32045, '当前运行数量达到上限');
@@ -139,7 +139,7 @@ export class IdeBridge {
     this.emit(op, 'started');
     // 执行脱离请求流；断线不取消运行，新的已鉴权连接可查询相同身份的结果。
     Promise.resolve().then(() => provider.invoke(item.id, input, { cwd, agent, sessionId: context.sessionId,
-      workspaceTrusted: true, signal: controller.signal,
+      clientId: state.bridgeOwner, userInitiated: context.userInitiated === true, approved: context.approved === true, workspaceTrusted: true, signal: controller.signal,
       emit: event => { if (!['progress', 'artifact'].includes(event?.type)) fail(-32046, '插件事件无效'); this.emit(op, event.type, event.payload); },
     })).then(result => this.finish(op, controller.signal.aborted ? 'cancelled' : 'completed', result ?? {}),
       () => this.finish(op, controller.signal.aborted ? 'cancelled' : 'failed', { reason: 'provider-failed' }))

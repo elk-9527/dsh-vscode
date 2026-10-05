@@ -12,6 +12,8 @@ const path = require('node:path');
 const REPO = path.resolve(__dirname, '..', '..', '..');
 
 const roots = [
+  'packages/dsh-bridge-sdk',
+  'tools/bridge',
   'packages/dsh-door',
   'packages/vscode-extension/src',
   'packages/vscode-extension/media',
@@ -22,7 +24,7 @@ const roots = [
   'compat',
   '.github/workflows',
 ].map((r) => path.join(REPO, r));
-const EXTS = new Set(['.js', '.mjs', '.cjs', '.css', '.json', '.md', '.yml', '.yaml', '.html']);
+const EXTS = new Set(['.js', '.mjs', '.cjs', '.ts', '.css', '.json', '.md', '.yml', '.yaml', '.html']);
 
 const mixed = [];
 const crlfOnly = [];

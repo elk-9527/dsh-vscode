@@ -39,12 +39,20 @@ function install(options) {
     if (sha256(persistent) !== item.packageSha256) throw new Error('持久试点包摘要不匹配');
     return { ...item, persistent };
   }) : [];
+  let sdkArchive;
+  if (pilots.length) {
+    const source = require('../bridge/packages.cjs').packSdk(path.join(ROOT, 'build'));
+    sdkArchive = path.join(ROOT, 'build/install', `${path.basename(source, '.tgz')}-${sha256(source).slice(0, 16)}.tgz`);
+    if (!fs.existsSync(sdkArchive)) fs.copyFileSync(source, sdkArchive);
+    if (sha256(source) !== sha256(sdkArchive)) throw new Error('SDK 安装包摘要不匹配');
+  }
   const runtime = resolveRuntime({ dsh: options.dsh || '0.2.0-rc.2', command: options.command });
   const backup = path.join(ROOT, 'backup', `compat-${new Date().toISOString().replace(/[:.]/g, '-')}`);
   fs.mkdirSync(backup, { recursive: true });
   const record = { time: new Date().toISOString(), source: sourceState(), packages: versions(), backup: path.relative(ROOT, backup), originals: [], operations: [],
     artifacts: [{ kind: 'tgz', file: path.relative(ROOT, tgz).replace(/\\/g, '/'), sha256: sha256(tgz) }, { kind: 'vsix', file: path.relative(ROOT, vsix).replace(/\\/g, '/'), sha256: sha256(vsix) }] };
   record.artifacts.push(...pilots.map(item => ({ kind: 'pilot', name: item.name, version: item.candidate, file: item.file, sha256: item.packageSha256 })));
+  if (sdkArchive) record.artifacts.push({ kind: 'tgz', name: 'dsh-ide-bridge-sdk', version: versions().sdk, file: path.relative(ROOT, sdkArchive), sha256: sha256(sdkArchive) });
   for (const profile of ['desktop', 'vscode-panel']) {
     const directory = path.join(home, 'profiles', profile);
     for (const name of ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'cordis.yml', 'cordis.patch.yml']) {
@@ -57,6 +65,7 @@ function install(options) {
     const pkg = json(path.join(directory, 'package.json'));
     const installed = path.join(directory, 'node_modules/dsh-acp-door');
     if (fs.existsSync(installed)) fs.cpSync(installed, path.join(backup, profile, 'dsh-acp-door'), { recursive: true });
+    if (sdkArchive && fs.existsSync(path.join(directory, 'node_modules/dsh-ide-bridge-sdk'))) fs.cpSync(path.join(directory, 'node_modules/dsh-ide-bridge-sdk'), path.join(backup, profile, 'dsh-ide-bridge-sdk'), { recursive: true });
     for (const pilot of pilots) {
       const original = path.join(directory, 'node_modules', pilot.name);
       if (fs.existsSync(original)) fs.cpSync(original, path.join(backup, profile, 'pilots', pilot.key), { recursive: true });
@@ -72,6 +81,7 @@ function install(options) {
   try {
     for (const profile of ['desktop', 'vscode-panel']) {
       const directory = path.join(home, 'profiles', profile);
+      const sdkPolicy = sdkArchive && require('../bridge/packages.cjs').pinSdk(directory, sdkArchive);
       const extra = [];
       if (options['offline-exemption']) {
         if (options['offline-exemption'] !== 'billion-context@0.1.175') throw new Error('此安装器只支持固定离线豁免 billion-context@0.1.175');
@@ -82,7 +92,7 @@ function install(options) {
         extra.push('--offline', ...mergeExclusions([...exclusions, options['offline-exemption']]).map((spec) => `--config.minimum-release-age-exclude=${spec}`));
         record.exemption = { version: options['offline-exemption'], offline: true, persisted: false };
       }
-      locate.runDshSync({ command: runtime.command, args: ['plugin', '--profile', profile, 'add', ...[installTgz,...pilots.map(item=>item.persistent)].map(file=>`file:${file.replace(/\\/g, '/')}`), ...extra], timeoutMs: 180000 });
+      locate.runDshSync({ command: runtime.command, args: ['plugin', '--profile', profile, 'add', ...[installTgz,...(sdkArchive ? [sdkArchive] : []),...pilots.map(item=>item.persistent)].map(file=>`file:${file.replace(/\\/g, '/')}`), ...extra], timeoutMs: 180000 });
       const installed = json(path.join(home, 'profiles', profile, 'node_modules/dsh-acp-door/package.json'));
       if (installed.version !== versions().door) throw new Error(`${profile} 安装版本不匹配`);
       const files = ['package.json', 'cordis.patch.yml', 'README.md', 'CHANGELOG.md', 'LICENSE'];
@@ -108,7 +118,13 @@ function install(options) {
         record.operations.push({ profile, change: 'enable-acp-door', status: 'passed' });
       }
       const oldPolicy = path.join(backup, profile, 'pnpm-workspace.yaml');
-      if (sha256(oldPolicy) !== sha256(path.join(directory, 'pnpm-workspace.yaml'))) throw new Error(`${profile} 的策略文件发生非预期变化`);
+      if (sdkPolicy ? fs.readFileSync(path.join(directory, 'pnpm-workspace.yaml'), 'utf8') !== sdkPolicy.updated : sha256(oldPolicy) !== sha256(path.join(directory, 'pnpm-workspace.yaml'))) throw new Error(`${profile} 的策略文件发生非预期变化`);
+      if (sdkArchive) {
+        const source = path.join(ROOT, 'packages/dsh-bridge-sdk'), target = path.join(directory, 'node_modules/dsh-ide-bridge-sdk');
+        const compare = base => { for (const name of fs.readdirSync(path.join(source, base))) { const relative = path.join(base, name); if (fs.statSync(path.join(source, relative)).isDirectory()) compare(relative); else if (sha256(path.join(source, relative)) !== sha256(path.join(target, relative))) throw new Error('SDK 装机内容不匹配'); } };
+        compare('lib'); for (const name of ['package.json', 'README.md', 'LICENSE']) if (sha256(path.join(source, name)) !== sha256(path.join(target, name))) throw new Error('SDK 发行元数据不匹配');
+        record.operations.push({ profile, sdkVersion: versions().sdk, localSdkOverride: true, status: 'passed' });
+      }
       for (const pilot of pilots) {
         const candidate = path.join(ROOT, 'build/ide-bridge/pilots', `${pilot.key}-${pilot.candidate}`);
         const target = path.join(directory, 'node_modules', pilot.name);

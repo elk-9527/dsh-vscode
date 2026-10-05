@@ -14,7 +14,7 @@ const SKILLS = 'linxin.skill-explorer.';
 class BridgeViews {
   constructor({ context, connections, panel, log }) {
     this.context = context; this.connections = connections; this.panel = panel; this.log = log;
-    this.catalog = { capabilities: [] }; this.documents = new Map(); this.reports = new Map(); this.reportOwners = new Map();
+    this.catalog = { capabilities: [] }; this.documents = new Map(); this.reports = new Map(); this.reportOwners = new Map(); this.skillDrafts = new Map();
     const stored = context.workspaceState.get('dshPanel.bridge.records.v2');
     this.operations = new OperationStore({ ...(stored || { records: context.workspaceState.get('dshPanel.bridge.active', []).map(op => ({ ...op, status: 'running' })) }), onRemove: op => this.cleanupReport(op) });
     this.capabilityEmitter = new vscode.EventEmitter(); this.operationEmitter = new vscode.EventEmitter();
@@ -65,6 +65,7 @@ class BridgeViews {
       ...[
         ['refresh', () => this.refresh()], ['review', () => this.review()], ['skills', () => this.searchSkills()],
         ['readSkill', item => this.readSkill(item)], ['openReport', id => this.openReport(id)], ['attachReview', item => this.attachReview(item)],
+        ['manageSkills', () => this.manageSkills()], ['applySkillDraft', () => this.applySkillDraft()],
         ['cancel', item => this.cancel(typeof item === 'string' ? item : item?.id)], ['diagnose', () => this.diagnose()],
         ['diagnoseConfig', () => this.diagnoseConfig()], ['copyDiagnostics', () => this.copyDiagnostics()],
         ['installGuide', () => this.installGuide()], ['reloadOwned', () => this.reloadOwned()],
@@ -79,6 +80,7 @@ class BridgeViews {
         }
       }),
       vscode.workspace.onDidCloseTextDocument(document => {
+        this.skillDrafts.delete(document.uri.toString());
         if (document.uri.scheme === 'dsh-result' && ![...this.operations.values()].some(op => op.uri?.toString() === document.uri.toString())) this.documents.delete(document.uri.toString());
       }),
       vscode.workspace.onDidGrantWorkspaceTrust?.(() => this.capabilityEmitter.fire()) || { dispose() {} },
@@ -92,7 +94,8 @@ class BridgeViews {
         if (choice) await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri), { preview: true });
       }); return;
     }
-    void vscode.window.showErrorMessage(error?.code === -32045 ? '当前会话已有运行，请等待或取消。'
+    void vscode.window.showErrorMessage(['manageSkills', 'applySkillDraft'].includes(action) ? '技能修改未完成，请刷新列表并重新预览。原内容保留在技能或恢复目录。'
+      : error?.code === -32045 ? '当前会话已有运行，请等待或取消。'
       : error?.code === -32044 ? '该操作需要受信任的工作区。'
       : error?.code === -32043 ? '当前连接没有提供此能力，请检查已安装插件。'
       : error?.code === -32047 ? '运行记录已经过期，请重新运行。'
@@ -177,7 +180,7 @@ class BridgeViews {
     }
     this.retained.delete(id); this.connections.release(id);
   }
-  async invoke(id, input, { cwd, sessionId } = {}) {
+  async invoke(id, input, { cwd, sessionId, approved = false } = {}) {
     const consumer = `bridge-request:${randomUUID()}`; this.retain(consumer);
     try {
       const bridge = await this.bridge();
@@ -186,7 +189,7 @@ class BridgeViews {
       const state = capabilityState({ capability, connected: true, supported: bridge.supported, trusted: vscode.workspace.isTrusted });
       if (!state.executable) throw Object.assign(new Error(), { code: state.state === 'restricted' ? -32044 : -32043 });
       return await bridge.request('invoke', { requestId: randomUUID(), capabilityId: id, input,
-        context: { cwd: cwd || this.panel.workdir(), sessionId, workspaceTrusted: vscode.workspace.isTrusted === true, userInitiated: true } });
+        context: { cwd: cwd || this.panel.workdir(), sessionId, workspaceTrusted: vscode.workspace.isTrusted === true, userInitiated: true, approved: approved === true } });
     } finally { this.release(consumer); }
   }
   async review() {
@@ -204,8 +207,9 @@ class BridgeViews {
     }
     return this.reviewRequest({ cwd: selected, input });
   }
-  async reviewRequest({ cwd, input, userInitiated = true, retryOf }) {
+  async reviewRequest({ cwd, input, userInitiated = true, retryOf, signal }) {
     if (!vscode.workspace.isTrusted || userInitiated !== true) throw Object.assign(new Error(), { code: -32044 });
+    if (signal?.aborted) throw Object.assign(new Error('审查已取消'), { code: -32800 });
     if (!vscode.workspace.getWorkspaceFolder(vscode.Uri.file(cwd))) throw new Error('审查目录不在工作区内');
     // 先占用选定目录，避免连续点击在异步快照阶段同时进入。
     const selectedKey = process.platform === 'win32' ? cwd.toLowerCase() : cwd;
@@ -224,23 +228,46 @@ class BridgeViews {
       await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri), { preview: true });
     }
     await this.bridge();
+    if (!vscode.workspace.isTrusted || signal?.aborted) throw Object.assign(new Error('审查无法继续'), { code: signal?.aborted ? -32800 : -32044 });
     const session = await this.connections.sessionFor(`review:${snapshot.cwd}`, snapshot.cwd, { preset: this.panel.wantedPreset(), provider: this.panel.config().provider, model: this.panel.config().model });
+    const releasePermissions = this.reviewPermissions(session);
+    try {
     const run = await this.invoke(REVIEW, input, { cwd: snapshot.cwd, sessionId: session.sessionId });
     if (run.mode !== 'operation') throw new Error('运行协议无效');
     const existing = this.operations.get(run.operationId);
     const connection = this.connections.snapshot();
     this.operations.set(run.operationId, { ...existing, id: run.operationId, title: '代码审查', status: existing?.status || 'running', seq: existing?.seq || 0, cwd: snapshot.cwd, fingerprint: snapshot.fingerprint, input: { ...input }, retryOf, instanceId: connection.instanceId, clientId: this.connections.clientId, startedAt: existing?.startedAt || new Date().toISOString() });
     this.retain(run.operationId); await this.saveActive(); this.operationEmitter.fire();
-    await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: '正在审查代码变更', cancellable: true }, async (_progress, token) => {
+    const abort = () => { void this.cancel(run.operationId).catch(error => this.showError(error)); };
+    signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) abort();
+    try { await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: '正在审查代码变更', cancellable: true }, async (_progress, token) => {
       const cancelSubscription = token.onCancellationRequested(() => this.cancel(run.operationId).catch(error => this.showError(error)));
       try {
         const result = await this.waitOperation(run.operationId);
         if (result.status === 'completed' && result.result) await this.presentReport(run.operationId, result.result);
         else if (result.status === 'failed') throw Object.assign(new Error(), { code: -32048 });
       } finally { cancelSubscription.dispose(); if (TERMINAL.has(this.operations.get(run.operationId)?.status)) this.release(run.operationId); await this.saveActive(); }
-    });
+    }); } finally { signal?.removeEventListener('abort', abort); }
     return this.operations.get(run.operationId);
+    } finally { releasePermissions(); }
     } finally { this.runningRepositories.delete(selectedKey); this.release(`review-pending:${snapshot.cwd}`); }
+  }
+  reviewPermissions(session) {
+    if (!session.client?.on) return () => {};
+    const token = vscode.CancellationTokenSource ? new vscode.CancellationTokenSource() : undefined;
+    const pending = new Set(); let closed = false;
+    const receive = async (id, params) => {
+      if (params?.sessionId !== session.sessionId) return;
+      let decline;
+      const cancellation = new Promise(resolve => { decline = () => resolve(undefined); pending.add(decline); });
+      let selected;
+      try { selected = await Promise.race([vscode.window.showQuickPick((params.options || []).map(option => ({ label: option.name, optionId: option.optionId })), { placeHolder: params.toolCall?.title || '审查请求执行工具', ignoreFocusOut: true }, token?.token), cancellation]); } catch {}
+      pending.delete(decline);
+      const answer = !closed && vscode.workspace.isTrusted && params.options?.some(option => option.optionId === selected?.optionId) ? selected.optionId : undefined;
+      if (session.client.isConnected) session.answerPermission(id, answer);
+    };
+    session.client.on('permission', receive);
+    return () => { closed = true; token?.cancel(); token?.dispose(); for (const decline of pending) decline(); session.client.off('permission', receive); };
   }
   waitOperation(id) {
     if (this.waiters.has(id)) return this.waiters.get(id);
@@ -354,6 +381,68 @@ class BridgeViews {
     const result = await this.invoke(`${SKILLS}read`, { skillId: skill.id }, { cwd });
     const uri = this.document(`skill/${encodeURIComponent(skill.id)}.md`, String(result.value?.content || '该技能没有可读取的正文。'));
     await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri), { preview: true });
+  }
+  async manageSkills() {
+    if (!vscode.workspace.isTrusted) throw Object.assign(new Error(), { code: -32044 });
+    const cwd = await this.chooseWorkspace(); if (!cwd) return;
+    const action = await vscode.window.showQuickPick([
+      { label: '编辑技能', action: 'update' }, { label: '启用或禁用技能', action: 'enabled' },
+      { label: '新建技能', action: 'create' }, { label: '删除技能', action: 'delete' }, { label: '恢复已删除技能', action: 'restore' },
+    ], { placeHolder: '管理文件技能' }); if (!action) return;
+    let input = { action: action.action }, content;
+    if (action.action === 'restore') {
+      const result = await this.invoke(`${SKILLS}trash`, {}, { cwd });
+      const entries = (result.value?.entries || []).filter(item => item.action === 'delete');
+      if (!entries.length) { void vscode.window.showInformationMessage('当前没有可恢复的已删除技能。'); return; }
+      const picked = await vscode.window.showQuickPick(entries.map(item => ({ label: item.name, description: `${item.scope} · ${item.time}`, item })), { placeHolder: '选择恢复记录' });
+      if (!picked) return; input.trashId = picked.item.id;
+    } else if (action.action === 'create') {
+      const scope = await vscode.window.showQuickPick([{ label: '当前项目', scope: 'project-dsh' }, { label: '用户技能（所有项目共享）', scope: 'user-dsh' }], { placeHolder: '选择新技能的保存范围' });
+      if (!scope) return;
+      const name = await vscode.window.showInputBox({ prompt: '技能名称（小写字母、数字和连字符，最多 64 字符）', validateInput: value => /^[a-z0-9][a-z0-9-]{0,63}$/.test(value) && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/.test(value) ? undefined : '请输入有效的技能名称' });
+      if (!name) return;
+      input = { ...input, scope: scope.scope, name };
+      content = `---\nname: ${name}\ndescription: Describe when to use this skill\n---\n\nWrite the skill instructions here.\n`;
+    } else {
+      const result = await this.invoke(`${SKILLS}list`, {}, { cwd });
+      const skills = (result.value?.groups || []).flatMap(group => group.skills.filter(skill => skill.editable).map(skill => ({ label: skill.name, description: group.title, skill })));
+      if (!skills.length) { void vscode.window.showInformationMessage('当前没有可修改的文件技能。系统、运行时和链接技能为只读。'); return; }
+      const picked = await vscode.window.showQuickPick(skills, { placeHolder: '选择要修改的技能' }); if (!picked) return;
+      input.skillId = picked.skill.id;
+      if (action.action === 'enabled') input.enabled = picked.skill.modelInvocable === false;
+      if (action.action === 'update') content = (await this.invoke(`${SKILLS}read`, { skillId: input.skillId }, { cwd })).value.content;
+    }
+    if (content !== undefined) {
+      if (this.skillDrafts.size >= 20) { void vscode.window.showInformationMessage('请先应用或关闭旧的技能草稿。'); return; }
+      const document = await vscode.workspace.openTextDocument({ language: 'markdown', content });
+      this.skillDrafts.set(document.uri.toString(), { cwd, input });
+      await vscode.window.showTextDocument(document, { preview: false });
+      void vscode.window.showInformationMessage('修改正文后，执行“DSH：预览并应用技能修改”。草稿尚未写入技能目录。'); return;
+    }
+    return this.confirmSkill(input, cwd);
+  }
+  async applySkillDraft() {
+    const document = vscode.window.activeTextEditor?.document;
+    const draft = document && this.skillDrafts.get(document.uri.toString());
+    if (!draft) { void vscode.window.showInformationMessage('请先通过“DSH：管理技能”打开技能草稿。'); return; }
+    if (draft.applying) return;
+    draft.applying = true;
+    try {
+      if (await this.confirmSkill({ ...draft.input, content: document.getText() }, draft.cwd)) this.skillDrafts.delete(document.uri.toString());
+    } finally { draft.applying = false; }
+  }
+  async confirmSkill(input, cwd) {
+    if (!vscode.workspace.isTrusted || !vscode.workspace.getWorkspaceFolder(vscode.Uri.file(cwd))) throw Object.assign(new Error(), { code: -32044 });
+    const result = await this.invoke(`${SKILLS}preview`, input, { cwd }), preview = result.value;
+    const before = this.document(`skill-diff/${preview.planId}-before.md`, preview.before);
+    const after = this.document(`skill-diff/${preview.planId}-after.md`, preview.after);
+    await vscode.commands.executeCommand('vscode.diff', before, after, 'DSH 技能修改预览', { preview: false });
+    const actions = { update: '保存修改', create: '新建技能', enabled: '更改启用状态', delete: '删除技能', restore: '恢复技能' };
+    const choice = await vscode.window.showInformationMessage(`${actions[input.action]}：${preview.file}${preview.scope.startsWith('user') ? '（用户技能，所有项目共享）' : ''}。原内容将保留在恢复目录。`, '确认应用', '取消');
+    if (choice !== '确认应用') return false;
+    if (!vscode.workspace.isTrusted || !vscode.workspace.getWorkspaceFolder(vscode.Uri.file(cwd))) throw Object.assign(new Error(), { code: -32044 });
+    await this.invoke(`${SKILLS}commit`, { planId: preview.planId }, { cwd, approved: true });
+    await this.refresh(); void vscode.window.showInformationMessage('技能修改已保存并回读核对。后续对话使用更新后的技能。'); return true;
   }
   async diagnose() {
     const result = await this.invoke(`${SKILLS}health`, {});

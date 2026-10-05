@@ -40,9 +40,11 @@ async function run() {
     await stage('packages', async () => {
       const packed = JSON.parse(locate.runDshSync({ command: 'npm', args: ['pack', path.join(ROOT, 'packages/dsh-door'), '--pack-destination', folder, '--json'] }));
       const pilots = JSON.parse(fs.readFileSync(path.join(ROOT, 'build/ide-bridge/pilots/manifest.json')));
-      const files = [path.join(folder, packed[0].filename), ...pilots.map(p => path.join(ROOT, p.file))];
+      const example = JSON.parse(locate.runDshSync({ command: 'npm', args: ['pack', path.join(ROOT, 'packages/dsh-bridge-sdk/examples/echo'), '--ignore-scripts', '--pack-destination', folder, '--json'] }));
+      const files = [path.join(folder, packed[0].filename),require('./packages.cjs').packSdk(folder), ...pilots.map(p => path.join(ROOT, p.file)), path.join(folder, example[0].filename)];
       report.artifacts = files.map(file => ({ file: path.relative(ROOT, file).replace(/\\/g, '/'), sha256: sha256(file) }));
       locate.runDshSync({ command: runtime.command, args: ['--profile', 'bridge', '--from-default-profile', 'web', '--dump-config'] });
+      require('./packages.cjs').pinSdk(path.join(process.env.DSH_HOME, 'profiles/bridge'), files[1]);
       locate.runDshSync({ command: runtime.command, args: ['plugin', '--profile', 'bridge', 'add', ...files.map(file => `file:${file.replace(/\\/g, '/')}`)], timeoutMs: 180000 });
       return { installed: files.length };
     });
@@ -77,6 +79,11 @@ async function run() {
     });
     const invoke = (capabilityId, input, context = {}) => bridge.request('invoke', { requestId: require('node:crypto').randomUUID(), capabilityId, input,
       context: { cwd, userInitiated: true, workspaceTrusted: true, ...context } });
+    await stage('independent-sdk-package-provider', async () => {
+      const result = await invoke('example.echo.read', { text: 'SDK_REAL_HOST' }); assert.equal(result.value.text, 'SDK_REAL_HOST');
+      await assert.rejects(invoke('example.echo.read', { text: 'x'.repeat(129) }), error => error.code === -32046);
+      return { independentPackage: true, installedFromArchive: true, validatedThroughRealBridge: true };
+    });
     await stage('skill-list-read-health', async () => {
       const listed = await invoke('linxin.skill-explorer.list', {}); const skills = listed.value.groups.flatMap(g => g.skills);
       const found = skills.find(s => s.name === 'bridge-fixture'); assert(found, '未发现测试技能');
@@ -84,6 +91,26 @@ async function run() {
       await assert.rejects(invoke('linxin.skill-explorer.read', { skillId: '../outside' }));
       const health = await invoke('linxin.skill-explorer.health', {}); assert.equal(health.value.ok, true);
       return { found: found.name, health: health.value.ok };
+    });
+    await stage('skill-write-preview-confirm-recovery', async () => {
+      const text = '---\nname: managed-fixture\ndescription: Managed skill\n---\n\nMANAGED_BODY\n';
+      const prefix = 'linxin.skill-explorer.';
+      const created = await invoke(prefix + 'preview', { action: 'create', scope: 'project-dsh', name: 'managed-fixture', content: text });
+      assert(!fs.existsSync(created.value.file));
+      await assert.rejects(invoke(prefix + 'commit', { planId: created.value.planId }), error => error.code === -32044);
+      await invoke(prefix + 'commit', { planId: created.value.planId }, { approved: true });
+      assert.equal(fs.readFileSync(created.value.file, 'utf8'), text);
+      const list = await invoke(prefix + 'list', {}), skill = list.value.groups.flatMap(group => group.skills).find(item => item.name === 'managed-fixture');
+      assert(skill?.editable, 'Created project skill must be listed as writable');
+      const disabled = await invoke(prefix + 'preview', { action: 'enabled', skillId: skill.id, enabled: false });
+      await invoke(prefix + 'commit', { planId: disabled.value.planId }, { approved: true });
+      assert(fs.readFileSync(created.value.file, 'utf8').includes('disable-model-invocation: true'));
+      const deleted = await invoke(prefix + 'preview', { action: 'delete', skillId: skill.id });
+      const result = await invoke(prefix + 'commit', { planId: deleted.value.planId }, { approved: true }); assert(!fs.existsSync(created.value.file));
+      const trash = await invoke(prefix + 'trash', {}); assert(trash.value.entries.some(item => item.id === result.value.recoveryId));
+      const restored = await invoke(prefix + 'preview', { action: 'restore', trashId: result.value.recoveryId });
+      await invoke(prefix + 'commit', { planId: restored.value.planId }, { approved: true }); assert(fs.readFileSync(created.value.file, 'utf8').includes('MANAGED_BODY'));
+      return { created: true, explicitApproval: true, disabled: true, deleted: true, restored: true };
     });
     session = new DshSession({ client }); await session.start({ cwd, preset: 'standard' });
     await stage('native-code-review', async () => {

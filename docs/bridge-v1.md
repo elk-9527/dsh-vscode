@@ -24,7 +24,7 @@
 ## 提供方
 
 插件通过可选 Cordis 注入 `ideBridge`，调用 `registerProvider({ id, name, version, capabilities, invoke })`。
-返回释放函数；插件卸载时移除其能力并终止对应运行。其他入口继续调用插件现有业务逻辑。
+返回释放函数；插件卸载时移除其能力并终止对应运行。Door 0.2.1 的 Provider 上下文另提供由 Bridge 确定的 `clientId`、`userInitiated` 与 `approved`，调用方无法覆盖客户端身份。SDK、类型和独立示例见 [DSH IDE Bridge SDK](../packages/dsh-bridge-sdk/README.md)。其他入口继续调用插件现有业务逻辑。
 目录只接受声明性数据，不提供任意命令、HTML、脚本或内部 HTTP 路由调用。
 
 能力声明包含 `id`、`title`、`kind`、`riskTier`、`effects`、`requiresSession`、`supportsCancellation`、`inputSchema` 和 `outputKinds`。
@@ -57,18 +57,24 @@ VS Code 关闭时保留有任务的自启内核，稳定工作区身份和运行
 
 ## 首版试点和安装来源
 
-Code Review `0.1.9-ide.1` 从上游 `0.1.9` 发行包生成；Skill Explorer `0.4.4-ide.2` 从上游 `0.4.4` 生成。
+Code Review `0.1.9-ide.2` 从上游 `0.1.9` 发行包生成；Skill Explorer `0.4.4-ide.3` 从上游 `0.4.4` 生成。
 注册补丁在 `tools/bridge/providers/`，审查输出格式补丁在 `tools/bridge/review-runtime.cjs`。
 生成脚本检查上游入口及审查执行器 SHA-256 后复制到构建目录并打包，不修改装机文件。
 保留上游许可证、桌面 UI、命令和工具入口。上游发行包不含完整构建源码，因此候选打包显式关闭 prepack，使用已校验发行物加可审查的注册补丁。
 原版审查入口使用自然语言报告；Bridge 调用单独启用现有 JSON rubric，原版入口维持原有格式。
-能力 ID 为 `michengai.code-review.run`、`linxin.skill-explorer.list/read/health`。
+能力 ID 为 `michengai.code-review.run`、`linxin.skill-explorer.list/read/health/preview/commit/trash`。
 
 ## 扩展 API 首版
 
 主扩展 `activate()` 返回 `apiVersion: 1`、`listCapabilities()`、`getConnectionStatus()` 和 `review({cwd,input,userInitiated})`。
 `review` 要求受信任工作区、工作区内目录及显式 `userInitiated: true`，使用独立审查会话，避免与聊天会话争用。
 文件变更快照不一致时报告标记过期，不向 Problems 投影旧位置；保存关联文件时清除已有诊断。
-API 是首版调用入口，Chat 伴生扩展、第三方 SDK 和技能写操作另属后续阶段。
+API v1 revision 2 另提供会话创建与恢复、提示流、权限回调、通用能力调用、取消和事件。句柄不公开传输对象，同一 DSH 会话跨界面串行执行；详细类型和调用契约见 [扩展 API](../packages/vscode-extension/API.md)。原生 Chat 集成在主扩展中，运行时检测 API，旧编辑器保留面板。
 
 实现状态与真实环境证据另见验收记录；协议文档不构成支持或安装成功证明。
+
+## 技能写操作
+
+`preview` 根据实际扫描来源生成十分钟有效的计划，绑定已鉴权客户端和工作目录，并返回完整正文差异及摘要。`commit` 为 workspace-write 能力，要求受信任工作区、显式启动和影响范围确认；再次检查来源、路径链接、原正文摘要及恢复来源。修改使用临时文件，提交后回读摘要；新建和恢复不覆盖现有文件。
+
+更新与删除保留原正文在技能文件旁的 `.trash`。与上游删除相同，只处理 SKILL.md，保留技能目录中的其他资源；Bridge 备份另外保存恢复 metadata，恢复列表只接受经过摘要核对的本适配器记录。预览不写磁盘，关闭确认保留原文件。系统、运行时、自定义及链接来源只读；正文写入上限 128 KiB。

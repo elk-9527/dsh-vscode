@@ -89,6 +89,7 @@ class DshSession extends EventEmitter {
       throw new Error(`session/new 未返回 sessionId：${JSON.stringify(result)}`);
     }
     this.sessionId = result.sessionId;
+    this.cwd = cwd;
     this.configOptions = Array.isArray(result.configOptions) ? result.configOptions : [];
     this.emit('session', { sessionId: this.sessionId });
     this.emit('config', { configOptions: this.configOptions });
@@ -127,6 +128,7 @@ class DshSession extends EventEmitter {
   async resume(sessionId, cwd, { preset } = {}) {
     const result = await this.client.resumeSession(sessionId, cwd, { preset });
     this.sessionId = sessionId;
+    this.cwd = cwd;
     this.configOptions = Array.isArray(result && result.configOptions) ? result.configOptions : [];
     // 该插件在 resume 的回复中同样会附加预设清单，处理方式与 session/new 一致，
     // 以避免重连后面板上的「模式」下拉框为空。

@@ -48,7 +48,7 @@ exports.activate = async () => {
     const commands = await vscode.commands.getCommands(true);
     check('native commands', ['review','skills','refresh','cancel','openReport','diagnoseConfig','copyDiagnostics','installGuide','retry','remove','clearFinished'].every(key => commands.includes('dshPanel.bridge.'+key)));
     await vscode.commands.executeCommand('dshPanel.capabilities.focus');
-    const catalog = await api.listCapabilities(); check('runtime providers', catalog.capabilities.length === 4);
+    const catalog = await api.listCapabilities(); check('runtime providers', catalog.capabilities.length >= 7);
     const status = await api.getConnectionStatus(); check('one shared connection', status.connectionCount === 1);
     check('isolated endpoint home',process.env.DSH_HOME===${JSON.stringify(path.join(folder, 'home'))});
     const endpointFile=require('node:path').join(process.env.DSH_HOME,'run','dsh-acp-door',${JSON.stringify(String(port) + '.json')});

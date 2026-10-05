@@ -26,6 +26,7 @@ exports.activate = async () => {
     const observed = process[Symbol.for('dsh.scenario.observer')]; assert(observed, '隔离观察接口未加载');
     const panelApi = observed.vscode; native = observed.nativeViews; panel = observed.view;
     const picks = [], errors = [], invocations = [];
+    const inputBoxes = [], confirmations = [];
     const quickPick = panelApi.window.showQuickPick, showError = panelApi.window.showErrorMessage;
     panelApi.window.showQuickPick = async (items, options) => {
       const choice = picks.shift(); assert(choice, `未预设选择动作：${options?.placeHolder}`);
@@ -34,9 +35,13 @@ exports.activate = async () => {
     };
     panelApi.window.showErrorMessage = async message => { errors.push(String(message)); return undefined; };
     restored.push(() => { panelApi.window.showQuickPick = quickPick; panelApi.window.showErrorMessage = showError; });
+    const inputBox = panelApi.window.showInputBox, information = panelApi.window.showInformationMessage;
+    panelApi.window.showInputBox = async options => { const choice = inputBoxes.shift(); assert(choice && options.prompt === choice.prompt); return choice.value; };
+    panelApi.window.showInformationMessage = async (message, ...options) => { if (options.includes('确认应用')) { const choice = confirmations.shift(); assert(choice); return choice; } return undefined; };
+    restored.push(() => { panelApi.window.showInputBox = inputBox; panelApi.window.showInformationMessage = information; });
     await vscode.commands.executeCommand('dshPanel.open');
     await wait(() => panel.session?.sessionId, 75000);
-    const catalog = await api.listCapabilities(); assert.equal(catalog.capabilities.length, 4);
+    const catalog = await api.listCapabilities(); assert.equal(catalog.capabilities.length, 7);
     const bridgePrototype = Object.getPrototypeOf(native.connections.bridge);
     const request = bridgePrototype.request;
     bridgePrototype.request = async function (method, params) {
@@ -120,6 +125,33 @@ exports.activate = async () => {
     await vscode.commands.executeCommand('dshPanel.bridge.diagnose');
     assert(vscode.workspace.textDocuments.some(x => x.uri.path === '/health.md' && x.getText().includes('技能服务正常') && !x.getText().includes('"ok"')));
     check('技能健康检查打开结果');
+    const skillFile = path.join(config.cwd, '.dsh/skills/scenario-skill/SKILL.md'), originalSkill = fs.readFileSync(skillFile, 'utf8');
+    picks.push({ prompt: '管理文件技能', match: item => item.action === 'update' }, { prompt: '选择要修改的技能', match: item => item.skill?.name === 'scenario-skill' });
+    await vscode.commands.executeCommand('dshPanel.bridge.manageSkills');
+    const draft = vscode.window.activeTextEditor.document; assert(native.skillDrafts.has(draft.uri.toString()));
+    const draftEdit = new vscode.WorkspaceEdit(); draftEdit.insert(draft.uri, new vscode.Position(draft.lineCount - 1, 0), '\nSCENARIO_EDITED_BODY\n'); await vscode.workspace.applyEdit(draftEdit);
+    confirmations.push('取消'); await vscode.commands.executeCommand('dshPanel.bridge.applySkillDraft'); assert.equal(fs.readFileSync(skillFile, 'utf8'), originalSkill); assert(native.skillDrafts.has(draft.uri.toString()));
+    check('技能草稿预览后取消保持原文件', { noWriteOnCancel: true, draftPreserved: true });
+    await vscode.window.showTextDocument(draft, { preview: false }); confirmations.push('确认应用'); await vscode.commands.executeCommand('dshPanel.bridge.applySkillDraft'); assert(fs.readFileSync(skillFile, 'utf8').includes('SCENARIO_EDITED_BODY')); assert(!native.skillDrafts.has(draft.uri.toString()));
+    check('真实草稿差异确认后更新并回读技能', { originalBackedUp: fs.existsSync(path.join(path.dirname(skillFile), '.trash')), bodyUpdated: true });
+    picks.push({ prompt: '管理文件技能', match: item => item.action === 'enabled' }, { prompt: '选择要修改的技能', match: item => item.skill?.name === 'scenario-skill' }); confirmations.push('确认应用'); await vscode.commands.executeCommand('dshPanel.bridge.manageSkills'); assert(fs.readFileSync(skillFile, 'utf8').includes('disable-model-invocation: true'));
+    check('技能启用状态按扫描来源确认修改');
+    picks.push({ prompt: '管理文件技能', match: item => item.action === 'delete' }, { prompt: '选择要修改的技能', match: item => item.skill?.name === 'scenario-skill' }); confirmations.push('确认应用'); await vscode.commands.executeCommand('dshPanel.bridge.manageSkills'); assert(!fs.existsSync(skillFile));
+    picks.push({ prompt: '管理文件技能', match: item => item.action === 'restore' }, { prompt: '选择恢复记录', match: item => item.label === 'scenario-skill' }); confirmations.push('确认应用'); await vscode.commands.executeCommand('dshPanel.bridge.manageSkills'); assert(fs.readFileSync(skillFile, 'utf8').includes('SCENARIO_EDITED_BODY'));
+    check('删除技能后从恢复记录找回原正文');
+    const registeredChat = observed.chatRegistration; assert(registeredChat?.participant, '实际宿主未完成原生 Chat 注册');
+    const streamText = [], chatStream = { markdown: value => streamText.push(String(value)), progress() {}, button() {} };
+    const token = new vscode.CancellationTokenSource();
+    const chatResult = await registeredChat.handler({ prompt: '不要读取文件，不调用工具。只回答数字，不添加解释：2+3等于多少？', references: [] }, { history: [] }, chatStream, token.token);
+    assert(chatResult.metadata?.dsh); assert(/^\s*5[。.!]?\s*$/.test(streamText.join('')));
+    check('实际宿主注册的 Chat 处理器取得真实流式回复', { metadataSaved: true, realReply: true });
+    await registeredChat.handler({ command: 'open-panel', prompt: '', references: [] }, { history: [{ result: chatResult }] }, chatStream, token.token); assert.equal(panel.session.sessionId, chatResult.metadata.dsh.sessionId, JSON.stringify({ streamText, notices: posts.filter(message => message.type === 'notice').slice(-3) }));
+    const panelHandle = await api.getPanelSession(); assert.equal(panelHandle.sessionId, chatResult.metadata.dsh.sessionId); let apiText = '';
+    await api.prompt(panelHandle, '不要调用工具，只回答数字：3+4等于多少？', { userInitiated: true, onEvent: event => { if (event.type === 'text') apiText += event.delta; } }); assert(/^\s*7[。.!]?\s*$/.test(apiText));
+    check('Chat metadata 在面板继续同一会话并经公共 API 对话', { sameSession: true, promptStreamReceived: true });
+    await registeredChat.handler({ command: 'skills', prompt: '', references: [] }, { history: [{ result: chatResult }] }, chatStream, token.token); assert(streamText.some(text => text.includes('scenario-skill')));
+    const freshChat = await registeredChat.handler({ command: 'new', prompt: '', references: [] }, { history: [{ result: chatResult }] }, chatStream, token.token); assert.notEqual(freshChat.metadata.dsh.sessionId, chatResult.metadata.dsh.sessionId); token.dispose();
+    check('原生 Chat 技能命令和新对话使用现有连接');
     picks.push({ prompt: '选择审查范围', cancel: true });
     await vscode.commands.executeCommand('dshPanel.bridge.review'); assert.equal(reviewCount(), 0);
     check('关闭审查范围选择框不启动任务', { reviewInvocations: 0 });
@@ -164,6 +196,10 @@ exports.activate = async () => {
     check('删除旧记录保留新审查发现', { findings: newer });
     assert.equal(await clean(), 1); assert.equal(diagnostics().length, 0); assert(reportFor(first.id)?.getText().length);
     check('清理已结束记录保留已打开报告');
+    const chatReviewText = [], chatReviewToken = new vscode.CancellationTokenSource();
+    await registeredChat.handler({ command: 'review', prompt: '', references: [] }, { history: [] }, { markdown: text => chatReviewText.push(text), progress() {}, button() {} }, chatReviewToken.token);
+    assert(chatReviewText.join('').includes('代码审查')); assert([...native.operations.values()].some(op => op.status === 'completed')); assert.equal(await clean(), 1); chatReviewToken.dispose();
+    check('原生 Chat 审查命令返回真实审查报告');
     const beforeInvalid = reviewCount(); await assert.rejects(api.review({ cwd: config.cwd, input: { mode: 'base', ref: 'scenario-ref-does-not-exist' }, userInitiated: true }), error => error.code === -32051);
     assert.equal(reviewCount(), beforeInvalid);
     check('无效分支在调用模型前拦截');

@@ -2,7 +2,7 @@
   "name": "dsh-acp-panel",
   "displayName": "DSH ACP Panel",
   "description": "在 VS Code 使用 DeepSeek Harness：对话、工具、代码审查、技能浏览和插件运行记录。",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "publisher": "Elk-ydy",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -45,7 +45,8 @@
   },
   "activationEvents": [
     "onView:dshPanel.chat",
-    "onStartupFinished"
+    "onStartupFinished",
+    "onChatParticipant:dshPanel.dsh"
   ],
   "capabilities": {
     "untrustedWorkspaces": {
@@ -190,6 +191,20 @@
         "command": "dshPanel.bridge.clearFinished",
         "title": "DSH：清理已结束记录",
         "icon": "$(clear-all)"
+      },
+      {
+        "command": "dshPanel.bridge.manageSkills",
+        "title": "DSH：管理技能",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "dshPanel.bridge.applySkillDraft",
+        "title": "DSH：预览并应用技能修改",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "dshPanel.chat.openSession",
+        "title": "DSH：在面板继续 Chat 会话"
       }
     ],
     "menus": {
@@ -228,6 +243,11 @@
           "command": "dshPanel.bridge.skills",
           "when": "view == dshPanel.capabilities",
           "group": "navigation"
+        },
+        {
+          "command": "dshPanel.bridge.manageSkills",
+          "when": "view == dshPanel.capabilities",
+          "group": "actions@2"
         }
       ],
       "editor/context": [
@@ -365,6 +385,33 @@
           "description": "新会话的工作目录。留空则使用 VS Code 当前打开的工作区目录。"
         }
       }
-    }
-  }
+    },
+    "chatParticipants": [
+      {
+        "id": "dshPanel.dsh",
+        "name": "dsh",
+        "fullName": "DeepSeek Harness",
+        "description": "使用 DSH 对话、审查代码和浏览技能",
+        "commands": [
+          {
+            "name": "new",
+            "description": "开始新的 DSH 对话"
+          },
+          {
+            "name": "review",
+            "description": "审查当前代码变更"
+          },
+          {
+            "name": "skills",
+            "description": "浏览可用技能"
+          },
+          {
+            "name": "open-panel",
+            "description": "在 DSH 面板继续当前会话"
+          }
+        ]
+      }
+    ]
+  },
+  "types": "./src/api/index.d.ts"
 }

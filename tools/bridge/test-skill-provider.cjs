@@ -13,6 +13,8 @@ const project = { level: 'project', name: 'file-skill', description: 'Project sk
 let provider, records = [bundled, runtime, project], definition;
 const getCalls = [];
 const sandbox = {
+  registerProvider: require('../../packages/dsh-bridge-sdk/lib').registerProvider,
+  SkillFileStore: require('../../packages/dsh-bridge-sdk/lib/skill-files').SkillFileStore, join: path.join,
   Buffer, homedir: () => directory, findProjectRoot: cwd => cwd, activeSessionCwds: () => [], customSkillDirs: [], dshHome: directory, agentsHome: directory,
   stat: fs.promises.stat, readFile: fs.promises.readFile,
   collectSkills: async () => ({ skills: records, complete: true }),

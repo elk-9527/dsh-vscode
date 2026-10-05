@@ -10,7 +10,7 @@ class DshConnectionService extends EventEmitter {
   constructor({ log = () => {}, clientId = randomUUID(), makeClient = options => new DoorClient(options) } = {}) {
     super(); this.log = log; this.clientId = clientId; this.makeClient = makeClient;
     this.client = undefined; this.pending = undefined; this.bridge = undefined; this.sessions = new Map();
-    this.consumers = new Set(); this.closed = false; this.driver = undefined; this.state = { state: 'disconnected' };
+    this.consumers = new Set(); this.closed = false; this.driver = undefined; this.state = { state: 'disconnected' }; this.turns = new Map();
   }
   emit(name, ...args) {
     if (name === 'state') this.state = { ...args[0] };
@@ -72,6 +72,18 @@ class DshConnectionService extends EventEmitter {
     return this.client;
   }
   setSession(surfaceId, session) { this.sessions.set(surfaceId, session); }
+  /** 同一内核会话在所有界面上串行运行；失败的回合不阻塞后续请求。 */
+  runSession(session, action) {
+    const id = session.sessionId;
+    const previous = this.turns.get(id) || Promise.resolve();
+    const next = previous.catch(() => {}).then(() => {
+      if (this.closed || !this.client?.isConnected || session.sessionId !== id) throw new Error('会话已变化，请重新恢复会话');
+      return action();
+    });
+    this.turns.set(id, next);
+    void next.finally(() => { if (this.turns.get(id) === next) this.turns.delete(id); }).catch(() => {});
+    return next;
+  }
   async sessionFor(surfaceId, cwd, options = {}) {
     await this.ensure();
     const existing = this.sessions.get(surfaceId);

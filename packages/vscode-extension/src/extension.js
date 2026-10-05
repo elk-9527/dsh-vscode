@@ -12,6 +12,8 @@ const vscode = require('vscode');
 const { DshPanelView, VIEW_ID } = require('./panel/view');
 const { DshConnectionService } = require('./connection/service');
 const { BridgeViews } = require('./bridge/views');
+const { PublicApi } = require('./api/service');
+const { registerChat } = require('./chat/participant');
 const { randomUUID } = require('node:crypto');
 const { kernelManager } = require('./panel/kernel-manager');
 const {
@@ -248,12 +250,10 @@ function activate(context) {
       );
     }, 1500);
   }
-  return Object.freeze({
-    apiVersion: 1,
-    listCapabilities: () => nativeViews.refresh(),
-    getConnectionStatus: async () => (await connections.ensure()).doorStatus(),
-    review: request => nativeViews.reviewRequest({ ...request, userInitiated: request?.userInitiated === true }),
-  });
+  const api = new PublicApi({ vscode, context, connections, panel: view, views: nativeViews });
+  context.subscriptions.push(api);
+  const chatRegistration = registerChat({ vscode, context, api: api.exports, panel: view, log });
+  return api.exports;
 }
 
 function deactivate() {

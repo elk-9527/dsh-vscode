@@ -51,6 +51,10 @@ function sourceState() {
     }
   };
   for (const name of ['packages/dsh-door/lib', 'packages/vscode-extension/src', 'packages/vscode-extension/media']) walk(path.join(ROOT, name));
+  walk(path.join(ROOT, 'packages/dsh-bridge-sdk/lib'));
+  walk(path.join(ROOT, 'packages/dsh-bridge-sdk/examples'));
+  hash.update(content(path.join(ROOT, 'packages/vscode-extension/API.md')));
+  for (const name of ['package.json', 'README.md', 'LICENSE']) hash.update(content(path.join(ROOT, 'packages/dsh-bridge-sdk', name)));
   for (const name of ['packages/dsh-door/package.json', 'packages/vscode-extension/package.json']) hash.update(content(path.join(ROOT, name)));
   for (const pkg of ['dsh-door', 'vscode-extension']) for (const name of ['README.md', 'CHANGELOG.md', 'LICENSE']) hash.update(content(path.join(ROOT, 'packages', pkg, name)));
   hash.update(content(path.join(ROOT, 'packages/dsh-door/cordis.patch.yml')));
@@ -61,6 +65,7 @@ function versions() {
     panel: json(path.join(ROOT, 'packages/vscode-extension/package.json')).version,
     door: json(path.join(ROOT, 'packages/dsh-door/package.json')).version,
     peer: json(path.join(ROOT, 'packages/dsh-door/package.json')).peerDependencies['@deepseek-ai/dsh-acp'],
+    sdk: json(path.join(ROOT, 'packages/dsh-bridge-sdk/package.json')).version,
   };
 }
 function readAsar(archive, relative) {

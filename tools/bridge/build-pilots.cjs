@@ -6,10 +6,10 @@ const { createHash } = require('node:crypto');
 const { runDshSync } = require('../../packages/vscode-extension/src/door/locate');
 const ROOT = path.resolve(__dirname, '../..');
 const PILOTS = [
-  { name: '@michengai/dsh-code-review', version: '0.1.9', candidate: '0.1.9-ide.1',
+  { name: '@michengai/dsh-code-review', version: '0.1.9', candidate: '0.1.9-ide.2',
     sha256: 'd77a24a0f54c69728112fbd6817c643c1489f006045cefb6d328bab1d9bdc606',
     runtimeSha256: '7df2296398e2508af6dd87525bf0c3af2ae56c9f7ed182334228532a1326b54d', key: 'review' },
-  { name: '@linxin666/dsh-client-ui-skill-explorer', version: '0.4.4', candidate: '0.4.4-ide.2',
+  { name: '@linxin666/dsh-client-ui-skill-explorer', version: '0.4.4', candidate: '0.4.4-ide.3',
     sha256: 'd09440cf5557d3e3bf09a35fbea05f3fbfae073e25b3658344bd63d95a666862', key: 'skills' },
 ];
 /** 从已校验的上游发行包生成候选包，不改动已安装插件目录。 */
@@ -31,9 +31,11 @@ function build({ home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh') 
     const registration = fs.readFileSync(path.join(__dirname, `providers/${pilot.key}.txt`), 'utf8');
     const anchor = pilot.key === 'review' ? '    const operations = new Set();' : '\tconst routes = makeRoutes(ctx, {';
     if (original.split(anchor).length !== 2) throw new Error('源码补丁定位失败');
-    fs.writeFileSync(path.join(target, 'lib/index.js'), original.replace(anchor, `${registration}\n${anchor}`));
+    const imports = "import { registerProvider } from 'dsh-ide-bridge-sdk';\n" + (pilot.key === 'skills' ? "import { SkillFileStore } from 'dsh-ide-bridge-sdk/skill-files';\n" : '');
+    fs.writeFileSync(path.join(target, 'lib/index.js'), imports + original.replace(anchor, `${registration}\n${anchor}`));
     if (pilot.key === 'review') fs.writeFileSync(path.join(target,'lib/runtime.js'),require('./review-runtime.cjs').patchReviewRuntime(fs.readFileSync(path.join(source,'lib/runtime.js'),'utf8')));
     manifest.version = pilot.candidate;
+    manifest.dependencies = { ...manifest.dependencies, 'dsh-ide-bridge-sdk': '0.1.0' };
     manifest.dshIdeBridge = { upstreamVersion: pilot.version, upstreamEntrySha256: hash, protocolVersion: 1 };
     fs.writeFileSync(path.join(target, 'package.json'), JSON.stringify(manifest, null, 2) + '\n');
     const packed = JSON.parse(runDshSync({ command: 'npm', args: ['pack', target, '--ignore-scripts', '--pack-destination', output, '--json'], timeoutMs: 30000 }));

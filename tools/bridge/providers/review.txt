@@ -1,6 +1,6 @@
     ctx.inject(['ideBridge'], (bridgeCtx) => {
-        return bridgeCtx.ideBridge.registerProvider({
-            id: '@michengai/dsh-code-review', name: 'Code Review', version: '0.1.9-ide.1',
+        return registerProvider(bridgeCtx, {
+            id: '@michengai/dsh-code-review', name: 'Code Review', version: '0.1.9-ide.2',
             capabilities: [{ id: 'michengai.code-review.run', title: '审查代码变更', kind: 'action',
                 riskTier: 'execute', effects: ['workspace.read', 'process.execute', 'dsh-state.write'],
                 requiresSession: true, supportsCancellation: true, outputKinds: ['review.report'],
