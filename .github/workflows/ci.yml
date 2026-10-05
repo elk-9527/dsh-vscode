@@ -25,6 +25,9 @@ jobs:
       - name: 启用包管理器
         run: corepack enable
 
+      - name: 检查公开项目内容
+        run: node tools/check-public-paths.cjs
+
       - name: 安装锁定的依赖
         run: pnpm install --frozen-lockfile
 
