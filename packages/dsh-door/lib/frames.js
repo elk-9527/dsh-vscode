@@ -303,6 +303,7 @@ export async function decorateLine(line, state, diag) {
       state.pending.delete(sessionId);
       state.resumes.delete(sessionId);
       state.sessions?.delete(sessionId);
+      state.agentsBySession?.delete(sessionId);
       diag(`会话 ${sessionId} 已关闭：清理本连接的临时挂载状态`);
     } else {
       diag(`关闭会话 ${sessionId} 失败：保留本连接状态`);

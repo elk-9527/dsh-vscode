@@ -1,8 +1,15 @@
 # dsh-acp-door
 
-连接本机 DSH 与 VS Code 等外部程序，共用模型、工具、记忆和会话。支持历史查看和权限切换。
+连接本机 DSH 与 VS Code 等外部程序，共用模型、工具、记忆和会话。支持历史查看、权限切换及已注册插件的能力调用。
 
 需要已安装并运行的 DeepSeek Harness，以及支持 ACP 的外部客户端。接入点仅供本机使用；安装后需重启对应的 DSH 内核。
+
+`0.2.0` 增加同一连接上的 IDE Bridge：插件主动注册能力、本机自动鉴权、可恢复运行与取消。
+协议规范见 [IDE Bridge v1](../../docs/bridge-v1.md)。现有 ACP 会话、流式输出、历史和权限方法继续兼容。
+
+Bridge 在同一条 ACP 连接上提供插件能力目录、受本机端点凭据保护的调用、运行查询和取消。
+能力来自主动注册 `ideBridge` 服务的插件；单独安装本包不会自动把其他插件的桌面界面或工具转换成 IDE 能力。
+断线后可以使用相同客户端身份查询仍在原内核中运行的任务；内核重启或记录过期后无法恢复。
 
 
 <details>
@@ -10,7 +17,7 @@
 
 **dsh-acp-door** opens an extra ACP (Agent Client Protocol) transport on a
 **running** DeepSeek Harness kernel — loopback only (`127.0.0.1`), no
-authentication, so it is meant for your own machine. External clients such as
+authentication for the existing ACP methods, so it is meant for your own machine. External clients such as
 the *DSH Panel* VS Code extension can then drive the very same kernel you
 already have open: same config, same memory, same tools, same session records.
 
@@ -18,6 +25,13 @@ ACP normally speaks over stdio, which can only be attached at process start;
 this plugin instead mounts one ACP bridge per TCP connection on top of the live
 kernel, and exposes a few bypass methods the core does not have over ACP
 (session listing, permission presets).
+
+Version 0.2.0 adds IDE Bridge v1 over the same connection: participating plugins
+register capabilities, authenticated clients invoke them, and long-running
+operations support status queries, cancellation and reconnect recovery while
+the original kernel remains alive. Bridge calls require credentials from a
+protected local endpoint file. Installing this transport alone does not add
+capabilities to plugins that have not registered a provider.
 
 Install:
 
@@ -36,7 +50,7 @@ dsh plugin --profile <your-profile> update dsh-acp-door
 
 Restart the kernel afterwards.
 
-Compatibility: DSH `0.1.5-rc.2` and `0.2.0-rc.1`.
+Compatibility: DSH `0.1.5-rc.2`, `0.2.0-rc.1`, and `0.2.0-rc.2`.
 
 </details>
 
@@ -93,7 +107,7 @@ DSH 自带的 ACP 插件支持**注入传输层**（其源码中有对应实现�
 const stream = config.stream ?? ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin));
 ```
 
-因此该插件仅执行一项操作：**在每个 TCP 连接上挂载一份 ACP 桥**。
+ACP 接入部分**在每个 TCP 连接上挂载一份 ACP 桥**；0.2.0 另在同一连接上提供 IDE Bridge 插件能力接口。
 
 ```
 DSH Desktop（运行中）
@@ -104,7 +118,7 @@ DSH Desktop（运行中）
 
 ## 会话预设补挂的必要性
 
-这是该插件除监听端口之外**唯一**执行的实际操作，也是最易出错的环节，因此单独说明。
+会话预设补挂使 ACP 会话获得内核工具，也是最易出错的环节，因此单独说明。
 
 桌面端与网页端架构停用了**宿主层**的全部工具 —— `dsh-web-app` 的补丁中：
 
@@ -217,12 +231,17 @@ DSH 冷启动时，插件会先等待用户设置加载完成再开放端口，�
 
 | DSH | 历史会话 | 权限预设 |
 | --- | --- | --- |
-| `0.2.0-rc.1` | 公开 `sessionQuery` 服务，v4 会话格式 | `catalog/current/resolve/set` |
+| `0.2.0-rc.1` / `0.2.0-rc.2` | 公开 `sessionQuery` 服务，v4 会话格式 | `catalog/current/resolve/set` |
 | `0.1.5-rc.2` | 只读解析本机 v3 会话文件 | `selectFor/permissionState/current/set` |
 
 两条路径对外提供相同的 `dsh-door/…` 方法。接入点的状态回复会用 `historyKind`、
 `sessionFormat` 和 `permissionKind` 报告实际选中的适配器。不会在插件中私自解析 v4：
 该格式由 DSH 0.2 的 `sessionQuery` 负责读取和迁移。
+
+状态中的可选 `protocolVersion` 与 `runtime.acpVersion` 分别报告接入协议及实际加载的 ACP 包版本。
+
+旧 npm 发行物的依赖使用版本范围：本轮 `DSH 0.1.5-rc.2` 实际解析到 `ACP 0.1.5-rc.3`。兼容矩阵分别记录两个版本；依赖范围包含该 ACP 版本不表示已经验收同号的 DSH 发行物。
+无法识别的已有历史服务会报告 `history: false`，不尝试以旧格式读取新数据。
 
 ## 版本变更
 

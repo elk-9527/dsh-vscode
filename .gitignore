@@ -3,42 +3,33 @@ node_modules/
 dist/
 out/
 *.vsix
-
-# M0 原始抓包可能包含文件内容，不纳入版本控制（`packages/acp/` 的占位目录已于 2026-09-20 删除）
+*.tgz
+*.log
+.DS_Store
+/build/
+/backup/
+/.workbuddy/
+/AGENTS.md
+/local-notes/
+/%SystemDrive%/
+packages/vscode-extension/build*/
+packages/vscode-extension/shots/
 spike/capture/
 spike/scratch/
-
-.DS_Store
-*.log
-
-# 打包产物（可随时用 npm pack 重新生成）
-*.tgz
-
-# 扩展的构建与测试产物：vsix、界面预览页、无头浏览器临时配置
-packages/vscode-extension/build*/
-
-# 临时使用的构建与诊断目录：临时脚本、测试日志、调查记录。
-# 注意 `packages/vscode-extension/build*` 只覆盖扩展自身的目录，
-# 仓库根目录的 build/ 原先不在忽略范围内 —— 2026-09-19 发现，
-# 一次 git add -A 就会把大量临时文件纳入版本控制。此处一并忽略。
-build/
-
-# 界面截图（由 tools/shots.js 生成，用于改界面前后对比）。不放入 build/：
-# build-vsix 会清空整个 build/，截图会随之丢失。
-packages/vscode-extension/shots/
-
-# 修改用户档之前的备份（体积大，且为机器专属，不纳入版本控制）
-# 2026-09-19 补记：这条规则不影响已被跟踪的文件 —— 最早加入的 5 个
-# 文件一直处于版本控制中（`git status` 显示干净，因此未被发现）。
-# 已用 `git rm -r --cached backup` 移出：磁盘上的文件没有减少，只是不再进入 git。
-backup/
-
-# 试验台使用的临时配置（每次使用后删除）
 spike/door-*.yml
-
-# WorkBuddy 的项目记忆（agent 工作数据，本机专属，不纳入版本控制）
-.workbuddy/
-
-# 会话勘察报告（含用户会话标题等个人信息，不纳入版本控制；工具本身位于 spike/session-survey.cjs）
 spike/session-survey-report.txt
 
+# Project documentation
+/docs/*
+!/docs/bridge-v1.md
+!/docs/DSH兼容维护流程.md
+!/docs/发布清单.md
+!/docs/注释与文档规范.md
+
+# Local environment and installation reports
+/compat/evidence/local*
+/compat/evidence/baseline*
+/compat/evidence/*logs*
+/compat/evidence/*log.txt
+/compat/evidence/doctor*
+/compat/evidence/release-check*

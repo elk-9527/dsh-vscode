@@ -25,8 +25,14 @@ jobs:
       - name: 启用包管理器
         run: corepack enable
 
+      - name: 检查公开项目内容
+        run: node tools/check-public-paths.cjs
+
       - name: 安装锁定的依赖
         run: pnpm install --frozen-lockfile
+
+      - name: 验证 DSH 插件与 IDE Bridge
+        run: node packages/dsh-door/test/run-all.js
 
       - name: 运行不依赖 DSH 的快速套件
         run: node packages/vscode-extension/test/run-all.js
