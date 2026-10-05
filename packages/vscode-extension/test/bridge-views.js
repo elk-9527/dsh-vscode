@@ -1,7 +1,7 @@
 'use strict';
 const assert = require('node:assert/strict'), fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const Module = require('node:module'), { EventEmitter } = require('node:events'), { execFileSync } = require('node:child_process');
-const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-native-views-'))), cwd = path.join(root, 'repo'); fs.mkdirSync(cwd);
+const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-native-views-'))), cwd = path.join(root, 'repo'); fs.mkdirSync(cwd);
 execFileSync('git', ['init', '-q', cwd]); fs.writeFileSync(path.join(cwd, 'sample.js'), 'const sum = 1;\n');
 execFileSync('git', ['-C', cwd, 'add', '.']); execFileSync('git', ['-C', cwd, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'fixture']);
 process.env.DSH_HOME = path.join(root, 'dsh');
