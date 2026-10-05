@@ -117,6 +117,9 @@ function dshCommandCandidates({ dshCommand, homedir, desktopExecutables = [], ex
   );
   if (bin && fs.existsSync(bin)) list.push(`node ${bin}`);
   for (const executable of desktopExecutables) {
+    // rc.2 的官方命令可直接按完整路径运行，无需注册 PATH 或修改用户环境。
+    const bundledCli = path.join(path.dirname(executable), 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd');
+    if (process.platform === 'win32' && existsAsFile(bundledCli)) list.push(quoteArg(bundledCli));
     const desktopCommand = desktopDshCommand(executable, { extensionDir });
     if (desktopCommand) list.push(desktopCommand);
   }
@@ -183,6 +186,7 @@ function runningDesktopExecutables({ env = process.env, platform = process.platf
   for (const root of [env.LOCALAPPDATA, env.ProgramFiles, env['ProgramFiles(x86)']]) {
     if (root) push(path.join(root, 'DeepSeek Harness', 'DeepSeek Harness.exe'));
   }
+  if (env.LOCALAPPDATA) push(path.join(env.LOCALAPPDATA, 'Programs', 'DeepSeek Harness', 'DeepSeek Harness.exe'));
 
   try {
     const powershell = env.SystemRoot
@@ -195,7 +199,9 @@ function runningDesktopExecutables({ env = process.env, platform = process.platf
         '-NoProfile',
         '-NonInteractive',
         '-Command',
-        "Get-Process -Name 'DeepSeek Harness' -ErrorAction SilentlyContinue | ForEach-Object { $_.Path }",
+        "Get-Process -Name 'DeepSeek Harness' -ErrorAction SilentlyContinue | ForEach-Object { $_.Path }; " +
+        "Get-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' -ErrorAction SilentlyContinue | " +
+        "Where-Object { $_.DisplayName -like 'DeepSeek Harness*' -and $_.InstallLocation } | ForEach-Object { Join-Path $_.InstallLocation 'DeepSeek Harness.exe' }",
       ],
       // A cold PowerShell start can exceed 2.5 seconds on Windows.  Missing this
       // result is costly (the panel falls back to a non-existent PATH command),
@@ -386,7 +392,7 @@ function commandLine(command, args = []) {
   return [...parts, ...args].map(quoteArg).join(' ');
 }
 
-function spawnBackgroundDsh({ command, profile, log, extraArgs = [], port }) {
+function spawnBackgroundDsh({ command, profile, log, extraArgs = [], port, ownedIdleMs }) {
   if (!SAFE_PROFILE.test(String(profile))) {
     throw new Error(`配置名不合法：${profile}（只允许字母、数字、点、下划线、连字符）`);
   }
@@ -406,7 +412,10 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [], port }) {
   const env =
     Number.isInteger(doorPort) && doorPort >= 0 && doorPort <= 65535
       ? { ...process.env, DSH_ACP_DOOR_PORT: String(doorPort) }
-      : process.env;
+      : { ...process.env };
+  if (Number.isFinite(ownedIdleMs) && ownedIdleMs >= 1000) {
+    env.DSH_BRIDGE_OWNED_IDLE_MS = String(Math.round(ownedIdleMs));
+  }
 
   // `--host 127.0.0.1` 为后备加固：确保其网页界面仅绑定回环地址。
   // `--port 0` 表示由系统任意分配网页端口 —— 本扩展使用接入点，不使用该界面。
@@ -666,6 +675,13 @@ function runDshSync({ command, args = [], timeoutMs = 120000 }) {
  */
 function explainKernelFailure({ profile, stderr }) {
   const text = String(stderr || '');
+  if (/incompatible with dsh|installation rejected:[\s\S]*peerDependencies/i.test(text)) {
+    return {
+      kind: 'plugin-incompatible',
+      reason: '连接组件与当前版本不兼容',
+      advice: '更新连接组件并重启后，再重新连接。',
+    };
+  }
   if (/managed exclusively by the Electron application/i.test(text)) {
     return {
       kind: 'app-managed-profile',

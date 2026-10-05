@@ -148,7 +148,6 @@ function assertionsScript(scene) {
     }
 
     // ── 1.6 顶栏配置行的宽度分配 ─────────────────────
-    // 用户曾报告：「文字被挤在一起了，模型的占地有点大，其他两点有点小」。
     // 起因是三个格子均使用「flex: 1 1 auto」（基准取内容宽度），模型那个 <select>
     // 的基准为其最长选项，因此它占满整行、另两个被压到 40~60px 并截断文字。
     // 现在按 7:6:6 分配并各自设有下限 —— 这几条断言即用于固定该行为。
@@ -398,6 +397,22 @@ function assertionsScript(scene) {
         '有 ' + bubbleChips.length + ' 块');
       assert('历史消息中的附件不带移除按钮（已发送）',
         document.querySelectorAll('.msg-user .bubble .chip-close').length === 0);
+      var reportAttachment = { kind: 'review', id: 'review:fixture', name: '代码审查报告', detail: '1 条发现', text: '# 代码审查\\n\\n报告正文标记' };
+      window.__received.length = 0;
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'busy', busy: false } }));
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'attach', items: [reportAttachment] } }));
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'attach', items: [reportAttachment] } }));
+      assert('报告附加不自动发送', window.__received.filter(function (m) { return m.type === 'send'; }).length === 0);
+      assert('同一报告只保留一个附件', document.querySelectorAll('#attachments .chip').length === 1);
+      var reportChip = document.querySelector('#attachments .chip');
+      assert('报告正文可从附件提示查看', reportChip && reportChip.title.indexOf('报告正文标记') >= 0);
+      document.querySelector('#attachments .chip-close').click();
+      assert('报告可在发送前移除', document.querySelectorAll('#attachments .chip').length === 0 && !visible(attachmentBox));
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'attach', items: [reportAttachment] } }));
+      ctxInput.value = '解释报告'; ctxSend.click();
+      var reportSends = window.__received.filter(function (m) { return m.type === 'send'; });
+      assert('显式发送才携带完整报告', reportSends.length === 1 && reportSends[0].attachments[0].text === reportAttachment.text);
+      assert('发送报告后附件清空', document.querySelectorAll('#attachments .chip').length === 0);
     }
 
     // ── 7.6 压力：几百个流式增量的耗时 ────────────────
@@ -609,7 +624,7 @@ function assertionsScript(scene) {
 
       // 模拟扩展应答（形状对齐 ACP 接入点插件（dsh-acp-door）0.0.8 版的应答）。
       window.postMessage({ type: 'history', skipped: 5, sessions: [
-        { id: 'session-alpha', title: '修门插件的依赖注入', turns: 12, lastTime: Date.now() - 3600e3, cwd: '<仓库根目录>', preset: 'standard' },
+        { id: 'session-alpha', title: '检查示例加法函数', turns: 12, lastTime: Date.now() - 3600e3, cwd: '<仓库根目录>', preset: 'standard' },
         { id: 'session-beta', title: '重写界面的渲染循环', turns: 4, lastTime: Date.now() - 86400e3, cwd: '<仓库根目录>/packages/vscode-extension', preset: 'ptc' },
         { id: 'session-gamma', title: '', fallbackTitle: '帮我看看这个报错', turns: 1, lastTime: Date.parse('2025-11-02T09:12:00'), cwd: '<用户目录>', decodeError: '有一帧解码失败' },
       ] }, '*');
@@ -619,7 +634,7 @@ function assertionsScript(scene) {
       assert('统计中写明更早的记录未列出', (document.getElementById('history-meta').textContent || '').indexOf('5') >= 0,
         document.getElementById('history-meta').textContent);
       var firstTitle = overlay.querySelector('.history-item-title');
-      assert('第一条显示内核生成的标题', !!firstTitle && firstTitle.textContent.indexOf('修门插件') === 0,
+      assert('第一条显示内核生成的标题', !!firstTitle && firstTitle.textContent.indexOf('检查示例') === 0,
         firstTitle ? firstTitle.textContent : '无');
       var sub2 = overlay.querySelectorAll('.history-item-sub')[1];
       assert('非默认模式的名字显示在副行', !!sub2 && sub2.textContent.indexOf('ptc') >= 0, sub2 ? sub2.textContent : '无');
@@ -636,18 +651,19 @@ function assertionsScript(scene) {
       assert('点回放会向扩展要这段会话（带 id）',
         window.__received.some(function (m) { return m.type === 'historyOpen' && m.id === 'session-alpha'; }),
         JSON.stringify(window.__received));
-      window.postMessage({ type: 'replay', truncated: false, card: { id: 'session-alpha', title: '修门插件的依赖注入', turns: 12, lastTime: Date.now() - 3600e3 }, entries: [
-        { kind: 'user', text: '门插件报 cannot get property 是怎么回事？' },
-        { kind: 'assistant', text: '原因是 cordis 不允许在没有 **inject** 的情况下读服务属性。', thinking: '先查 cordis 的服务解析规则。' },
+      window.postMessage({ type: 'replay', truncated: false, card: { id: 'session-alpha', title: '检查示例加法函数', turns: 12, lastTime: Date.now() - 3600e3 }, entries: [
+        { kind: 'user', text: '示例加法函数为什么返回错误结果？' },
+        { kind: 'assistant', text: '示例函数使用了**减法**运算，需要按加法规则检查。', thinking: '检查示例函数的返回值。' },
         { kind: 'tool', name: 'read', args: { file_path: 'lib/index.js' }, output: 'export const inject = [];' },
-        { kind: 'assistant', text: '补上 inject 就好了。' },
+        { kind: 'assistant', text: '将返回表达式改为加法。' },
       ] }, '*');
       await new Promise(function (resolve) { setTimeout(resolve, 500); });
       assert('回放开始后浮层收起来了', !visible(overlay));
       assert('回放重建了用户气泡', document.querySelectorAll('.msg-user .bubble').length === 1,
         document.querySelectorAll('.msg-user .bubble').length + ' 个');
       var bodies = document.querySelectorAll('.msg-assistant .body');
-      assert('回放重建了两段回答', bodies.length === 2 && bodies[0].textContent.indexOf('cordis') >= 0,
+      assert('回放重建了两段回答', bodies.length === 2 && bodies[0].textContent.indexOf('减法') >= 0
+        && bodies[1].textContent.indexOf('加法') >= 0,
         bodies.length + ' 段');
       assert('回放的思考块也在（且默认可见）', document.querySelectorAll('details.thinking:not([hidden])').length === 1);
       var replayTools = document.querySelectorAll('.tool');
@@ -670,7 +686,7 @@ function assertionsScript(scene) {
       hbtn.click();
       assert('回放之后还能再打开浮层', visible(overlay));
       window.postMessage({ type: 'history', skipped: 5, sessions: [
-        { id: 'session-alpha', title: '修门插件的依赖注入', turns: 12, lastTime: Date.now() - 3600e3, cwd: '<仓库根目录>', preset: 'standard' },
+        { id: 'session-alpha', title: '检查示例加法函数', turns: 12, lastTime: Date.now() - 3600e3, cwd: '<仓库根目录>', preset: 'standard' },
       ] }, '*');
       await new Promise(function (resolve) { setTimeout(resolve, 400); });
       var again = overlay.querySelectorAll('.history-item');

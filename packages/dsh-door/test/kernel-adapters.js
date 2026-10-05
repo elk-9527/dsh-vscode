@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { withAcpApprovalPriority } from '../lib/kernel/acp-context.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -25,6 +26,19 @@ async function check(name, fn) {
   passed += 1;
   console.log(`  PASS  ${name}`);
 }
+
+await check('批准订阅优先级不改变作用域，其他订阅与服务保持原状', () => {
+  const calls = [];
+  const service = {};
+  const ctx = { service, on(...args) { assert.equal(this, ctx); calls.push(args); } };
+  const adapted = withAcpApprovalPriority(ctx);
+  const listener = () => {};
+  adapted.on('approval/request', listener, { global: false });
+  adapted.on('session/event', listener);
+  assert.deepEqual(calls[0], ['approval/request', listener, { global: false, prepend: true }]);
+  assert.deepEqual(calls[1], ['session/event', listener, undefined]);
+  assert.equal(adapted.service, service);
+});
 
 const header = {
   version: 4,
@@ -107,6 +121,25 @@ await check('sessionQuery get 校验 id，并把找不到会话改成人话', as
   });
   await assert.rejects(() => handler.get('../bad'), /id 不合法/);
   await assert.rejects(() => handler.get('missing'), /找不到会话 missing/);
+});
+
+await check('批量标题列表不重复读取完整正文，单条回放仍保留完整统计', async () => {
+  let fullReads = 0, batches = 0;
+  const handler = createSessionQueryHistory({
+    async listSessions() { return Array.from({ length: 400 }, (_, index) => ({ header: { ...header, id: `batch-${index}` } })); },
+    async readTitleSnapshots(ids) {
+      batches++; assert.equal(ids.length, 200);
+      return ids.map((sessionId, index) => index === 1 ? { sessionId, status: 'rejected', reason: new Error('unavailable') }
+        : { sessionId, status: 'fulfilled', value: { session: { ...header, id: sessionId }, title: { title: 'Batch title' } } });
+    },
+    async readSession(id) { fullReads++; return { session: { ...header, id }, events }; },
+  });
+  const listed = await handler.list({ limit: 200 });
+  assert.equal(batches, 1); assert.equal(fullReads, 0); assert.equal(listed.skipped, 200);
+  assert.equal(listed.sessions[0].title, 'Batch title'); assert.equal(listed.sessions[0].summaryPartial, true);
+  assert.equal(listed.sessions[1].id, 'batch-1'); assert(listed.sessions[1].decodeError);
+  const replay = await handler.get('batch-0'); assert.equal(fullReads, 1); assert.equal(replay.card.turns, 1);
+  assert.equal(replay.card.summaryPartial, undefined);
 });
 
 await check('旧版历史回退在首次启动的空目录上返回空列表', async () => {

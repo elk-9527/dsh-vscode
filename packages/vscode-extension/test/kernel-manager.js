@@ -223,6 +223,18 @@ section('8. 不碰别人起的那个内核');
   check('disposeAll 在空表上安全', manager.disposeAll('窗口关闭') === 0);
 }
 
+section('9. 窗口关闭保留正在进行的插件任务，手动停止仍生效');
+{
+  const { manager, spawns } = makeManager({ idleMs: 0 });
+  const entry = manager.spawn({ host: '127.0.0.1', port: 47831 });
+  const owner = {};
+  manager.acquire(owner, entry); entry.activeBridgeRuns.add('review-1'); manager.release(owner);
+  check('零宽限仍保留进行中的审查', spawns[0].background.disposed === 0);
+  check('窗口关闭交给接入点在任务结束后回收', manager.disposeAll('窗口关闭', { preserveBridgeRuns: true }) === 0 && spawns[0].background.disposed === 0);
+  const next = manager.spawn({ host: '127.0.0.1', port: 47832 }); next.activeBridgeRuns.add('review-2');
+  check('用户停止命令仍能终止正在进行的任务', manager.stop(next.key, '用户停止') && spawns[1].background.disposed === 1);
+}
+
 console.log(`\n${'═'.repeat(56)}`);
 if (failed === 0) console.log(`✅ 全部通过：${passed} 项检查`);
 else {

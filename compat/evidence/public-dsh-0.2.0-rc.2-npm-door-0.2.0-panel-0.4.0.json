@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "status": "passed",
+  "source": {
+    "commit": "e0f4725012f35c2db896872a0e3d17e74ba485eb",
+    "fingerprint": "1e089f62f45a69deea09eaaf1fcdcfab2f93755aa84b6d14f6841e12eec3f47f"
+  },
+  "packages": {
+    "panel": "0.4.0",
+    "door": "0.2.0"
+  },
+  "runtime": {
+    "version": "0.2.0-rc.2",
+    "acpVersion": "0.2.0-rc.2",
+    "distribution": "npm"
+  },
+  "stages": [
+    {
+      "name": "runtime",
+      "status": "passed"
+    },
+    {
+      "name": "package",
+      "status": "passed"
+    },
+    {
+      "name": "installation",
+      "status": "passed"
+    },
+    {
+      "name": "startup",
+      "status": "passed"
+    },
+    {
+      "name": "handshake",
+      "status": "passed"
+    },
+    {
+      "name": "status",
+      "status": "passed"
+    },
+    {
+      "name": "session",
+      "status": "passed"
+    },
+    {
+      "name": "model-switch",
+      "status": "passed"
+    },
+    {
+      "name": "preset-switch",
+      "status": "passed"
+    },
+    {
+      "name": "stream",
+      "status": "passed"
+    },
+    {
+      "name": "permissions",
+      "status": "passed"
+    },
+    {
+      "name": "tools",
+      "status": "passed"
+    },
+    {
+      "name": "permission-request",
+      "status": "passed"
+    },
+    {
+      "name": "permission-cancel",
+      "status": "passed"
+    },
+    {
+      "name": "history",
+      "status": "passed"
+    },
+    {
+      "name": "resume",
+      "status": "passed"
+    },
+    {
+      "name": "cancel",
+      "status": "passed"
+    },
+    {
+      "name": "cleanup",
+      "status": "passed"
+    }
+  ],
+  "artifacts": [
+    {
+      "kind": "tgz",
+      "sha256": "a0d346ed94f030f5048da64bb92915e56a65e004fd95ce2713d49706752c29aa"
+    }
+  ]
+}

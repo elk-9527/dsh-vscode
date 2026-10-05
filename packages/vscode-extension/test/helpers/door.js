@@ -123,10 +123,15 @@ function doorFiles() {
     const full = path.join(DOOR_SRC, entry);
     if (!fs.existsSync(full)) continue;
     if (fs.statSync(full).isDirectory()) {
-      for (const name of fs.readdirSync(full)) {
-        const child = path.join(full, name);
-        if (fs.statSync(child).isFile()) out.push(path.join(entry, name));
-      }
+      const walk = (directory, relative) => {
+        for (const name of fs.readdirSync(directory)) {
+          const child = path.join(directory, name);
+          const rel = path.join(relative, name);
+          if (fs.statSync(child).isDirectory()) walk(child, rel);
+          else out.push(rel);
+        }
+      };
+      walk(full, entry);
     } else {
       out.push(entry);
     }

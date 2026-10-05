@@ -22,7 +22,7 @@ const TEST_EXTENSION_URI = { fsPath: path.resolve(__dirname, '..') };
 const openedLinks = [];
 const configValues = {
   host: '127.0.0.1',
-  port: 47821,
+  port: Number(process.env.DSH_PANEL_PORT || 47821),
   // ⚠️ 自启端口**有意不使用默认的 47831**：该路径的前提是「端口上必须没有监听」，
   // 而 47831 正是面板自启内核的默认端口；用户自行开着 VS Code 面板时，该端口上
   // 即有一个正在使用的内核（实测遇到：§8.5 直接连上了它，于是「命令错误」
@@ -30,7 +30,7 @@ const configValues = {
   selfStartPort: 47845,
   autoStart: false,
   fallbackProfile: 'dshdoor',
-  dshCommand: 'dsh',
+  dshCommand: process.env.DSH_PANEL_DSH || 'dsh',
   provider: '',
   model: '',
   // 本套件中一律「面板一关闭即回收内核」（旧行为），以便回收类断言保持简单直接。
@@ -290,9 +290,10 @@ function typesOf(items) {
     `${beforeDrop} → ${panel.session.sessionId}`,
   );
   const resumeMessages = view.messages.slice(resumeIndex).map((item) => item.message);
+  const resumeText = resumeMessages.filter((item) => item.type === 'text').map((item) => String(item.delta)).join('');
   check(
     '上下文确实接回（回答中包含断线前的数字）',
-    resumeMessages.some((item) => item.type === 'text' && String(item.delta).includes(MARKER)),
+    resumeText.includes(MARKER),
     JSON.stringify(resumeMessages.filter((i) => i.type === 'text').map((i) => i.delta)).slice(0, 200),
   );
 

@@ -22,8 +22,20 @@ const ROOT = path.resolve(__dirname, '..');
 const args = process.argv.slice(2);
 const withUi = args.includes('--ui') || args.includes('--all');
 const withDsh = args.includes('--all');
+const strict = args.includes('--strict');
 
 const suites = [
+  { name: 'Provider SDK 与技能写入恢复', file: '../dsh-bridge-sdk/test/contracts.js', always: true },
+  { name: '公共会话 API 与取消边界', file: 'test/public-api.js', always: true },
+  { name: '原生 Chat 与面板联动', file: 'test/native-chat.js', always: true },
+  { name: '技能草稿预览与确认', file: 'test/skill-management.js', always: true },
+  { name: 'Bridge 运行与鉴权', file: '../dsh-door/test/bridge.js', always: true },
+  { name: '共享连接与审查投影', file: 'test/bridge-service.js', always: true },
+  { name: '配置诊断与精确版本安装', file: 'test/bridge-profiles.js', always: true },
+  { name: '运行记录恢复与清理', file: 'test/bridge-operations.js', always: true },
+  { name: '原生命令与重试边界', file: 'test/bridge-views.js', always: true },
+  { name: '内置与文件技能正文读取', file: '../../tools/bridge/test-skill-provider.cjs', always: true },
+  { name: '编辑器账号目录与进程隔离', file: 'test/editor-isolation.js', always: true },
   { name: '静态契约', file: 'test/static.js', always: true },
   { name: '该插件的帧解析（纯函数）', file: '../dsh-door/test/frames.js', always: true },
   { name: '该插件的会话读取（纯函数）', file: '../dsh-door/test/sessions.js', always: true },
@@ -118,4 +130,4 @@ if (bad.length === 0) {
 } else {
   console.log(`\n❌ ${bad.length} 个套件失败`);
 }
-process.exit(bad.length === 0 ? 0 : 1);
+process.exit(bad.length === 0 && (!strict || skipped.length === 0) ? 0 : 1);

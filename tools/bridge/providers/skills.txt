@@ -1,0 +1,70 @@
+    ctx.inject(['ideBridge'], (bridgeCtx) => {
+        const opaqueId = skill => Buffer.from(JSON.stringify([skill.level, skill.name, skill.path || ''])).toString('base64url');
+        const files = new SkillFileStore({ roots: context => ({
+            'project-dsh': join(findProjectRoot(context.cwd), '.dsh', 'skills'), 'project-agents': join(findProjectRoot(context.cwd), '.agents', 'skills'),
+            'user-dsh': join(dshHome, 'skills'), 'user-agents': join(agentsHome, 'skills'),
+        }) });
+        const editable = (skill, context) => {
+            if (!skill.path || skill.linked || !['project-dsh', 'project-agents', 'user-dsh', 'user-agents'].includes(skill.level)) return false;
+            try { files.checked(skill.path, context); return true; } catch { return false; }
+        };
+        const scan = async context => {
+            const trusted = context.workspaceTrusted === true;
+            const result = await collectSkills({ cwd: trusted ? context.cwd : homedir(),
+                projectRoots: trusted ? [findProjectRoot(context.cwd)] : [],
+                customSkillDirs, dshHome, agentsHome, registry: skillCtx.skills });
+            if (!trusted) result.skills = result.skills.filter(skill => ['user-dsh', 'user-agents', 'custom'].includes(skill.level));
+            return result;
+        };
+        const object = properties => ({ type: 'object', properties, additionalProperties: false });
+        return registerProvider(bridgeCtx, {
+            id: '@linxin666/dsh-client-ui-skill-explorer', name: 'Skill Explorer', version: '0.4.4-ide.3',
+            capabilities: [...['list', 'read', 'health'].map(action => ({ id: `linxin.skill-explorer.${action}`,
+                title: { list: '浏览技能', read: '读取技能', health: '检查技能状态' }[action],
+                kind: 'resource', riskTier: 'read', effects: ['dsh-state.read'], requiresSession: false,
+                supportsCancellation: false, outputKinds: [`skill.${action}`],
+                inputSchema: action === 'read' ? { type: 'object', properties: { skillId: { type: 'string', maxLength: 32768 } }, required: ['skillId'], additionalProperties: false }
+                    : { type: 'object', properties: {}, additionalProperties: false } })),
+                { id: 'linxin.skill-explorer.preview', title: '预览技能修改', kind: 'resource', riskTier: 'read', effects: ['workspace.read'],
+                    inputSchema: { ...object({ action: { type: 'string', enum: ['create', 'update', 'enabled', 'delete', 'restore'] }, skillId: { type: 'string', maxLength: 32768 },
+                        scope: { type: 'string', enum: ['project-dsh', 'user-dsh'] }, name: { type: 'string', maxLength: 64 }, content: { type: 'string', maxLength: 200000 }, enabled: { type: 'boolean' }, trashId: { type: 'string', maxLength: 128 } }), required: ['action'] }, outputKinds: ['skill.diff'] },
+                { id: 'linxin.skill-explorer.commit', title: '确认技能修改', kind: 'resource', riskTier: 'workspace-write', effects: ['workspace.write', 'dsh-state.write'],
+                    inputSchema: { ...object({ planId: { type: 'string', maxLength: 128 } }), required: ['planId'] }, outputKinds: ['skill.write-result'] },
+                { id: 'linxin.skill-explorer.trash', title: '可恢复的技能', kind: 'resource', riskTier: 'read', effects: ['workspace.read'], inputSchema: object({}), outputKinds: ['skill.recovery'] },
+            ],
+            async invoke(id, input, context) {
+                const action = id.split('.').pop();
+                if (action === 'trash') return { entries: files.trash(context).map(item => ({ id: item.id, name: item.skillName, scope: item.scope, time: item.time, action: item.action })) };
+                const { skills, complete } = await scan(context);
+                if (id.endsWith('.health')) return { ok: true, skills: skills.length, complete };
+                if (id.endsWith('.list')) {
+                    const payload = buildPayload(skills, complete, context.cwd, []);
+                    payload.groups = payload.groups.map(group => ({ ...group, skills: group.skills.map(skill => ({ ...skill, id: opaqueId(skill), editable: editable(skill, context) })) }));
+                    return payload;
+                }
+                if (action === 'commit') {
+                    const plan = files.plans.get(input.planId);
+                    if (!plan) throw new Error('修改预览已过期');
+                    if (!['create', 'restore'].includes(plan.action) && !skills.some(skill => skill.path === plan.file && editable(skill, context))) throw new Error('技能来源已经变化或不可写');
+                    return files.commit(input.planId, context);
+                }
+                if (action === 'preview') {
+                    const skill = input.skillId && skills.find(item => opaqueId(item) === input.skillId);
+                    if (!['create', 'restore'].includes(input.action) && (!skill || !editable(skill, context))) throw new Error('该技能来源只读或已经变化');
+                    return files.preview({ ...input, file: skill?.path }, context);
+                }
+                const skill = skills.find(item => opaqueId(item) === input.skillId);
+                if (!skill) throw new Error('技能正文不存在或已经变化');
+                if (!context.workspaceTrusted && skill.level.startsWith('project')) throw new Error('受限工作区不允许读取项目技能');
+                if (!skill.path) {
+                    const definition = await skillCtx.skills.get(skill.name, { cwd: context.cwd, signal: context.signal });
+                    if (!definition || definition.provider !== skill.provider || opaqueId(serializeRegistry(definition)) !== input.skillId) throw new Error('技能正文不存在或已经变化');
+                    if (typeof definition.content !== 'string' || Buffer.byteLength(definition.content, 'utf8') > 1024 * 1024) throw new Error('技能正文超过限制');
+                    return { ...skill, id: opaqueId(skill), content: definition.content };
+                }
+                const metadata = await stat(skill.path);
+                if (!metadata.isFile() || metadata.size > 1024 * 1024) throw new Error('技能正文超过限制');
+                return { ...skill, id: opaqueId(skill), content: await readFile(skill.path, 'utf8') };
+            },
+        });
+    });

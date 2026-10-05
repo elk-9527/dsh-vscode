@@ -110,6 +110,7 @@ function fakeSession(id = 's-1') {
 
 function fakeClient() {
   const client = new EventEmitter();
+  client.isConnected = true;
   client.closeSession = async () => ({});
   client.close = () => client.emit('close', '客户端主动断开');
   return client;
@@ -545,6 +546,7 @@ async function checkConcurrentNewSession() {
   sendSession.send = async () => { sent = true; };
   sendPanel.session = sendSession;
   sendPanel.client = sendClient;
+  sendPanel.connections.client = sendClient;
   sendPanel.post = () => {};
   const changing = sendPanel.newSession();
   await Promise.resolve();

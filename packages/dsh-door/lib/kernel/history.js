@@ -74,6 +74,21 @@ export function createSessionQueryHistory(service, diag = () => {}) {
       const limit = requestedLimit(params);
       const records = await service.listSessions();
       const selected = records.slice(0, limit);
+      // The batch API resolves persistence once and folds titles without replaying
+      // every complete log. Full counts and fallback text remain in get(id).
+      if (typeof service.readTitleSnapshots === 'function') {
+        const ids = selected.map(record => record?.header?.id ?? record?.session?.id ?? record?.id).filter(id => typeof id === 'string' && id);
+        const observations = new Map((await service.readTitleSnapshots(ids)).map(item => [item.sessionId, item]));
+        return { sessions: selected.map(record => {
+          const header = record?.header ?? record?.session ?? record ?? {};
+          const observation = observations.get(header.id);
+          const card = summarizeSession(eventsWithSessionHeader(observation?.status === 'fulfilled' ? observation.value.session : header, []));
+          card.summaryPartial = true;
+          if (observation?.status === 'fulfilled') card.title = observation.value.title?.title || '';
+          else if (observation?.status === 'rejected') card.decodeError = '会话标题暂时无法读取';
+          return card;
+        }).filter(card => card.id), skipped: Math.max(0, records.length - selected.length) };
+      }
       const sessions = await mapLimited(selected, async (record) => {
         const header = record?.header ?? record?.session ?? record ?? {};
         const id = typeof header.id === 'string' ? header.id : '';
