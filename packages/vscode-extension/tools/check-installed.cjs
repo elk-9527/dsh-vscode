@@ -1,9 +1,10 @@
 'use strict';
-// 检查装入 VS Code 的扩展与仓库源码是否逐字节一致。
-// （存在差异即表示用户实际运行的是旧代码 —— 本项目曾出现过该情况。）
+// 检查装入 VS Code 的扩展与仓库源码是否一致。
+// VSCE 会把 LICENSE 改名为 LICENSE.txt，并把 README 中的相对仓库链接改写为
+// GitHub 绝对链接；这两项先按官方规则还原，其余内容仍逐字节比较。
 //
 // 设置该工具的原因：修改源码后必须完成「重新打包 → 重新安装」两个步骤，而
-// "已安装"与"安装的是当前版本"是两件事。用户报告"修改未生效"时，优先运行本工具。
+// 安装版本号不能证明发行文件与当前源码一致，因此需要逐文件比对。
 //
 // 用法：node tools/check-installed.cjs   （在 packages/vscode-extension 目录下运行）
 const fs = require('node:fs');
@@ -37,15 +38,36 @@ if (!fs.existsSync(DST)) {
 
 const files = shipFiles(SRC);
 
+function installedPath(rel) {
+  // VSCE 的标准扩展包文件名；`vsce ls` 展示源名称，但安装目录使用 LICENSE.txt。
+  if (rel === 'LICENSE' && fs.existsSync(path.join(DST, 'LICENSE.txt'))) return path.join(DST, 'LICENSE.txt');
+  return path.join(DST, rel);
+}
+
+function comparableInstalled(rel, file) {
+  const bytes = fs.readFileSync(file);
+  if (rel !== 'README.md') return bytes;
+  const repository = typeof manifest.repository === 'string'
+    ? manifest.repository
+    : manifest.repository?.url;
+  const root = String(repository || '')
+    .replace(/^git\+/, '')
+    .replace(/\.git$/, '')
+    .replace(/\/$/, '');
+  if (!/^https:\/\/github\.com\//i.test(root)) return bytes;
+  const text = bytes.toString('utf8').replaceAll(`${root}/blob/HEAD/`, '');
+  return Buffer.from(text, 'utf8');
+}
+
 const drift = [];
 for (const rel of files) {
   const a = path.join(SRC, rel);
-  const b = path.join(DST, rel);
+  const b = installedPath(rel);
   if (!fs.existsSync(b)) {
     drift.push(`${rel} —— 装进去的那份里没有这个文件`);
     continue;
   }
-  if (fs.readFileSync(a).equals(fs.readFileSync(b))) continue;
+  if (fs.readFileSync(a).equals(comparableInstalled(rel, b))) continue;
   if (rel === 'package.json') {
     const x = JSON.parse(fs.readFileSync(a, 'utf8'));
     const y = JSON.parse(fs.readFileSync(b, 'utf8'));
@@ -64,7 +86,8 @@ if (drift.length) {
   console.log(`\n❌ 有 ${drift.length} 处不一致（用户跑的不是当前源码）：`);
   for (const d of drift) console.log('   - ' + d);
   console.log('\n重打包重装：');
-  console.log('  node tools/build-vsix.js');
+  console.log('  npx --yes @vscode/vsce package --no-dependencies --out "build\\'
+    + manifest.name + '-' + manifest.version + '.vsix"');
   console.log('  code --install-extension "build\\'
     + manifest.name + '-' + manifest.version + '.vsix" --force');
   console.log('  然后让用户 Developer: Reload Window');

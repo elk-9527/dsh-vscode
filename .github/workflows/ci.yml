@@ -34,6 +34,12 @@ jobs:
       - name: 运行不依赖 DSH 的快速套件
         run: node packages/vscode-extension/test/run-all.js
 
+      - name: 兼容维护契约
+        run: pnpm compat:contracts
+
+      - name: 浏览器界面验收
+        run: pnpm ui
+
       - name: 检查编码与换行
         run: node packages/vscode-extension/tools/check-eol.cjs
 

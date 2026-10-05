@@ -629,7 +629,7 @@
     for (const item of list) {
       const chip = document.createElement('span');
       chip.className = `chip chip-${item.kind === 'selection' ? 'sel' : 'file'}`;
-      chip.title = `${item.name || ''}${item.detail ? ` · ${item.detail}` : ''}`;
+      chip.title = item.kind === 'review' ? `${item.name || ''}${item.detail ? ` · ${item.detail}` : ''}\n${item.text || ''}` : `${item.name || ''}${item.detail ? ` · ${item.detail}` : ''}`;
 
       const icon = document.createElement('span');
       icon.className = 'chip-icon';
@@ -1086,7 +1086,7 @@
    * 权限相关的新状态（清单 + 当前值，或一句「为什么无法切换」）。
    *
    * 关键一条：**清单并非写死**，而是由内核提供（该插件 0.0.12 转出）。
-   * 因此用户安装 Auto Approval 等插件，或在档中添加预设后，此处会随之增加，
+   * 因此 DSH 0.2 注册 Auto review、用户安装权限插件或添加预设后，此处会随之增加，
    * 与桌面端使用同一数据源。
    */
   function setPermissionState(message) {
@@ -1220,8 +1220,8 @@
   /**
    * 选中一项。
    *
-   * 「完全权限」需要经过确认（文案由扩展提供，见 src/dsh/permission.js 的 CONFIRM）：
-   * 该档位会使智能体不再逐条请求确认，误操作代价较大，因此增加一步确认。
+   * 「完全权限」与实验性的 Auto review 需要经过确认（文案由扩展随选项提供）：
+   * 两者都不使用沙箱，误操作代价较大，因此增加一步确认。
    */
   function chooseAccess(option) {
     /*

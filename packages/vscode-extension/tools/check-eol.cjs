@@ -18,6 +18,9 @@ const roots = [
   'packages/vscode-extension/test',
   'packages/vscode-extension/tools',
   'docs',
+  'tools/compat',
+  'compat',
+  '.github/workflows',
 ].map((r) => path.join(REPO, r));
 const EXTS = new Set(['.js', '.mjs', '.cjs', '.css', '.json', '.md', '.yml', '.yaml', '.html']);
 

@@ -201,6 +201,17 @@ section('9. 未保存或已修改文件使用编辑器当前快照');
   check('空的未保存文件也保留一段明确上下文', empty.length === 2 && /Untitled-1/.test(empty[0].text), JSON.stringify(empty));
 }
 
+section('10. 审查报告仅作为显式附件正文发送');
+{
+  const report = { kind: 'review', name: '代码审查报告', text: '# 代码审查\n\n## [P1] 加法错误\n\n计算 sample.js:1', finishedAt: '2026-10-05T12:00:00Z', uri: 'dsh-result:/review/fixture.md' };
+  const blocks = buildPromptBlocks('解释这个问题', [report]);
+  check('报告全文与提问保持顺序', blocks.length === 2 && blocks[0].text.includes(report.text) && blocks[1].text === '解释这个问题', JSON.stringify(blocks));
+  check('报告说明历史快照与审查时间', blocks[0].text.includes('代码快照') && blocks[0].text.includes(report.finishedAt));
+  check('虚拟报告地址不作为文件读取链接', !blocks.some(item => item.type === 'resource_link'));
+  const removed = buildPromptBlocks('不发送报告', []);
+  check('移除附件后没有报告内容', removed.length === 1 && !removed[0].text.includes('加法错误'));
+}
+
 console.log('\n════════════════════════════════════════════════════════');
 if (failures.length === 0) {
   console.log(`✅ 全部通过：${passed} 项检查`);

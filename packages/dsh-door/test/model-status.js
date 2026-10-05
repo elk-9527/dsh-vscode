@@ -131,6 +131,14 @@ check('状态应答保持标准 JSON-RPC 形状', () => {
   });
 });
 
+check('实际运行时诊断为可选增量字段，未知历史接口不虚报磁盘格式', () => {
+  const result = doorStatusPayload({ acpVersion: '0.2.0-rc.2', historyKind: 'unavailable' });
+  assert.equal(result.protocolVersion, 1);
+  assert.deepEqual(result.runtime, { acpVersion: '0.2.0-rc.2' });
+  assert.equal(result.capabilities.history, false);
+  assert.equal(result.capabilities.sessionFormat, undefined);
+});
+
 check('代码中的版本号与包版本一致', () => {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const pkg = JSON.parse(fs.readFileSync(path.join(here, '..', 'package.json'), 'utf8'));

@@ -17,10 +17,21 @@
     "test": "node packages/vscode-extension/test/run-all.js --all",
     "test:ext": "node packages/vscode-extension/test/run-all.js --all",
     "test:door": "node packages/dsh-door/test/run-all.js",
-    "ui": "node packages/vscode-extension/tools/uitest.js"
+    "ui": "node packages/vscode-extension/tools/uitest.js",
+    "compat:doctor": "node tools/compat/doctor.cjs",
+    "compat:test": "node tools/compat/test.cjs",
+    "compat:contracts": "node tools/compat/contracts.cjs",
+    "compat:local": "node tools/compat/local.cjs",
+    "compat:release-check": "node tools/compat/release-check.cjs",
+    "bridge:pilots": "node tools/bridge/build-pilots.cjs",
+    "bridge:test": "node tools/bridge/test-live.cjs --editor",
+    "bridge:real": "node tools/bridge/test-real.cjs",
+    "bridge:scenarios": "node tools/bridge/test-scenarios.cjs",
+    "bridge:install": "node tools/bridge/install-local.cjs"
   },
   "devDependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",
+    "semver": "7.7.3",
     "typescript": "^7.0.2",
     "zod": "^4.6.5"
   }

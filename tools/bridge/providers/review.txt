@@ -1,0 +1,34 @@
+    ctx.inject(['ideBridge'], (bridgeCtx) => {
+        return bridgeCtx.ideBridge.registerProvider({
+            id: '@michengai/dsh-code-review', name: 'Code Review', version: '0.1.9-ide.1',
+            capabilities: [{ id: 'michengai.code-review.run', title: '审查代码变更', kind: 'action',
+                riskTier: 'execute', effects: ['workspace.read', 'process.execute', 'dsh-state.write'],
+                requiresSession: true, supportsCancellation: true, outputKinds: ['review.report'],
+                inputSchema: { type: 'object', properties: { mode: { type: 'string', enum: ['worktree', 'base', 'commit', 'custom'] },
+                    ref: { type: 'string', maxLength: 256 }, instructions: { type: 'string', maxLength: 16000 } },
+                    required: ['mode'], additionalProperties: false } }],
+            async invoke(_id, input, context) {
+                const agent = context.agent;
+                if (!agent || active.has(agent.id)) throw new Error('当前会话已有审查运行');
+                if (['base', 'commit'].includes(input.mode) && (!input.ref || input.ref.startsWith('-') || /[\s\x00-\x1f`$;"']/.test(input.ref))) throw new Error('引用无效');
+                if (input.mode === 'custom' && !input.instructions?.trim()) throw new Error('审查要求为空');
+                const controller = new AbortController(); active.set(agent.id, controller);
+                try {
+                    const signal = AbortSignal.any([controller.signal, lifetime.signal, context.signal]);
+                    const target = input.mode === 'custom' ? { mode: 'custom', instructions: input.instructions } : { mode: input.mode, ref: input.ref };
+                    await journal.write(agent.id, { version: 1, state: 'running', commandId: 'ide-review' });
+                    await ctx.sessions.flush(agent.session);
+                    context.emit({ type: 'progress', payload: { message: '正在运行审查' } });
+                    const result = await runReview(ctx, agent, target, signal, undefined, config.reviewModel, readHostLocale(ctx), true);
+                    await journal.write(agent.id, { version: 1, state: 'finished', result });
+                    await ctx.sessions.flush(agent.session);
+                    signal.throwIfAborted();
+                    if (['failed', 'interrupted', 'invalid-output', 'stale'].includes(result.status)) throw new Error('审查未完成');
+                    return { runId: result.id, status: result.status, verdict: result.report?.summary || result.detail,
+                        findings: (result.report?.findings || []).map(f => ({ priority: `P${f.priority ?? 3}`,
+                            title: f.title, body: f.body, file: f.path, startLine: f.start, endLine: f.end })),
+                        rawText: renderOutcome(result, readHostLocale(ctx)) };
+                } finally { active.delete(agent.id); }
+            },
+        });
+    });

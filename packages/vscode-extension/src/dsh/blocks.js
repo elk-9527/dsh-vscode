@@ -102,8 +102,12 @@ function buildPromptBlocks(text, attachments = []) {
     if (item.kind === 'content' && typeof item.text === 'string') {
       blocks.push({ type: 'text', text: contentText(item) });
     }
+    // 审查报告只在显式发送附件时进入对话，保留其历史快照含义。
+    if (item.kind === 'review' && hasText) {
+      blocks.push({ type: 'text', text: `以下是已完成的代码审查报告。报告针对审查时的代码快照，后续修改需重新核对。\n${item.finishedAt ? `审查时间：${item.finishedAt}\n` : ''}\n${item.text}` });
+    }
     // 选中代码时同时附带一条链接：需要更多上下文时模型可自行读取。
-    if (hasUri) {
+    if (hasUri && item.kind !== 'review') {
       const link = { type: 'resource_link', name: item.name || item.uri, uri: item.uri };
       if (typeof item.mimeType === 'string' && item.mimeType) link.mimeType = item.mimeType;
       blocks.push(link);

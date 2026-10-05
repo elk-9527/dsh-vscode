@@ -1,0 +1,25 @@
+'use strict';
+const assert = require('node:assert/strict');
+const { OperationStore } = require('../src/bridge/operations');
+const removed = [];
+const store = new OperationStore({ limit: 2, onRemove: op => removed.push(op.id) });
+store.set('active', { id: 'active', status: 'running', seq: 1, input: { mode: 'custom', instructions: 'SECRET_CUSTOM_REQUIREMENT' }, instanceId: 'original-kernel', clientId: 'original-client', cwd: '/fixture' });
+assert(store.event({ operationId: 'active', seq: 2, type: 'progress', at: '2026-10-04T01:00:00Z' }));
+assert(!store.event({ operationId: 'active', seq: 2, type: 'progress' }));
+store.get('active').status = 'cancelling';
+store.snapshot('active', { status: 'running', seq: 2 }); assert.equal(store.get('active').status, 'cancelling');
+store.event({ operationId: 'active', seq: 3, type: 'completed', payload: { text: 'FULL_REPORT_SECRET' } });
+store.snapshot('active', { status: 'running', seq: 2 }); assert.equal(store.get('active').status, 'completed');
+assert(!store.event({ operationId: 'active', seq: 4, type: 'progress' }));
+store.set('pending', { id: 'pending', status: 'pending-restore' });
+store.set('cancelling', { id: 'cancelling', status: 'cancelling' });
+store.set('other', { id: 'other', status: 'failed' });
+const serialized = store.serialize(); assert(!JSON.stringify(serialized).includes('SECRET')); assert.equal(serialized.records[0].input.mode, 'custom');
+const restored = new OperationStore(serialized); assert.equal(restored.get('cancelling').status, 'pending-restore'); assert.equal(restored.get('active').instanceId, 'original-kernel');
+assert(!store.remove('pending')); assert(!store.remove('cancelling')); assert.equal(store.clearFinished(), 2);
+assert(!store.event({ operationId: 'active', seq: 99, type: 'completed' })); assert(!new OperationStore(store.serialize()).event({ operationId: 'active', seq: 100, type: 'completed' }));
+for (let i = 0; i < 5; i++) { store.set('done-' + i, { id: 'done-' + i, status: 'completed' }); store.serialize(); }
+assert.equal([...store.values()].filter(op => op.status === 'completed').length, 2); assert(store.has('pending') && store.has('cancelling'));
+store.unavailable('pending', '原内核已变化'); assert.equal(store.get('pending').status, 'unrecoverable'); assert(store.get('pending').finishedAt);
+assert(removed.includes('done-0'));
+console.log('Event ordering, cancel completion race, credential-free metadata, bounded cleanup and deletion persistence passed');

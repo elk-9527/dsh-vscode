@@ -111,17 +111,9 @@ function manifestXml(manifest) {
 function main() {
   const manifest = readManifest();
 
-  // 1) 清空并重建暂存目录
-  //    沙箱会拦截「一次删除超过 50 个文件」的操作（SAFE_DELETE_BULK_CONFIRM_REQUIRED），
-  //    uitest 场景页数量增多后 build 即超出该阈值。删除失败时把旧目录改名移开（不删除，保留供人工清理）。
-  try {
-    fs.rmSync(BUILD, { recursive: true, force: true });
-  } catch (err) {
-    const stale = path.join(path.dirname(BUILD), `build_stale_bak`);
-    console.warn(`  ⚠ build 清理被拦（${err.code || err.message}），改名挪到 ${stale}`);
-    fs.rmSync(stale, { recursive: true, force: true }); // 上一次改名遗留的残留，通常不存在
-    fs.renameSync(BUILD, stale);
-  }
+  // 只重建暂存目录，保留历史 VSIX 与验收记录供回退。
+  if (path.dirname(path.resolve(STAGE)) !== path.resolve(BUILD) || fs.existsSync(STAGE) && fs.lstatSync(STAGE).isSymbolicLink()) throw new Error('暂存目录超出构建边界或为链接');
+  fs.rmSync(STAGE, { recursive: true, force: true });
   const extensionDir = path.join(STAGE, 'extension');
   fs.mkdirSync(extensionDir, { recursive: true });
 
@@ -180,4 +172,5 @@ function main() {
   console.log('  ✅ 自检通过（结构完整、条目名规范）');
 }
 
-main();
+if (require.main === module) main();
+module.exports = { manifestXml, contentTypesXml };

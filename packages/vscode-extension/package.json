@@ -1,8 +1,8 @@
 {
   "name": "dsh-acp-panel",
   "displayName": "DSH ACP Panel",
-  "description": "在 VS Code 侧边栏使用 DeepSeek Harness：对话、调用工具、附加代码上下文，并切换模型、模式与权限。",
-  "version": "0.2.1",
+  "description": "在 VS Code 使用 DeepSeek Harness：对话、工具、代码审查、技能浏览和插件运行记录。",
+  "version": "0.5.0",
   "publisher": "Elk-ydy",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -50,7 +50,7 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": true,
-      "description": "面板只与用户自己的 DSH 通信，不执行工作区中的代码：读取工作区文件仅在用户主动通过右键菜单执行「带进对话」时发生，设置项也只读取用户级设置（受限模式下 VS Code 本就不会应用工作区设置）。不声明这一条时，VS Code 会在受限模式下禁用整个扩展，表现为面板不显示且不报错。"
+      "description": "受限工作区可以使用对话面板和用户级技能浏览；代码审查和项目技能读取需要受信任的工作区。连接设置只读取用户级配置。"
     }
   },
   "contributes": {
@@ -69,6 +69,14 @@
           "id": "dshPanel.chat",
           "name": "对话",
           "type": "webview"
+        },
+        {
+          "id": "dshPanel.capabilities",
+          "name": "工具"
+        },
+        {
+          "id": "dshPanel.operations",
+          "name": "运行记录"
         }
       ]
     },
@@ -109,10 +117,98 @@
         "command": "dshPanel.attachSelection",
         "title": "DSH：把选中的代码带进对话",
         "icon": "$(selection)"
+      },
+      {
+        "command": "dshPanel.bridge.refresh",
+        "title": "DSH：刷新插件能力",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "dshPanel.bridge.review",
+        "title": "DSH：审查代码变更",
+        "icon": "$(checklist)"
+      },
+      {
+        "command": "dshPanel.bridge.skills",
+        "title": "DSH：搜索技能",
+        "icon": "$(search)"
+      },
+      {
+        "command": "dshPanel.bridge.readSkill",
+        "title": "DSH：读取技能"
+      },
+      {
+        "command": "dshPanel.bridge.openReport",
+        "title": "DSH：打开报告"
+      },
+      {
+        "command": "dshPanel.bridge.attachReview",
+        "title": "DSH：将审查结果带入对话",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "dshPanel.bridge.cancel",
+        "title": "DSH：取消运行",
+        "icon": "$(stop-circle)"
+      },
+      {
+        "command": "dshPanel.bridge.diagnose",
+        "title": "DSH：检查技能状态",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "dshPanel.bridge.diagnoseConfig",
+        "title": "DSH：诊断连接与配置",
+        "icon": "$(inspect)"
+      },
+      {
+        "command": "dshPanel.bridge.copyDiagnostics",
+        "title": "DSH：复制连接与配置诊断",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "dshPanel.bridge.installGuide",
+        "title": "DSH：查看插件安装说明",
+        "icon": "$(extensions)"
+      },
+      {
+        "command": "dshPanel.bridge.reloadOwned",
+        "title": "DSH：重新加载面板后台内核",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "dshPanel.bridge.retry",
+        "title": "DSH：重新运行审查",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "dshPanel.bridge.remove",
+        "title": "DSH：移除已结束记录",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "dshPanel.bridge.clearFinished",
+        "title": "DSH：清理已结束记录",
+        "icon": "$(clear-all)"
       }
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "dshPanel.bridge.diagnoseConfig",
+          "when": "view == dshPanel.capabilities",
+          "group": "navigation@3"
+        },
+        {
+          "command": "dshPanel.bridge.installGuide",
+          "when": "view == dshPanel.capabilities",
+          "group": "actions@1"
+        },
+        {
+          "command": "dshPanel.bridge.clearFinished",
+          "when": "view == dshPanel.operations",
+          "group": "navigation"
+        },
         {
           "command": "dshPanel.newSession",
           "when": "view == dshPanel.chat",
@@ -122,6 +218,16 @@
           "command": "dshPanel.reconnect",
           "when": "view == dshPanel.chat",
           "group": "navigation@2"
+        },
+        {
+          "command": "dshPanel.bridge.refresh",
+          "when": "view == dshPanel.capabilities",
+          "group": "navigation"
+        },
+        {
+          "command": "dshPanel.bridge.skills",
+          "when": "view == dshPanel.capabilities",
+          "group": "navigation"
         }
       ],
       "editor/context": [
@@ -133,6 +239,11 @@
         {
           "command": "dshPanel.attachFile",
           "group": "dsh@2"
+        },
+        {
+          "command": "dshPanel.bridge.review",
+          "when": "resourceScheme == file && isWorkspaceTrusted",
+          "group": "dsh"
         }
       ],
       "commandPalette": [
@@ -148,6 +259,35 @@
         {
           "command": "dshPanel.attachSelection",
           "when": "editorHasSelection"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "dshPanel.bridge.review",
+          "when": "scmProvider == git && isWorkspaceTrusted",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "dshPanel.bridge.attachReview",
+          "when": "view == dshPanel.operations && viewItem == dshCompletedReview && isWorkspaceTrusted",
+          "group": "inline@0"
+        },
+        {
+          "command": "dshPanel.bridge.retry",
+          "when": "view == dshPanel.operations && (viewItem == dshFinishedOperation || viewItem == dshCompletedReview) && isWorkspaceTrusted",
+          "group": "inline@1"
+        },
+        {
+          "command": "dshPanel.bridge.remove",
+          "when": "view == dshPanel.operations && (viewItem == dshFinishedOperation || viewItem == dshCompletedReview)",
+          "group": "inline@2"
+        },
+        {
+          "command": "dshPanel.bridge.cancel",
+          "when": "view == dshPanel.operations && viewItem == dshRunningOperation",
+          "group": "inline"
         }
       ]
     },
@@ -180,7 +320,7 @@
           "type": "number",
           "default": 10,
           "scope": "machine",
-          "description": "面板自行启动的内核，在最后一个面板关闭之后保留的时长（分钟）。在此期间重新打开面板会继续使用同一个内核，无需重启，也无需重连。窗口关闭时无条件终止。设为 0 表示面板关闭即终止（旧行为）。"
+          "description": "面板自行启动的内核，在最后一个使用方退出后保留的时长（分钟）。窗口关闭时，正在进行的插件任务继续完成，空闲后回收。设为 0 表示空闲即回收。"
         },
         "dshPanel.autoStart": {
           "type": "boolean",
@@ -192,7 +332,7 @@
           "type": "string",
           "default": "vscode-panel",
           "scope": "machine",
-          "description": "自行启动内核时使用哪个配置集。默认 vscode-panel。不要填 desktop：该配置集由桌面端独占，命令行无法启动。该配置集必须安装连接组件，并准备所需的模型和个人插件；启动失败时，面板会在 $DSH_HOME/profiles 中另找一个已安装连接组件的网页配置集继续尝试。"
+          "description": "自行启动内核时使用哪个配置集。默认 vscode-panel。不要填 desktop：该配置集由桌面端独占，命令行无法启动。默认配置集会同步桌面端已启用的注册表插件和运行时 bundle，并只读加载 desktop 的模型路由、插件开关与参数；本地路径或 Git 来源不会自动复制。启动失败时，面板会在 $DSH_HOME/profiles 中另找一个已安装连接组件的网页配置集继续尝试。"
         },
         "dshPanel.dshCommand": {
           "type": "string",

@@ -30,7 +30,7 @@ const configValues = {
   selfStartPort: 47845,
   autoStart: false,
   fallbackProfile: 'dshdoor',
-  dshCommand: 'dsh',
+  dshCommand: process.env.DSH_PANEL_DSH || 'dsh',
   provider: '',
   model: '',
   // 本套件中一律「面板一关闭即回收内核」（旧行为），以便回收类断言保持简单直接。
@@ -290,9 +290,10 @@ function typesOf(items) {
     `${beforeDrop} → ${panel.session.sessionId}`,
   );
   const resumeMessages = view.messages.slice(resumeIndex).map((item) => item.message);
+  const resumeText = resumeMessages.filter((item) => item.type === 'text').map((item) => String(item.delta)).join('');
   check(
     '上下文确实接回（回答中包含断线前的数字）',
-    resumeMessages.some((item) => item.type === 'text' && String(item.delta).includes(MARKER)),
+    resumeText.includes(MARKER),
     JSON.stringify(resumeMessages.filter((i) => i.type === 'text').map((i) => i.delta)).slice(0, 200),
   );
 

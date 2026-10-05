@@ -64,7 +64,7 @@ const configValues = {
   // 生产默认值是 desktop（用户自身的档）。测试中刻意改用 dshdoor：
   // 以测试身份启动用户的真实配置会写入该用户的档与记忆 —— 测试不应具有该权限。
   fallbackProfile: 'dshdoor',
-  dshCommand: 'dsh',
+  dshCommand: process.env.DSH_PANEL_DSH || 'dsh',
   provider: '',
   model: '',
   // 前几节验证的是"收尾必须彻底"，因此此处统一为"面板关闭即回收"（旧行为）。

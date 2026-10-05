@@ -16,7 +16,7 @@
 const vscode = require('vscode');
 const path = require('node:path');
 const os = require('node:os');
-const { DoorClient } = require('../door/client');
+const { DshConnectionService } = require('../connection/service');
 const { DshSession } = require('../dsh/session');
 const { describeError } = require('../dsh/errors');
 // 权限预设：中文标签与失败说明（纯函数，见该文件开头关于清单不硬编码的说明）。
@@ -30,6 +30,7 @@ const {
   redactSensitiveOutput,
 } = require('../door/locate');
 const { resolveLoopbackHost } = require('../door/endpoint');
+const { desktopProfilePatchArgs, syncPanelProfilePlugins } = require('../door/setup');
 const { renderHtml, makeNonce } = require('../panel/html');
 const localSessions = require('../dsh/sessions');
 const { kernelManager } = require('../panel/kernel-manager');
@@ -59,10 +60,13 @@ class DshPanelView {
    *   `--patch`，把接入点指向其它端口，这样测试「从零启动」时不需要占用 47821
    *   （桌面端运行时该端口上已存在接入点，否则该测试只能跳过）。
    */
-  constructor({ extensionUri, log, spawnArgs = [], kernels, desktopExecutables = [] }) {
+  constructor({ extensionUri, log, spawnArgs = [], kernels, desktopExecutables = [], connections }) {
     this.extensionUri = extensionUri;
     this.log = log;
     this.spawnArgs = spawnArgs;
+    this.connections = connections || new DshConnectionService({ log });
+    this.ownsConnections = !connections;
+    this.connections.driver = () => this.ensureConnection();
     /** 曾经发现过的 DSH Desktop 安装位置；用于桌面端关闭后的自启。 */
     this.desktopExecutables = desktopExecutables;
     /**
@@ -74,6 +78,10 @@ class DshPanelView {
      * 该期间重新打开面板会继续使用同一个内核。
      */
     this.kernels = kernels || kernelManager(log);
+    this.kernelConsumer = this.ownsConnections ? this : this.connections;
+    if (!this.ownsConnections) this.connections.bindKernels(this.kernels, () => {
+      const cfg = this.config(); return this.kernels.live(cfg.host, cfg.selfStartPort);
+    });
     /** @type {vscode.WebviewView|undefined} */
     this.view = undefined;
     /** @type {DoorClient|undefined} */
@@ -101,12 +109,8 @@ class DshPanelView {
     /**
      * 接入现成的 DSH 之后，若该 DSH 无法切换权限 → 改用面板自行启动的 DSH。
      *
-     * 原因（2026-09-19 深夜用户报告"修改之后无法切换权限了"）：
-     * 面板默认先连接 `dshPanel.port`（47821）上现成的那台 —— 桌面端运行时该处即为
-     * **桌面端的内核**，而桌面配置集中的 ACP 接入点插件（dsh-acp-door）版本为 0.0.7（该配置集由桌面端自行
-     * 管理，面板无法修改），该版本没有权限方法，因此选择器只能显示「不可切换」。
-     * 用户观察到的结果是「权限无法切换」，而非「哪个接入点版本过低」—— 因此此处不由用户
-     * 自行判断：**无法切换权限时改用可切换权限的内核**（面板自行启动的那台使用较新的接入点插件）。
+     * 默认连接 `dshPanel.port`（47821）上的现有内核。桌面配置集由桌面端管理，
+     * 旧版 ACP 接入点插件可能不提供权限方法，此时改用面板启动的兼容内核。
      *
      * 两个判定开关，不应随意置位：`ownKernelOnly` 仅在该路径中置位（置位后不再检查
      * 47821，避免反复切换）；`switchedKernel` 保证单个面板只切换一次。
@@ -217,14 +221,15 @@ class DshPanelView {
       // 视图不再存在时释放“正在使用后台内核”的引用。会话连接本身暂时保留：
       // 宽限期内重新打开面板可以继续同一会话；宽限期到期后 manager 回收内核，
       // 正常的 close 处理会记录 resumeTarget，之后可恢复上下文。
-      this.kernels.release(this);
+      if (this.ownsConnections) this.kernels.release(this);
+      else this.connections.release('panel');
       this.log('info', '面板视图已销毁，已释放后台 DSH 的使用引用');
     });
     // 宽限期内重新建立视图：重新声明正在使用该后台内核，取消原定回收计时。
     if (this.background) {
       const cfg = this.config();
       const owned = this.kernels.live(cfg.host, cfg.selfStartPort);
-      if (owned && owned.background === this.background) this.kernels.acquire(this, owned);
+      if (owned && owned.background === this.background) this.kernels.acquire(this.kernelConsumer, owned);
     }
     this.log('info', '面板已打开');
   }
@@ -457,7 +462,7 @@ class DshPanelView {
       );
       if (door.ok) {
         this.background = reusable.background;
-        this.kernels.acquire(this, reusable);
+        this.kernels.acquire(this.kernelConsumer, reusable);
         this.log('info', `面板自行启动的内核仍在运行（${cfg.host}:${door.port}），继续使用该内核，不重新启动`);
         this.post({ type: 'notice', text: '继续使用当前正在运行的 DSH。' });
         return { ok: true, command: reusable.command, profile: reusable.profile, port: door.port };
@@ -493,13 +498,61 @@ class DshPanelView {
 
     const failures = [];
     const kinds = new Set();
+    // 同一配置集只需成功同步一次；命令不可用时允许下一条命令候选重试。
+    const syncedProfiles = new Set();
+    const syncAttempts = new Set();
     for (let i = 0; i < plans.length; i += 1) {
       const { profile, command } = plans[i];
       const hasMore = i + 1 < plans.length;
       // 逐项尝试候选命令只写入日志，顶栏不需要随之变化。
       this.log('info', `尝试启动：${redactSensitiveOutput(command)}（配置集：${profile}）`);
+
+      /*
+       * desktop 与 vscode-panel 是两个独立的依赖清单。此前准备命令只给后者安装连接组件，
+       * 结果是：桌面端开着时模型能调用用户插件；桌面端关闭、自启 vscode-panel 后同一批
+       * 插件全部消失。这里在真正自启前做一次差异同步，后续桌面端增装/升级插件也能跟上。
+       *
+       * 仅自动维护约定的 vscode-panel：测试配置集与用户自定义配置集不应被静默改写；
+       * desktop 更不会在此处被写入。同步失败不阻止聊天启动，原有能力仍可继续使用，
+       * 具体原因保留在日志中。
+       */
+      const syncKey = `${profile}\0${command}`;
+      if (
+        profile === 'vscode-panel'
+        && !syncedProfiles.has(profile)
+        && !syncAttempts.has(syncKey)
+      ) {
+        syncAttempts.add(syncKey);
+        this.post({ type: 'status', state: 'connecting', detail: '正在同步插件与配置…' });
+        try {
+          const result = syncPanelProfilePlugins({ command, profile });
+          syncedProfiles.add(profile);
+          if (result.synced.length > 0) {
+            this.log('info', `已将桌面端的 ${result.synced.length} 个插件同步到 ${profile}：${result.synced.join('、')}`);
+            this.post({ type: 'notice', text: `已同步 ${result.synced.length} 个 DSH 插件。` });
+          }
+          if (result.skipped.length > 0) {
+            this.log(
+              'warn',
+              `有 ${result.skipped.length} 个桌面端插件使用本地或无法复现的来源，未自动同步：` +
+                result.skipped.map((item) => item.name).join('、'),
+            );
+          }
+        } catch (error) {
+          this.log('warn', `同步桌面端插件失败，继续启动现有配置：${redactSensitiveOutput(this.errText(error))}`);
+        }
+      }
       let entry;
       try {
+        /*
+         * desktop 的插件配置（模型路由、开关、插件参数）不在 package.json，而在
+         * cordis.patch.yml。自启实例通过 DSH 自身的 --patch 只读叠加这份配置；
+         * 测试传入的覆盖参数放在最后，以便测试端口等显式要求仍拥有最高优先级。
+         */
+        const inheritedConfigArgs = desktopProfilePatchArgs({ profile });
+        if (inheritedConfigArgs.length > 0) {
+          this.log('info', `自启 ${profile} 将只读继承 desktop 的插件配置与模型路由`);
+        }
         // 交由 manager 启动并登记：这样"视图销毁"不会终止该进程，另一个窗口也可以复用。
         // 接入点固定在面板自身的端口上（该插件读取 DSH_ACP_DOOR_PORT，见 dsh-door/lib/port.js）。
         // 配置集中的 port 是**默认值**，不是命令；内核由哪一方启动，端口即由该方决定。
@@ -509,7 +562,7 @@ class DshPanelView {
           command,
           profile,
           log: this.log,
-          extraArgs: this.spawnArgs,
+          extraArgs: [...inheritedConfigArgs, ...this.spawnArgs],
         });
       } catch (error) {
         failures.push(`「${redactSensitiveOutput(command)}」无法启动：${this.errText(error)}`);
@@ -526,7 +579,7 @@ class DshPanelView {
       if (outcome.ok) {
         // 启动成功：该内核归本视图使用（引用计数 +1）。
         // 接入点实际监听的端口即为连接端口（旧版接入点只识别该配置集配置的端口）。
-        this.kernels.acquire(this, entry);
+        this.kernels.acquire(this.kernelConsumer, entry);
         if (outcome.port !== cfg.selfStartPort) {
           this.log('warn', `该配置集中的接入点未识别端口设置，监听在 ${outcome.port}（该配置集中的接入点插件为旧版）`);
         }
@@ -676,7 +729,7 @@ class DshPanelView {
       const mine = this.kernels.live(cfg.host, cfg.selfStartPort);
       if (mine) {
         // 由本扩展启动：记录为"本视图在用"，面板关闭后该内核才会进入宽限回收（否则会持续保留）。
-        this.kernels.acquire(this, mine);
+        this.kernels.acquire(this.kernelConsumer, mine);
         this.background = mine.background;
       }
       this.log(
@@ -704,11 +757,12 @@ class DshPanelView {
     // 后续所有涉及连接目标的位置均使用 target，不再使用 cfg.port。
     this.targetPort = target;
 
-    const client = new DoorClient({ host: cfg.host, port: target, log: this.log });
+    let client;
     try {
-      await client.connect();
+      client = await this.connections.connect({ host: cfg.host, port: target });
+      if (this.view || this.ownsConnections) this.connections.acquire('panel');
     } catch (error) {
-      client.close();
+      if (client) client.close();
       const text = error && error.message ? error.message : String(error);
       this.postError(`无法连接 DSH：${text}`);
       this.post({ type: 'status', state: 'error', detail: '未连接' });
@@ -721,7 +775,9 @@ class DshPanelView {
     try {
       const status = await client.doorStatus();
       this.doorStatus = status;
+      this.connections.setStatus(status);
       if (status?.version) this.log('info', `接入点插件版本 ${status.version}`);
+      if (status?.runtime?.acpVersion) this.log('info', `实际 ACP 运行时 ${status.runtime.acpVersion}；接入协议 ${status.protocolVersion || '未声明'}`);
       if (status?.capabilities?.historyKind || status?.capabilities?.permissionKind) {
         this.log(
           'info',
@@ -764,6 +820,7 @@ class DshPanelView {
     this.client = client;
     const session = new DshSession({ client, log: this.log });
     this.session = session;
+    this.connections.setSession('panel', session);
     this.wire(session, client);
 
     try {
@@ -897,10 +954,7 @@ class DshPanelView {
   /**
    * 连接断开后，向对话流输出中文说明。
    *
-   * 2026-09-19 用户报告"对话进行数次后出现 read ECONNRESET"，查阅日志才发现面板自行
-   * 启动的内核以**退出码 code=1** 终止，而面板只返回了一句通用的
-   * "连接断开：read ECONNRESET" —— 用户无法判断该问题是否由自身操作引起。
-   * 现在区分两种情形说明：
+   * 通用连接错误不能说明内核是否已经退出，因此按内核所有权补充退出信息：
    *
    * - **本扩展启动的内核已终止** → 报告退出码 + 内核输出的最后内容（原文位于输出面板）；
    * - **连接的是其它来源正在运行的内核（通常为桌面端）** → 明确说明该内核已退出或重启，
@@ -1573,7 +1627,8 @@ class DshPanelView {
       const onClose = this.clientCloseHandlers.get(client);
       if (onClose) client.off('close', onClose);
       this.clientCloseHandlers.delete(client);
-      client.close();
+      if (client === this.connections.client) this.connections.disconnect();
+      else client.close();
       this.client = undefined;
     }
     this.doorStatus = undefined;
@@ -1586,6 +1641,8 @@ class DshPanelView {
 
   dispose() {
     this.teardown();
+    this.connections.release('panel');
+    if (this.ownsConnections) this.connections.dispose();
     /*
      * 关键的一行（2026-09-19 修改）：**不终止内核，只释放引用**。
      *
@@ -1594,7 +1651,7 @@ class DshPanelView {
      * 现在交由 manager 处理：引用归零后仍保留宽限期（默认 10 分钟），该期间重新打开
      * 面板会继续使用同一个内核 —— 不重启，也不需要 resume。
      */
-    this.kernels.release(this);
+    this.kernels.release(this.kernelConsumer);
     this.background = undefined;
   }
 }

@@ -1,0 +1,59 @@
+name: DSH 版本兼容
+
+on:
+  schedule:
+    - cron: '20 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: windows-latest
+    outputs:
+      matrix: ${{ steps.versions.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - id: versions
+        name: 查询官方精确版本
+        shell: pwsh
+        run: |
+          $matrix = node tools/compat/test.cjs --discover --matrix
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "matrix=$matrix" >> $env:GITHUB_OUTPUT
+
+  kernel:
+    needs: discover
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: 隔离真实内核与本机模型服务
+        run: node tools/compat/test.cjs --dsh ${{ matrix.dsh }} --install
+      - name: 导出公开验证结果
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem -LiteralPath build/compat -Filter report.json -Recurse | ForEach-Object {
+            node tools/compat/public-evidence.cjs $_.FullName (Join-Path $_.DirectoryName 'public-validation.json')
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compat-${{ matrix.dsh }}
+          path: |
+            build/compat/**/public-validation.json

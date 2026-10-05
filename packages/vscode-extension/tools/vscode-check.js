@@ -7,11 +7,11 @@
  * 但没有任何一项能够证明真实 VS Code 会加载该扩展。该脚本用于覆盖这一处缺口。
  *
  * 不干扰用户的操作方式：
- * - 使用独立的 `--user-data-dir` 与 `--extensions-dir` 启动隔离窗口，
- *   不接触用户设置、用户扩展以及用户已打开的窗口；
+ * - 用户、扩展与共享账号目录分别隔离，禁用测试不需要的账号提供方，
+ *   避免访问日常账号；仅隔离 --user-data-dir 无法覆盖共享账号存储；
  * - 通过扩展中的自检开关 `DSH_PANEL_AUTOFOCUS=1` 使其在 1.5 秒后自动展开面板
  *   （无人值守时无法点击活动栏图标）；
- * - 验证结束后结束该次启动的进程树，且仅结束启动之后新出现的进程。
+ * - 验证结束后仅回收确切隔离目录所属的编辑器和已核对归属的内核。
  *
  * 判据（缺少任意一条即判定失败，不做模糊处理）：
  * 1. 隔离窗口确实启动（出现新的 Code.exe）；
@@ -42,6 +42,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync, spawn } = require('node:child_process');
+const { isolatedEditorOptions, ownsEditorProcess, belongsToEditor } = require('./editor-isolation.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 /**
@@ -65,7 +66,7 @@ const ROOT = path.resolve(__dirname, '..');
  *   这条兼容路径在此处也被真实执行一次。
  *
  *   还有一种组合需要两个端口不同：所连接的那台无法切换权限时，面板会改用自身
- *   启动的那台（2026-09-20 用户报告「切不了权限」的修复方式）。验证该路径使用
+ *   启动的那台。验证该路径使用
  *
  *     $env:DSH_PANEL_CHECK_PORT = '47821'       # 存在现成的 ACP 接入点插件（桌面端那个旧组件）
  *     $env:DSH_PANEL_CHECK_SELF_PORT = '47832'  # 空闲端口，供自启的实例使用
@@ -242,9 +243,7 @@ function isOurKernel(item, all) {
    * 「命令行中运行 dsh」存在两种写法，均需识别：
    *   ① 直接命令         dsh --profile desktop --no-open …
    *   ② node 启动该脚本  node C:\…\@deepseek-ai\dsh\lib\bin.js --profile desktop …
-   * ② 是本机常态（`dsh` 不在 PATH 上时 `dshPanel.dshCommand` 需要按此填写，见交接文档第八节
-   * 第 13 条）；2026-09-19 第一次使用 ② 运行自启模式时，该匹配仅识别 ①，
-   * 结果是内核已启动、握手已完成，此处却报告「没找到内核」（假阴性）。
+   * `dsh` 不在 PATH 上时，`dshPanel.dshCommand` 可以使用写法 ②；两种写法均需识别。
    * 匹配的是 cmd.exe 这一层外壳：真正的内核进程名为 node.exe，已被上一条按名称排除，
    * 而其外壳（cmd /d /s /c "…"）才是稳定信号，说明见下面这一段。
    */
@@ -256,9 +255,13 @@ function isOurKernel(item, all) {
 }
 
 /** 找出本次新启动的内核。 */
-function ourKernels(beforePids) {
+function ourKernels(beforePids, userData, tracked) {
   const all = allProcesses();
-  return all.filter((item) => !beforePids.has(item.pid) && isOurKernel(item, all));
+  return all.filter(item => {
+    if (beforePids.has(item.pid) || !isOurKernel(item, all)) return false;
+    if (belongsToEditor(item, all, userData)) tracked.add(item.pid);
+    return tracked.has(item.pid);
+  });
 }
 
 /** 在隔离目录中查找某个日志文件（日志目录带时间戳，因此需要递归查找）。 */
@@ -365,6 +368,9 @@ async function main() {
   const sandbox = path.join(os.tmpdir(), `dsh-vscode-e2e-${stamp}`);
   const userData = path.join(sandbox, 'user-data');
   const extensions = path.join(sandbox, 'extensions');
+  const sharedData = path.join(sandbox, 'shared-data');
+  const ourEditors = () => allProcesses().filter(item => /^Code\.exe$/i.test(item.name) && ownsEditorProcess(item.cmdline, userData)).map(item => item.pid);
+  const ownedKernelPids = new Set();
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-e2e-ws-'));
   fs.mkdirSync(userData, { recursive: true });
   copyDir(EXTENSION_SOURCE, path.join(extensions, EXT_DIR_NAME));
@@ -382,7 +388,7 @@ async function main() {
      *
      * 但有一条路径需要两者不同：`DSH_PANEL_CHECK_PORT=47821`（桌面端那个
      * 旧连接组件所在的端口）加另一个空闲的自启端口；该路径即「已接入，但该实例无法切换
-     * 权限，因此改用自身启动的实例」（2026-09-20 用户报告的情况）。
+     * 权限，因此改用自身启动的实例」。
      * 使用 DSH_PANEL_CHECK_SELF_PORT 指定该端口。
      */
     settings['dshPanel.selfStartPort'] = SELF_PORT;
@@ -396,13 +402,11 @@ async function main() {
 
   // 启动隔离窗口。DSH_PANEL_AUTOFOCUS=1 是扩展中的自检开关，仅在该进程中生效。
   // --verbose 为必需项：否则输出通道的内容不会写入磁盘上的日志文件。
+  const isolation = isolatedEditorOptions({ userData, extensions, sharedData, env: { ...process.env, DSH_PANEL_AUTOFOCUS: '1' } });
   const child = spawn(
     CODE_EXE,
     [
-      '--user-data-dir',
-      userData,
-      '--extensions-dir',
-      extensions,
+      ...isolation.args,
       '--verbose',
       '--new-window',
       workspace,
@@ -411,7 +415,7 @@ async function main() {
       detached: true,
       stdio: 'ignore',
       windowsHide: false,
-      env: { ...process.env, DSH_PANEL_AUTOFOCUS: '1' },
+      env: isolation.env,
     },
   );
   child.unref();
@@ -423,7 +427,7 @@ async function main() {
   let panelText = '';
   while ((Date.now() - started) / 1000 < timeoutSec) {
     sleep(2000);
-    newPids = [...codePids()].filter((pid) => !before.has(pid));
+    newPids = ourEditors();
     panelLog = findPanelLog(userData);
     panelText = panelLog ? fs.readFileSync(panelLog, 'utf8') : '';
     if (/已建会话/.test(panelText)) break;
@@ -491,9 +495,8 @@ async function main() {
 
   // 权限选择器：界面部分已在 tools/uitest.js 中用真实浏览器点击验证，此处需要证明
   // 真实窗口中的那份清单同样是从内核读取的（扩展 → DSH → 内核 permissionPresets）。
-  // 所连接的实例不支持权限方法时，正确结果为改用面板自身启动的实例
-  // （2026-09-20 用户报告「修改之后无法切换权限」的修复方式）；确实无法切换时才采用
-  // 「换不了权限」那句解释。三种结果均视为通过，但不允许三者均未出现。
+  // 所连接的实例不支持权限方法时，改用面板自身启动的实例；仍无法切换时
+  // 显示「换不了权限」的说明。三种结果均视为通过，但不允许三者均未出现。
   const accessRead = /当前权限：/.test(panelText);
   const accessUnavailable = /权限预设读取失败（/.test(panelText);
   const switched = /改用面板自己启动的/.test(panelText);
@@ -524,7 +527,7 @@ async function main() {
   // 内核启动的情况：接入模式下（且不需要更换内核时）必须没有新内核，自启模式下必须有新内核。
   // 「已接入但更换内核」属于第三种情况：所连接的实例无法切换权限（桌面端那个内核即如此），
   // 面板会改用自身启动的实例；此时必须有新内核，否则权限仍然无法切换。
-  const kernel = ourKernels(beforePids)[0];
+  const kernel = ourKernels(beforePids, userData, ownedKernelPids)[0];
   const suspects = () =>
     newProcesses(beforePids)
       .filter((item) => /--no-open/.test(item.cmdline))
@@ -548,10 +551,7 @@ async function main() {
   /*
    * 等待一段时间后再次检查（DSH_PANEL_CHECK_LINGER=90）。
    *
-   * 设置该步骤的原因：2026-09-19 用户报告「聊两句就 read ECONNRESET」，
-   * 查日志发现每个内核都在启动约 35 秒后以 code=1 退出；
-   * 而该自检此前只观察到「会话已建立」（约 15 秒）即收尾，
-   * 因此「内核可以启动但存活时间过短」这类问题在该自检中不可见。
+   * 建立会话后继续观察，用于覆盖能够启动但随后退出的内核。
    * 一次全部通过的验证并不等于接下来一分钟内不会出现异常。
    */
   const linger = Number(process.env.DSH_PANEL_CHECK_LINGER || 0);
@@ -586,9 +586,9 @@ async function main() {
     // 此类情况不应发生。扩展在自身 dispose 时即会结束其启动的内核
     // （test/fallback.js 已覆盖验证），因此此处只需要报告是否存在残留。
     sleep(3000);
-    const stillThere = [...codePids()].filter((pid) => !before.has(pid));
+    const stillThere = ourEditors();
     check('退出后没有留下窗口', stillThere.length === 0, stillThere.join(', ') || '干净');
-    const orphans = ourKernels(beforePids);
+    const orphans = ourKernels(beforePids, userData, ownedKernelPids);
     check('退出后没有留下孤儿内核（扩展自行回收）', orphans.length === 0,
       orphans.length
         ? `${orphans.map((item) => item.pid).join(', ')} 还在（扩展应该自己收掉；这里不替你杀，免得误伤你自己的内核）`

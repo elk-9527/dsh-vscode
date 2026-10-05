@@ -10,6 +10,9 @@
 
 const vscode = require('vscode');
 const { DshPanelView, VIEW_ID } = require('./panel/view');
+const { DshConnectionService } = require('./connection/service');
+const { BridgeViews } = require('./bridge/views');
+const { randomUUID } = require('node:crypto');
 const { kernelManager } = require('./panel/kernel-manager');
 const {
   runDshSync,
@@ -49,11 +52,18 @@ function activate(context) {
   if (detectedDesktops[0] && detectedDesktops[0] !== rememberedDesktop) {
     context.globalState.update(DESKTOP_PATH_KEY, detectedDesktops[0]);
   }
+  const CLIENT_ID_KEY = 'dshPanel.bridge.clientId';
+  const clientId = context.workspaceState.get(CLIENT_ID_KEY) || randomUUID();
+  void context.workspaceState.update(CLIENT_ID_KEY, clientId);
+  const connections = new DshConnectionService({ log, clientId });
   const view = new DshPanelView({
     extensionUri: context.extensionUri,
     log,
+    connections,
     desktopExecutables: [rememberedDesktop, ...detectedDesktops].filter(Boolean),
   });
+  const nativeViews = new BridgeViews({ context, connections, panel: view, log });
+  context.subscriptions.push(connections);
 
   /**
    * 将当前编辑器中的内容挂载到面板。
@@ -146,15 +156,22 @@ function activate(context) {
                 `没有找到可运行的 DSH CLI。${failures.length ? `\n${failures.join('\n')}` : ''}`,
               );
             }
-            progress.report({ message: '创建配置并同步连接组件…' });
+            progress.report({ message: '创建配置并同步插件…' });
             await new Promise((resolve) => setImmediate(resolve));
             return preparePanelProfile({ command, profile });
           },
         );
+        const synced = Array.isArray(result.syncedPlugins) ? result.syncedPlugins.length : 0;
         const message = result.created
-          ? `已创建 ${profile} 并安装连接组件。`
-          : `已${result.action === 'update' ? '更新' : '安装'} ${profile} 的连接组件。`;
+          ? `已创建 ${profile}，并同步 ${synced} 个桌面端插件。`
+          : `已修复 ${profile}${synced ? `，并同步 ${synced} 个桌面端插件` : ''}。`;
         log('info', message);
+        if (Array.isArray(result.skippedPlugins) && result.skippedPlugins.length > 0) {
+          log(
+            'warn',
+            `以下插件使用本地或无法复现的来源，未自动同步：${result.skippedPlugins.map((item) => item.name).join('、')}`,
+          );
+        }
         const choice = await vscode.window.showInformationMessage(message, '重新连接');
         if (choice === '重新连接') await view.reconnect();
       } catch (error) {
@@ -231,17 +248,21 @@ function activate(context) {
       );
     }, 1500);
   }
+  return Object.freeze({
+    apiVersion: 1,
+    listCapabilities: () => nativeViews.refresh(),
+    getConnectionStatus: async () => (await connections.ensure()).doorStatus(),
+    review: request => nativeViews.reviewRequest({ ...request, userInitiated: request?.userInitiated === true }),
+  });
 }
 
 function deactivate() {
   /*
-   * 窗口关闭：回收本扩展启动的全部后台内核，不残留孤儿进程。
-   *
-   * 注意区别：**视图销毁时不回收**（该操作只释放引用，10 分钟宽限期内
-   * 重开面板仍可使用同一内核），**窗口关闭时才回收**。见 src/panel/kernel-manager.js。
+   * 窗口关闭时回收空闲的自启内核；有插件任务的内核继续完成任务，
+   * 接入点在无连接且任务结束后的宽限期自行退出。
    */
   try {
-    const count = kernelManager().disposeAll('VS Code 窗口关闭');
+    const count = kernelManager().disposeAll('VS Code 窗口关闭', { preserveBridgeRuns: true });
     if (count > 0) console.log(`[dsh-panel] 窗口关闭，回收 ${count} 个后台 DSH 内核`);
   } catch (error) {
     console.error(`[dsh-panel] 回收后台内核出错：${error && error.message ? error.message : error}`);

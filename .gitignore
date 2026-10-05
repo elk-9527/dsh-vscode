@@ -33,3 +33,5 @@ spike/session-survey-report.txt
 /compat/evidence/*log.txt
 /compat/evidence/doctor*
 /compat/evidence/release-check*
+/compat/evidence/**
+!/compat/evidence/public-*.json
