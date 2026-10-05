@@ -1,7 +1,7 @@
 'use strict';
 const assert = require('node:assert/strict'), fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const Module = require('node:module'), { EventEmitter } = require('node:events'), { execFileSync } = require('node:child_process');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-native-views-')), cwd = path.join(root, 'repo'); fs.mkdirSync(cwd);
+const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-native-views-'))), cwd = path.join(root, 'repo'); fs.mkdirSync(cwd);
 execFileSync('git', ['init', '-q', cwd]); fs.writeFileSync(path.join(cwd, 'sample.js'), 'const sum = 1;\n');
 execFileSync('git', ['-C', cwd, 'add', '.']); execFileSync('git', ['-C', cwd, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'fixture']);
 process.env.DSH_HOME = path.join(root, 'dsh');
@@ -24,7 +24,7 @@ const vscode = {
     withProgress: async (_, fn) => fn({}, { onCancellationRequested: () => disposable }) },
   languages: { createDiagnosticCollection: () => ({ set: (key, value) => diagnostics.set(key.toString(), value), delete: key => diagnostics.delete(key.toString()), dispose() {} }) },
   workspace: { isTrusted: true, workspaceFolders: [{ name: 'fixture', uri: uri('file:' + cwd) }], textDocuments: opened,
-    getWorkspaceFolder: key => path.resolve(key.fsPath) === cwd ? {} : undefined,
+    getWorkspaceFolder: key => (process.platform === 'win32' ? path.resolve(key.fsPath).toLowerCase() === cwd.toLowerCase() : path.resolve(key.fsPath) === cwd) ? {} : undefined,
     registerTextDocumentContentProvider: (_, value) => { provider = value; return disposable; },
     openTextDocument: async key => ({ uri: key, getText: () => provider.provideTextDocumentContent(key) }),
     onDidSaveTextDocument: fn => { onSave = fn; return disposable; }, onDidCloseTextDocument: fn => { onClose = fn; return disposable; } },
@@ -77,7 +77,7 @@ const context = { subscriptions: [], workspaceState: { get: (key, fallback) => s
   const concurrent = await Promise.allSettled([view.reviewRequest({ cwd, input: { mode: 'worktree' } }), view.reviewRequest({ cwd, input: { mode: 'worktree' } })]);
   assert.equal(concurrent.filter(x => x.status === 'fulfilled').length, 1); assert.equal(concurrent.find(x => x.status === 'rejected').reason.code, -32045); assert.equal(invokeCount, 1);
   await new Promise(resolve => setTimeout(resolve, 60)); assert.equal(treeChanges, beforeReviewChanges, 'Review progress only updates operation records');
-  const first = view.operations.get('run-1'); assert(first.uri); assert.equal(diagnostics.size, 1);
+  const first = view.operations.get('run-1'); assert(first.uri, JSON.stringify({ status: first.status, reason: first.reason, cwd: first.cwd, workspace: cwd })); assert.equal(diagnostics.size, 1);
   const completedItem = await trees.get('dshPanel.operations').getChildren();
   assert.equal(completedItem[0].contextValue, 'dshCompletedReview');
   const beforeAttachCalls = invokeCount;
