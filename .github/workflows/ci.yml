@@ -35,7 +35,7 @@ jobs:
         run: node packages/vscode-extension/test/run-all.js
 
       - name: 检查 SDK 与公共 API 调用方类型
-        run: pnpm exec tsc --noEmit --strict --ignoreConfig --lib es2022,dom --module commonjs packages/dsh-bridge-sdk/test/types.ts
+        run: pnpm exec tsc --noEmit --strict --ignoreConfig --lib "es2022,dom" --module commonjs packages/dsh-bridge-sdk/test/types.ts
 
       - name: 检查 SDK 发行内容
         run: npm pack ./packages/dsh-bridge-sdk --ignore-scripts --dry-run --json
