@@ -2,10 +2,7 @@
 /*
  * 耐力测试（soak）：使面板所使用的内核**持续工作十余分钟**，观察其是否自行退出。
  *
- * 设置该工具的原因（2026-09-19）：
- * 用户报告"对话数次后出现 read ECONNRESET"，查阅日志后得到一条稳定规律 —— **每个自启的
- * 内核均在启动约 35 秒后以 code=1 退出**。而当时全部测试均为"启动并建立会话后即结束"
- * （约 15 秒），**"能够启动但无法长时间存活"这一类故障没有任何测试可以覆盖**。
+ * 设置该工具的原因：启动并建立会话后立即结束的测试不能覆盖长时间运行故障。
  * vscode-check 的 --linger 观察的是"保持连接且不发送请求"，本工具观察的是
  * **"保持连接，并且持续发送请求"**：每 N 秒实际发送一个回合，全程记录内核自身的输出。
  *
@@ -79,8 +76,8 @@ const log = (level, text) => {
 
 (async () => {
   fs.mkdirSync(cwd, { recursive: true });
-  // 取「确实能够启动」的候选命令：本机的 `dsh` 是桌面端提供的垫片，在扩展的进程中经常
-  // 无法找到，而 soak 不应将时间耗费在一次必然失败的尝试上。
+  // 优先使用 Node 启动入口，减少扩展宿主 PATH 差异对耐力测试的影响；
+  // 没有该入口时使用首个候选命令。
   const candidates = dshCommandCandidates({ dshCommand: 'dsh', homedir: os.homedir() });
   const command = candidates.find((item) => /^node\s/i.test(item)) || candidates[0];
   const extraArgs = patch ? ['--patch', patch] : [];
@@ -161,7 +158,7 @@ const log = (level, text) => {
 
   const elapsed = (Date.now() - started) / 1000;
   // 结论必须在收尾**之前**计算：收尾本身会终止进程，'exit' 事件一旦触发即被视为"内核退了"，
-  // 运行正常的情况也会被判为失败（第一版实现即因此出现误判）。
+  // 否则正常运行也会因测试自身的收尾操作被判为失败。
   const ok = report.kernelExit === null && report.disconnects.length === 0 && report.turnErrors === 0;
   console.log('\n');
   console.log('── 结果 ───────────────────────────────────────────');

@@ -370,8 +370,9 @@ class DoorClient extends EventEmitter {
    *
    * @returns {Promise<{sessions: object[], skipped: number}>}
    */
-  listHistory() {
-    return this.request('dsh-door/sessions/list', {});
+  listHistory(options = {}) {
+    const { signal, ...params } = options;
+    return this.request('dsh-door/sessions/list', params, { signal });
   }
 
   /**
@@ -481,6 +482,11 @@ class DoorClient extends EventEmitter {
   }
 
   #onMessage(message) {
+    if (!message || typeof message !== 'object' || Array.isArray(message) ||
+      (message.method !== undefined && typeof message.method !== 'string')) {
+      this.log('warn', '收到无效的 JSON-RPC 帧，已忽略');
+      return;
+    }
     // 1) 内核发来的请求（同时带 id 与 method）—— 需要回复，否则该请求会一直等待。
     if (message.method && message.id !== undefined) {
       this.#onAgentRequest(message);

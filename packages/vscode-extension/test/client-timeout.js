@@ -10,6 +10,7 @@
 
 const net = require('node:net');
 const { DoorClient, DoorTimeoutError } = require('../src/door/client');
+const { cancelHistoryRequest, runHistoryRequest } = require('../../dsh-door/lib/history-requests.cjs');
 
 let passed = 0;
 const failures = [];
@@ -182,6 +183,51 @@ async function main() {
     const result = await client.connect({ initializeTimeoutMs: 300 });
     check('跨分片的中文按原文解码', result.agentInfo.name === '中文助手', result.agentInfo.name);
     client.close();
+  });
+
+  section('6. 历史查询取消后仍可使用同一条 ACP 连接');
+  const states = new WeakMap(); let started, historyState, sawCancel = false;
+  const requestStarted = new Promise(resolve => { started = resolve; });
+  await withServer((socket, frame) => {
+    if (frame.method === 'initialize') { reply(socket, frame.id, { protocolVersion: 1 }); return; }
+    let state = states.get(socket);
+    if (!state) {
+      state = { respond: value => socket.write(JSON.stringify(value) + '\n'), sessionsHandler: { list: () => new Promise(() => {}) } };
+      states.set(socket, state);
+      socket.on('close', () => { state.historyClosed = true; for (const controller of state.historyReads?.values() || []) controller.abort(); });
+    }
+    if (frame.method === 'dsh-door/sessions/list') {
+      historyState = state; void runHistoryRequest(frame, 'list', state).catch(() => socket.destroy()); started();
+    } else if (cancelHistoryRequest(frame, state)) sawCancel = true;
+    else if (frame.method === 'session/list') reply(socket, frame.id, { sessions: [] });
+  }, async port => {
+    const client = new DoorClient({ host: '127.0.0.1', port }); let timer;
+    try {
+      await client.connect(); const controller = new AbortController();
+      const pending = client.listHistory({ query: 'cancel', signal: controller.signal });
+      await requestStarted; controller.abort();
+      const error = await Promise.race([pending.then(() => undefined, error => error), new Promise(resolve => { timer = setTimeout(() => resolve(new Error('历史取消未及时完成')), 1500); })]);
+      clearTimeout(timer);
+      check('实际客户端取消通知被历史请求处理器接收', sawCancel);
+      check('取消返回明确的取消结果', error?.code === -32800, error?.message);
+      check('内核读取不响应取消时也释放请求位置', historyState.historyReads.size === 0);
+      const list = await client.listKernelSessions();
+      check('取消历史不会关闭 ACP 或阻塞后续请求', client.isConnected && Array.isArray(list.sessions));
+    } finally { clearTimeout(timer); client.close(); }
+  });
+
+  section('7. 非对象 JSON 帧不会中断握手或后续请求');
+  await withServer((socket, frame) => {
+    if (frame.method === 'initialize') {
+      socket.write('null\n[]\n42\n"unexpected"\n');
+      reply(socket, frame.id, { protocolVersion: 1 });
+    } else reply(socket, frame.id, { ok: true });
+  }, async port => {
+    const client = new DoorClient({ host: '127.0.0.1', port });
+    try {
+      await client.connect({ initializeTimeoutMs: 300 });
+      check('异常帧之后仍能完成握手并查询', (await client.request('test/after-invalid', {})).ok === true);
+    } finally { client.close(); }
   });
 
   console.log(`\n${'═'.repeat(56)}`);

@@ -2,20 +2,19 @@
 /*
  * 后台 DSH 内核的"使用方与回收时机"。
  *
- * 将该项职责从面板视图中分离的原因（2026-09-19）：
+ * 将该项职责从面板视图中分离的原因：
  * 原实现中 `extension.js` 提供给 VS Code 的 disposer 直接调用 `view.dispose()`，
  * 而 `view.dispose()` 会 **killTree 终止后台内核**。因此"视图销毁"等同于
  * "内核终止" —— 而视图的销毁条件很常见：折叠侧边栏、把面板拖到另一个位置、
  * Reset View Locations、Reload Window、另一个窗口关闭……每一次都变成
- * 「终止内核 → 重连 → 重新挂载上下文」。用户报告的"对话进行数次后即断开"、
- * 以及窗口日志中"每个自启内核存活约 35 秒"这种规律，是最接近的成因之一。
+ * 「终止内核 → 重连 → 重新挂载上下文」，无法保持视图关闭后的任务与会话。
  *
  * 现行规则：
  * - 内核属于**扩展**，不属于某个视图。视图只是它的一个使用者。
  * - 视图销毁 = 释放引用；**引用归零后仍保留一段宽限期**（默认 10 分钟），
  *   该期间重新打开面板会**继续使用同一个内核**（不需要重启、不需要 resume）。
- * - 仅三种情况实际回收内核：宽限期到期、窗口关闭（扩展 deactivate）、
- *   用户显式执行「DSH：停止后台内核」。
+ * - 宽限期到期、空闲窗口关闭、用户停止命令回收内核。
+ *   窗口关闭时进行中的插件任务由接入点完成，随后自行回收内核。
  * - 仅回收**本扩展启动的内核**（表中登记者），不操作桌面端的内核。
  */
 
@@ -98,13 +97,14 @@ class KernelManager {
       host,
       port,
       consumers: new Set(),
+      activeBridgeRuns: new Set(),
       timer: null,
       background: undefined,
       // 记录使用的命令与配置集：重新打开面板复用该内核时需要在日志或对话流中说明。
       command: rest.command,
       profile: rest.profile,
     };
-    entry.background = this.spawnImpl({ ...rest, port });
+    entry.background = this.spawnImpl({ ...rest, port, ownedIdleMs: Math.max(1000, this.idleMs) });
     this.entries.set(key, entry);
     // 进程自行终止（非本模块回收）→ 立即从表中移除，避免下一次复用到已终止的内核。
     if (entry.background && entry.background.child && entry.background.child.on) {
@@ -141,6 +141,7 @@ class KernelManager {
     for (const [key, entry] of this.entries) {
       if (!entry.consumers.delete(consumer)) continue;
       if (entry.consumers.size > 0) continue;
+      if (entry.activeBridgeRuns.size > 0) continue;
       if (this.idleMs <= 0) {
         this.stop(key, '已无面板使用该内核');
         continue;
@@ -169,11 +170,19 @@ class KernelManager {
     return true;
   }
 
-  /** 窗口关闭：回收本扩展启动的全部内核（不遗留孤儿进程）。 */
-  disposeAll(reason = '窗口关闭') {
+  /** 窗口关闭时可保留进行中的插件任务；常规显式停止仍回收全部内核。 */
+  disposeAll(reason = '窗口关闭', { preserveBridgeRuns = false } = {}) {
     const keys = [...this.entries.keys()];
-    for (const key of keys) this.stop(key, reason);
-    return keys.length;
+    let stopped = 0;
+    for (const key of keys) {
+      const entry = this.entries.get(key);
+      if (preserveBridgeRuns && entry.activeBridgeRuns.size > 0) {
+        if (entry.timer) this.clearTimer(entry.timer);
+        this.entries.delete(key);
+        this.log('info', `后台 DSH（${key}）继续完成插件任务，空闲后由接入点回收`);
+      } else if (this.stop(key, reason)) stopped++;
+    }
+    return stopped;
   }
 
   /** 当前登记的内核数量（测试或诊断用）。 */

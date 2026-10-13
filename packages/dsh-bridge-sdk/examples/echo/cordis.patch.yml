@@ -1,0 +1,3 @@
+- insert:
+    - id: bridge-echo-example
+      name: dsh-bridge-echo-example

@@ -1,8 +1,7 @@
 /*
  * 后台内核的"谁在使用、何时回收"（纯逻辑测试，使用假进程 / 假计时器）。
  *
- * 该套件的必要性（2026-09-19）：用户报告"聊两句就 read ECONNRESET"，
- * 查阅日志发现"每个自启动内核存活 35 秒"。其中一项结构性成因是：
+ * 固定时长回收会让正在使用的连接中断。其中一项结构性成因是：
  * 面板视图的 disposer 直接对该内核执行 killTree —— 而视图很容易被销毁
  * （折叠侧边栏、拖动面板、Reload Window、关闭另一个窗口）。
  * 该套件用于固定新规则：
@@ -135,7 +134,7 @@ section('2. 引用计数：有人用着不收');
   manager.release(viewA);
   check('还有人在用 → 不收，也不排计时', spawns[0].background.disposed === 0 && manager.size() === 1);
   manager.release(viewB);
-  check('引用归零 → **先不杀**，进入宽限（这是这次修复的核心）',
+  check('引用归零 → 保留内核并进入宽限期',
     spawns[0].background.disposed === 0 && manager.size() === 1);
   check('宽限时长按设置来（10 分钟）', manager.entries.get('127.0.0.1:47831').timer !== undefined);
 }
@@ -221,6 +220,18 @@ section('8. 不碰别人起的那个内核');
   manager.release(stranger);
   check('没登记过的内核：release 不会误杀任何东西', manager.size() === 0);
   check('disposeAll 在空表上安全', manager.disposeAll('窗口关闭') === 0);
+}
+
+section('9. 窗口关闭保留正在进行的插件任务，手动停止仍生效');
+{
+  const { manager, spawns } = makeManager({ idleMs: 0 });
+  const entry = manager.spawn({ host: '127.0.0.1', port: 47831 });
+  const owner = {};
+  manager.acquire(owner, entry); entry.activeBridgeRuns.add('review-1'); manager.release(owner);
+  check('零宽限仍保留进行中的审查', spawns[0].background.disposed === 0);
+  check('窗口关闭交给接入点在任务结束后回收', manager.disposeAll('窗口关闭', { preserveBridgeRuns: true }) === 0 && spawns[0].background.disposed === 0);
+  const next = manager.spawn({ host: '127.0.0.1', port: 47832 }); next.activeBridgeRuns.add('review-2');
+  check('用户停止命令仍能终止正在进行的任务', manager.stop(next.key, '用户停止') && spawns[1].background.disposed === 1);
 }
 
 console.log(`\n${'═'.repeat(56)}`);

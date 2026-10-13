@@ -9,7 +9,7 @@
  *      `TODO-owner/TODO-repo`）。携带占位符发布，轻则返回 403，重则发布到他人的
  *      publisher 名下、或者市场页面上的链接全部指向他人仓库。因此此处先执行自检，
  *      **未提供 `--force` 时不执行发布**。
- *   2. 本扩展一直由自制的 tools/build-vsix.js 打包（白名单：src/media/README/
+ *   2. 本地安装包由 tools/build-vsix.js 打包（白名单：src/media/README/
  *      package.json）。市场包使用官方 `vsce`，黑名单位于 .vscodeignore 中。两条
  *      路径必须包含同一批文件，否则会出现"本地安装的版本正确、市场用户安装的版本
  *      缺少文件"的情况。因此此处打包后会**把包内的文件列出来**，供直接比对。
@@ -29,6 +29,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { quoteArg } = require('../src/door/locate');
 
 const ROOT = path.join(__dirname, '..');
 const args = process.argv.slice(2);
@@ -44,19 +45,22 @@ const bumpArg = (() => {
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 const problems = [];
 const checks = [];
+const publicCheck = spawnSync(process.execPath, [path.resolve(ROOT, '../../tools/check-public-paths.cjs')], { cwd: ROOT, stdio: 'inherit', windowsHide: true });
+if (publicCheck.status !== 0) process.exit(1);
 
 function check(ok, label, detail) {
   checks.push({ ok, label, detail });
   if (!ok) problems.push(label);
 }
 
-check(!/^TODO/i.test(pkg.publisher || ''), 'publisher 已经改成市场账号（不是 TODO 占位）', pkg.publisher);
+check(typeof pkg.publisher === 'string' && Boolean(pkg.publisher.trim()) && !/^TODO/i.test(pkg.publisher), 'publisher 已经改成市场账号（不是 TODO 占位）', pkg.publisher);
+check(!bumpArg || /^(?:patch|minor|major|\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?(?:\+[A-Za-z0-9.-]+)?)$/.test(bumpArg), '版本参数合法', bumpArg);
 const repoUrl = (pkg.repository && pkg.repository.url) || '';
 check(repoUrl && !/TODO/.test(repoUrl), 'repository 已经填成真实仓库地址', repoUrl || '（空）');
 check(pkg.license && pkg.license !== 'UNLICENSED', 'license 已经不是 UNLICENSED', pkg.license);
 check(pkg.private !== true, 'private 已经去掉（留着它 vsce 会拒绝发布）', String(pkg.private));
 check(
-  fs.existsSync(path.join(ROOT, pkg.icon || '')),
+  typeof pkg.icon === 'string' && Boolean(pkg.icon) && fs.existsSync(path.join(ROOT, pkg.icon)) && fs.statSync(path.join(ROOT, pkg.icon)).isFile(),
   `图标在（${pkg.icon || '没配'}）`,
   pkg.icon || '',
 );
@@ -74,17 +78,15 @@ for (const item of checks) console.log(`  ${item.ok ? '✅' : '❌'} ${item.labe
 
 if (problems.length) {
   console.log(`\n  ⚠️ 有 ${problems.length} 项没准备好。先解决它们（见 docs/发布清单.md），或者把占位符换成真值再跑。`);
-  if (go) {
-    console.log('  --yes 被拒绝了：带着占位符发布不是"先发出去再说"，是发错账号/错仓库。');
-    process.exit(1);
-  }
+  process.exit(1);
 }
 
 function vsce(extra) {
-  const r = spawnSync('npx', ['--yes', '@vscode/vsce', ...extra], {
+  const argv = ['--yes', '@vscode/vsce', ...extra];
+  const r = spawnSync('npx', process.platform === 'win32' ? argv.map(quoteArg) : argv, {
     cwd: ROOT,
     stdio: 'inherit',
-    shell: true,
+    shell: process.platform === 'win32',
     windowsHide: true,
   });
   return r.status === 0;
@@ -95,16 +97,17 @@ function vsceFiles() {
   const r = spawnSync('npx', ['--yes', '@vscode/vsce', 'ls', '--no-dependencies'], {
     cwd: ROOT,
     encoding: 'utf8',
-    shell: true,
+    shell: process.platform === 'win32',
     windowsHide: true,
   });
+  if (r.status !== 0 || typeof r.stdout !== 'string') return undefined;
   return r.stdout
     .split(/\r?\n/)
     .map((line) => line.trim())
     // vsce 仅输出文件路径（一行一个），但偶尔混入 "DONE Packaged: ..." 这类状态行 ——
     // 含空格的条目、以及明显是状态行的条目一律排除。注意**不可**按"是否包含扩展名"过滤：
-    // LICENSE 没有扩展名，早期版本正是因此将其误判为漂移。
-    .filter((line) => line && !/\s/.test(line) && !/^(DONE|WARNING|ERROR|Packaged)/i.test(line))
+    // LICENSE 等有效文件没有扩展名，仍须纳入文件清单比较。
+    .filter((line) => line && !/^(DONE|WARNING|ERROR|Packaged)(?:\s|:)/i.test(line))
     .map((line) => line.split('\\').join('/'))
     .sort();
 }
@@ -114,6 +117,7 @@ function compareWithShipList() {
   const { shipFiles } = require('./ship-list');
   const mine = shipFiles(ROOT);
   const theirs = vsceFiles();
+  if (!theirs) { console.log('  ❌ 无法读取市场安装包文件清单，已停止。'); return false; }
   const onlyMine = mine.filter((f) => !theirs.includes(f));
   const onlyTheirs = theirs.filter((f) => !mine.includes(f));
   if (onlyMine.length || onlyTheirs.length) {
@@ -144,8 +148,8 @@ if (!go) {
 }
 
 if (!process.env.VSCE_PAT) {
-  console.log('\n  ❌ 环境变量 VSCE_PAT 没设。市场发布必须用它（我不会要、也不会读你的 token）：');
-  console.log('     $env:VSCE_PAT = "<你自己的 Azure DevOps Personal Access Token>"');
+  console.log('\n  ❌ 未设置 VSCE_PAT。市场发布凭据由 vsce 使用，脚本不输出凭据内容：');
+  console.log('     $env:VSCE_PAT = "<Azure DevOps Personal Access Token>"');
   console.log('     node tools/publish.js --yes');
   process.exit(1);
 }
@@ -165,6 +169,7 @@ if (bumpArg) {
 }
 
 console.log('\n  ── 真发布 ───────────────────────────────────────────────');
+if (!compareWithShipList()) process.exit(1);
 if (!vsce(['publish', ...(bumpArg ? [bumpArg] : []), '--no-dependencies'])) process.exit(1);
 // 携带版本参数时 package.json 已被 npm version 修改，重新读取一次才能获得正确的版本号。
 const nowVersion = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;

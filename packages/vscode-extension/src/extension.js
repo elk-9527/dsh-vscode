@@ -10,6 +10,14 @@
 
 const vscode = require('vscode');
 const { DshPanelView, VIEW_ID } = require('./panel/view');
+const { DshConnectionService } = require('./connection/service');
+const { BridgeViews } = require('./bridge/views');
+const { PublicApi } = require('./api/service');
+const { registerChat } = require('./chat/participant');
+const { TurnWorkflow } = require('./workflow/turns');
+const { WorkspaceTests } = require('./workflow/tests');
+const { ReviewTests } = require('./workflow/review-tests');
+const { randomUUID } = require('node:crypto');
 const { kernelManager } = require('./panel/kernel-manager');
 const {
   runDshSync,
@@ -49,17 +57,32 @@ function activate(context) {
   if (detectedDesktops[0] && detectedDesktops[0] !== rememberedDesktop) {
     context.globalState.update(DESKTOP_PATH_KEY, detectedDesktops[0]);
   }
+  const CLIENT_ID_KEY = 'dshPanel.bridge.clientId';
+  const clientId = context.workspaceState.get(CLIENT_ID_KEY) || randomUUID();
+  void context.workspaceState.update(CLIENT_ID_KEY, clientId);
+  const connections = new DshConnectionService({ log, clientId });
   const view = new DshPanelView({
     extensionUri: context.extensionUri,
+    workspaceState: context.workspaceState,
     log,
+    connections,
     desktopExecutables: [rememberedDesktop, ...detectedDesktops].filter(Boolean),
   });
+  const nativeViews = new BridgeViews({ context, connections, panel: view, log });
+  view.skillInvoke = (...args) => nativeViews.invoke(...args);
+  view.workflow = new TurnWorkflow({ vscode, panel: view });
+  view.tests = new WorkspaceTests({ vscode, workflow: view.workflow });
+  nativeViews.verification = new ReviewTests({ vscode, views: nativeViews, workflow: view.workflow });
+  view.composer.busy = () => Boolean(view.session?.busy || view.newSessionPending || view.workflow.recording || view.workflow.activeTest || view.workflow.undoing);
+  context.subscriptions.push(view.tests, nativeViews.verification, view.workflow,
+    vscode.commands.registerCommand('dshPanel.showChanges', () => view.workflow.showChanges()),
+    vscode.commands.registerCommand('dshPanel.runTests', () => view.tests.run()));
+  context.subscriptions.push(connections);
 
   /**
    * 将当前编辑器中的内容挂载到面板。
    *
-   * 两个命令（带上当前文件 / 带上选中的代码）使用同一条代码路径，
-   * 区别仅在于编辑器是否存在选区：存在选区时附带选中的若干行，否则附带整个文件。
+   * 两个命令分别明确加入全文件或选区的正文快照。
    *
    * @param {'file'|'selection'} wanted
    */
@@ -69,17 +92,11 @@ function activate(context) {
       vscode.window.showInformationMessage('当前没有打开的文件。');
       return;
     }
-    const item = DshPanelView.attachmentFromEditor(editor, view.workdir());
-    if (!item) {
-      vscode.window.showInformationMessage('当前编辑器无法获取文件路径。');
-      return;
+    try {
+      await view.addEditorContext(editor, wanted);
+    } catch (error) {
+      vscode.window.showInformationMessage(view.errText(error));
     }
-    if (wanted === 'selection' && item.kind !== 'selection') {
-      vscode.window.showInformationMessage('当前没有选中的代码。');
-      return;
-    }
-    log('info', `带进对话：${item.kind} ${item.name}${item.detail ? `（${item.detail}）` : ''}`);
-    await view.attach([item]);
   }
 
   context.subscriptions.push(
@@ -146,15 +163,22 @@ function activate(context) {
                 `没有找到可运行的 DSH CLI。${failures.length ? `\n${failures.join('\n')}` : ''}`,
               );
             }
-            progress.report({ message: '创建配置并同步连接组件…' });
+            progress.report({ message: '创建配置并同步插件…' });
             await new Promise((resolve) => setImmediate(resolve));
             return preparePanelProfile({ command, profile });
           },
         );
+        const synced = Array.isArray(result.syncedPlugins) ? result.syncedPlugins.length : 0;
         const message = result.created
-          ? `已创建 ${profile} 并安装连接组件。`
-          : `已${result.action === 'update' ? '更新' : '安装'} ${profile} 的连接组件。`;
+          ? `已创建 ${profile}，并同步 ${synced} 个桌面端插件。`
+          : `已修复 ${profile}${synced ? `，并同步 ${synced} 个桌面端插件` : ''}。`;
         log('info', message);
+        if (Array.isArray(result.skippedPlugins) && result.skippedPlugins.length > 0) {
+          log(
+            'warn',
+            `以下插件使用本地或无法复现的来源，未自动同步：${result.skippedPlugins.map((item) => item.name).join('、')}`,
+          );
+        }
         const choice = await vscode.window.showInformationMessage(message, '重新连接');
         if (choice === '重新连接') await view.reconnect();
       } catch (error) {
@@ -168,12 +192,7 @@ function activate(context) {
       }
     }),
     /**
-     * 「DSH：打开面板」—— 展开侧边栏面板并使其获得焦点。
-     *
-     * 需要该命令的原因：面板位于活动栏中，必须先找到对应图标才能打开。
-     * 某次真机验证中，扩展已经激活，但面板从未被打开（日志中只有
-     * 启动那一行）—— 缺少入口等同于该功能不存在。因此补充一条命令：
-     * 在命令面板中搜索 "DSH" 即可进入。
+      * 展开侧边栏面板并使其获得焦点，支持从命令面板直接进入。
      */
     vscode.commands.registerCommand('dshPanel.open', async () => {
       await vscode.commands.executeCommand(`${VIEW_ID}.focus`);
@@ -184,7 +203,14 @@ function activate(context) {
     // 修改设置后，下次连接使用新值；正在进行的会话不受影响。
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('dshPanel')) {
-        log('info', '设置已变更，将在下次新建或重连时生效');
+        const effects = [];
+        if (['host', 'port', 'selfStartPort', 'autoStart', 'dshCommand', 'fallbackProfile'].some(key => event.affectsConfiguration(`dshPanel.${key}`))) effects.push('连接和启动设置在下次连接时读取');
+        if (['provider', 'model'].some(key => event.affectsConfiguration(`dshPanel.${key}`))) effects.push('默认模型在新建会话时读取；当前会话请用模型选择器');
+        if (event.affectsConfiguration('dshPanel.cwd')) effects.push('目录影响后续请求和目录草稿，请显式新建该目录的会话');
+        if (event.affectsConfiguration('dshPanel.preset')) effects.push('默认模式用于下一段新对话，面板已选模式优先');
+        const text = effects.length ? `设置已保存：${effects.join('；')}。` : '设置已保存。';
+        log('info', text);
+        view.post({ type: 'notice', historical: view.historyReadonly, text });
       }
     }),
     { dispose: () => view.dispose() },
@@ -231,17 +257,20 @@ function activate(context) {
       );
     }, 1500);
   }
+  const api = new PublicApi({ vscode, context, connections, panel: view, views: nativeViews });
+  nativeViews.fixes.api = api.exports;
+  context.subscriptions.push(api);
+  const chatRegistration = registerChat({ vscode, context, api: api.exports, panel: view, log });
+  return api.exports;
 }
 
 function deactivate() {
   /*
-   * 窗口关闭：回收本扩展启动的全部后台内核，不残留孤儿进程。
-   *
-   * 注意区别：**视图销毁时不回收**（该操作只释放引用，10 分钟宽限期内
-   * 重开面板仍可使用同一内核），**窗口关闭时才回收**。见 src/panel/kernel-manager.js。
+   * 窗口关闭时回收空闲的自启内核；有插件任务的内核继续完成任务，
+   * 接入点在无连接且任务结束后的宽限期自行退出。
    */
   try {
-    const count = kernelManager().disposeAll('VS Code 窗口关闭');
+    const count = kernelManager().disposeAll('VS Code 窗口关闭', { preserveBridgeRuns: true });
     if (count > 0) console.log(`[dsh-panel] 窗口关闭，回收 ${count} 个后台 DSH 内核`);
   } catch (error) {
     console.error(`[dsh-panel] 回收后台内核出错：${error && error.message ? error.message : error}`);

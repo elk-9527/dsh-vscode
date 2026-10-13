@@ -12,8 +12,7 @@
  * 该套件专门验证的两项内容：
  *
  *   1. 清单由内核提供，并非面板写死。 因此此处用 `--patch` 给内核增加
- *      一个 `auto-approval` 档（与用户档中 `dsh-auto-approval-plugin` 增加的档
- *      同名、同位置）—— 面板必须相应多出该项，且使用内核提供的
+ *      一个合成的 `auto-approval` 档 —— 面板必须相应多出该项，且使用内核提供的
  *      「Auto Approval」名称，不得转换为其他名称。
  *   2. 切换确实作用于会话。 切换完成后重新向内核查询（不读取面板自身记录），
  *      且两段会话互不影响（权限属于每段会话）。
@@ -30,14 +29,14 @@ const path = require('node:path');
 
 const { DoorClient } = require('../src/door/client');
 const { DOOR_CODES } = require('../src/dsh/permission.js');
-const { ensureDoor, syncDoor, PORT, PROFILE, TEST_PROFILE } = require('./helpers/door');
+const { ensureDoor, syncDoor, createTestWorkspace, PORT, PROFILE, TEST_PROFILE } = require('./helpers/door');
 
 const ROOT = path.resolve(__dirname, '..');
-const BUILD = path.join(ROOT, 'build');
+const BUILD = process.env.DSH_PANEL_TEST_WORK ? path.resolve(process.env.DSH_PANEL_TEST_WORK) : path.join(ROOT, 'build');
 const DIAG = path.join(BUILD, 'permission-diag.log');
 const OVERLAY = path.join(BUILD, 'permission-overlay.yml');
 
-/** 内核内置的三档（`@deepseek-ai/dsh-base` 的表），加上本机需要模拟的第四档。 */
+/** 三个内置权限档，加上用于验证自定义名称投影的合成权限档。 */
 const TABLE = ['read-only', 'workspace-write', 'auto-approval', 'danger-full-access'];
 
 let passed = 0;
@@ -72,11 +71,10 @@ function freePort() {
 }
 
 /**
- * 覆盖文件：把该插件指向测试端口，并将权限预设表按用户机器的配置写入。
+ * 覆盖文件：把接入点指向测试端口，写入完整的四档合成权限表。
  *
  * 权限表需要整份重述的原因：DSH 的 patch 会整体替换该行的 config，
- * 只写一项会清除其余档（用户档中 `dsh-auto-approval-plugin` 的注释也专门
- * 提示过该行为）。因此此处写出完整四档 —— 即用户机器上存在的四档。
+ * 只写一项会清除其余档，因此夹具必须包含每个待测权限档。
  */
 function writeOverlay(port) {
   fs.mkdirSync(BUILD, { recursive: true });
@@ -160,7 +158,7 @@ async function main() {
     log: (level, message) => console.log(`  [${level}] ${message}`),
   });
 
-  const cwd = ROOT;
+  const cwd = createTestWorkspace('permission');
   let client;
   try {
     section('1. 握手');
@@ -182,17 +180,15 @@ async function main() {
     const ids = valuesOf(stateA);
     check('该插件答得出权限状态（该插件 0.0.12 的方法在此处回话）', Array.isArray(stateA?.options), JSON.stringify(stateA));
     check(
-      `清单就是内核配的那四档（不多不少）：${TABLE.join(' / ')}`,
-      ids.join(',') === TABLE.join(','),
+      `覆盖配置的四档顺序完整，额外项仅允许官方自动审查档：${TABLE.join(' / ')}`,
+      ids.filter(id => TABLE.includes(id)).join(',') === TABLE.join(',') &&
+        new Set(ids).size === ids.length && ids.every(id => TABLE.includes(id) || id === 'auto'),
       ids.join(','),
     );
     check('当前值在清单里', ids.includes(stateA?.currentValue), String(stateA?.currentValue));
     /*
-     * 新会话落在哪一档无法预先假定：`permission.defaultPreset` 属于用户设置
-     * （本机为 `auto-approval`，写在同一份 `$DSH_HOME/settings.yaml` 中，
-     * 桌面端「通用设置 → 权限」修改的即该项）。因此此处断言的是两者一致：
-     * 内核报告的当前值即其报告的默认档，且该默认档存在于清单中。
-     * 面板的职责是如实显示，不应替内核推测「应当为 workspace-write」。
+     * 新会话的默认权限来自内核设置，不能假定为某个固定档。
+     * 当前值须与内核报告的默认档一致，且该默认档必须存在于可用清单中。
      */
     check('新会话落在内核的默认档上（默认值来自用户设置，不是写死的）',
       !stateA?.defaultPreset || stateA.currentValue === stateA.defaultPreset,
@@ -201,7 +197,7 @@ async function main() {
       !stateA?.defaultPreset || ids.includes(stateA.defaultPreset),
       `默认=${stateA?.defaultPreset} 清单=${ids.join(',')}`);
     if (stateA?.defaultPreset) {
-      console.log(`     这台机器上 settings.yaml 的 permission.defaultPreset = ${stateA.defaultPreset}`);
+      console.log(`     内核返回的 permission.defaultPreset = ${stateA.defaultPreset}`);
     }
     const auto = (stateA.options || []).find((item) => item.value === 'auto-approval');
     check('插件加的那一档带的是内核给的名字 Auto Approval（没人替它改名）',
@@ -242,9 +238,8 @@ async function main() {
       /read-only/.test(badMessage) && /workspace-write/.test(badMessage),
       badMessage);
     /*
-     * 错误码是本节需要固定下来的内容：客户端依据该码生成提示（`explainPermissionFailure` 先读码）。
-     * 此前该情况与「会话找不到」同样返回 -32000，客户端只能依据中文原话推测 ——
-     * 推测错误时「这个选项已经不在了」会被表述为「读不到当前权限，点重新连接再试一次」。
+     * 未知权限档与不存在的会话须返回不同错误码，供 explainPermissionFailure
+     * 直接分类，避免依赖错误消息的语言或将失效选项误判为连接故障。
      */
     check('错误码是「名字不存在」那一档（不是笼统的 -32000）',
       badCode === DOOR_CODES.UNKNOWN_PRESET, String(badCode));

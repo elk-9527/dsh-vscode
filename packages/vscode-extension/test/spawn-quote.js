@@ -3,21 +3,12 @@
 /**
  * 「命令路径中包含空格」这一路径的真实进程测试。
  *
- * ── 单独设立该套件的原因 ─────────────────────────────────────────
- * 2026-09-19 修复的缺陷包含两个部分，两部分均只在真实进程中暴露：
+ * 覆盖两个只有执行进程才能验证的边界：
+ *   1. 路径中的空格属于可执行文件名，不能按参数空白拆分；
+ *   2. cmd.exe 的内嵌引号须原样传递，使用 windowsVerbatimArguments 防止二次转义。
  *
- *   1. `splitCommand()` 按空白硬分割，把 `…\DSH Desktop\…\dsh.cmd` 拆成两段；
- *   2. `spawn(cmd.exe, ['/d','/s','/c', '"…"'])` 会对内嵌引号再次转义，
- *      因此"由用户自行添加引号"这一路径同样失效（必须设置 windowsVerbatimArguments）。
- *
- * 两部分的共同点是：拼接出的字符串表面上完全正确。因此仅测试
- * `commandLine()` 的返回值无法覆盖它们 —— 必须真实启动进程，
- * 确认其是否实际执行。（路径被拆分时 cmd 的原话为
- * `'C:\Users\…\Roaming\DSH' is not recognized as an internal or external command`。）
- *
- * 这也说明该套件的必要性：本机 dsh 的真实路径即包含空格
- * （`…\AppData\Roaming\DSH Desktop\host-commands\…\dsh.cmd`），
- * 因此这不属于"某个用户的环境问题"，而是该机器上必然出现的情况。
+ * 单独比对 commandLine() 返回的字符串不能证明操作系统成功执行了该命令。
+ * 所有路径均由临时目录生成，分别包含带空格与不带空格的合成夹具。
  *
  * 方法：生成一个 .cmd 垫片（内容为把接收到的参数写入 out.txt），
  * 使用真实的 `spawnBackgroundDsh` / `runDshSync` 执行它，再读取 out.txt 比对内容。
@@ -69,6 +60,10 @@ if (process.platform !== 'win32') {
 }
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function waitForOutput(file) {
+  const deadline = Date.now() + 5000;
+  while ((!fs.existsSync(file) || fs.statSync(file).size === 0) && Date.now() < deadline) await wait(50);
+}
 
 async function main() {
   // 使用系统临时目录，不使用仓库中的 build/ —— 该目录会被打包脚本清空，
@@ -128,7 +123,7 @@ async function main() {
     ]) {
       resetOut(spacedOut);
       const bg = spawnBackgroundDsh({ command, profile: 'desktop', log });
-      await wait(1000);
+      await waitForOutput(spacedOut);
       const text = outText(spacedOut);
       bg.dispose();
       await wait(200);
@@ -138,7 +133,7 @@ async function main() {
     section('3. 对照组：路径不带空格（原本正常，不得改坏）');
     resetOut(plainOut);
     const bgPlain = spawnBackgroundDsh({ command: plainCmd, profile: 'desktop', log });
-    await wait(1000);
+    await waitForOutput(plainOut);
     const plainText = outText(plainOut);
     bgPlain.dispose();
     await wait(200);

@@ -1,16 +1,22 @@
 # dsh-acp-door
 
-连接本机 DSH 与 VS Code 等外部程序，共用模型、工具、记忆和会话。支持历史查看和权限切换。
+连接本机 DSH 与 VS Code 等外部程序，共用模型、工具、记忆和会话。支持历史查看、权限切换及已注册插件的能力调用。
+
+旧版 v3 历史异步读取并在内存中缓存摘要，最多保留 16384 条或 8 MiB；不缓存完整对话正文。文件身份、大小或修改时间变化后重新读取，删除的记录从缓存移除。客户端通过 `$/cancelRequest`（`id`）或 ACP 的 `$/cancel_request`（`requestId`）取消查询，连接断开也会停止等待结果；v3 会同时停止后续读取，v4 内部读取仍由内核公开 `sessionQuery` 管理。每个连接最多同时等待 8 个历史请求。
 
 需要已安装并运行的 DeepSeek Harness，以及支持 ACP 的外部客户端。接入点仅供本机使用；安装后需重启对应的 DSH 内核。
+
+`0.2.0` 增加同一连接上的 IDE Bridge：插件主动注册能力、本机自动鉴权、可恢复运行与取消。
+协议规范见仓库的 `docs/bridge-v1.md`。现有 ACP 会话、流式输出、历史和权限方法继续兼容。
 
 
 <details>
 <summary>English</summary>
 
 **dsh-acp-door** opens an extra ACP (Agent Client Protocol) transport on a
-**running** DeepSeek Harness kernel — loopback only (`127.0.0.1`), no
-authentication, so it is meant for your own machine. External clients such as
+**running** DeepSeek Harness kernel — loopback only (`127.0.0.1`), for use on
+your own machine. ACP chat retains its local transport; IDE Bridge calls use
+a per-user endpoint credential and client lease. External clients such as
 the *DSH Panel* VS Code extension can then drive the very same kernel you
 already have open: same config, same memory, same tools, same session records.
 
@@ -36,7 +42,7 @@ dsh plugin --profile <your-profile> update dsh-acp-door
 
 Restart the kernel afterwards.
 
-Compatibility: DSH `0.1.5-rc.2` and `0.2.0-rc.1`.
+Compatibility: DSH `0.1.5-rc.2`, `0.2.0-rc.1`, `0.2.0-rc.2`, and preview `0.2.1-alpha.1`.
 
 </details>
 
@@ -142,17 +148,10 @@ DSH Desktop（运行中）
 | 新建的会话 | `select(agent, id)` | 该入口重新组装 agent 的作用域，并将本次选择**追加进会话事件日志**（`agent-preset/selected`）。 |
 | 恢复的会话（断线重连 / 打开历史会话） | `mount(agent.ctx, id)` | 内核按「是否执行过回合」为 `select` 设置了锁（`agent-preset/locked`，属设计行为）。恢复时 agent 的作用域为**重新组装**的结果，缺少该调用时作用域为空。`mount` 是工厂期使用的入口，只负责组装，不检查该锁。 |
 
-### 恢复会话的缺陷记录
+### 恢复会话与工具挂载
 
-症状：面板断线重连（或重启内核后接回旧会话）之后，会话**一个工具都没有** ——
-模型会声明"我来跑一下"，随后把工具调用当作文本写出（`<｜｜DSML｜｜invoke …>`）。
-实测数据：同一个会话，断线前 18 次工具调用，接回后 **0 次**，正文退化为未转义的 DSML。
-
-原因：`select()` 只在**新建**时能够挂载；恢复时该入口被锁定，而预设又**不会**从会话记录中
-自动还原（见下文「会话记录中不含预设」）。因此恢复出的 agent 作用域为空。
-
-修法：`select` 遇到预设锁时改用 `mount(agent.ctx, id)`。修复后同一试验立即变为接回后 10 次
-工具调用（`packages/vscode-extension/test/presets.js` 第 8 节固定了这一结论）。
+恢复的会话需要重新挂载工具预设。`select()` 适用于新建会话；恢复时遇到预设锁，改用
+`mount(agent.ctx, id)`，确保恢复后的 Agent 具有该预设提供的工具。
 
 ### 两项必须注意的约束（均已实测）
 
@@ -165,22 +164,12 @@ DSH Desktop（运行中）
 
 2. **存在一处竞态，必须由入站闸阻塞。** 内核派发 `agent/created` 时**不等待**
    监听器返回的 promise，因此「补挂预设」与「客户端发送第一个 prompt」并行执行。
-   实测数据（诊断日志原文）：
+   客户端请求先到达时，模型尚无完整工具清单。因此传输层对该会话的 `session/prompt`
+   设置入站闸，等待预设挂载完成再发送。
 
-   | 时刻 | 事件 |
-   |---|---|
-   | `37.169` | `agent/created` 触发 |
-   | `37.224` | 客户端 prompt 到达（**+55ms**） |
-   | `37.526` | 预设挂载完成（耗时 **357ms**） |
+### 预设恢复来源
 
-   客户端请求先到达，因此模型收到 **0 个工具 schema**（会话记录中 `toolsTokens: 0`），
-   只能把工具调用当作文本写出。因此 {@link gatePrompts} 在传输层阻塞该会话的
-   `session/prompt`，直到挂载完成 —— 上表所示一轮实际阻塞 303ms。
-
-### 会话记录中不含预设（结论已修正）
-
-上文「记进会话记录」的表述曾出现在此处，**该表述有误**。实测（解开
-`$DSH_HOME/sessions/<项目>/<会话>/session.v3.jsonl.zstd`）：
+对于 v3 会话格式：
 
 - 桌面端建立的会话，第一行 header 中含 `"agentPreset":"standard"`；
 - 经该插件建立的会话，**不含** `agentPreset` —— 建立后读取即不存在，执行完一个回合后再读仍不存在。
@@ -217,12 +206,17 @@ DSH 冷启动时，插件会先等待用户设置加载完成再开放端口，�
 
 | DSH | 历史会话 | 权限预设 |
 | --- | --- | --- |
-| `0.2.0-rc.1` | 公开 `sessionQuery` 服务，v4 会话格式 | `catalog/current/resolve/set` |
+| `0.2.0-rc.1` / `0.2.0-rc.2` | 公开 `sessionQuery` 服务，v4 会话格式 | `catalog/current/resolve/set` |
 | `0.1.5-rc.2` | 只读解析本机 v3 会话文件 | `selectFor/permissionState/current/set` |
 
 两条路径对外提供相同的 `dsh-door/…` 方法。接入点的状态回复会用 `historyKind`、
 `sessionFormat` 和 `permissionKind` 报告实际选中的适配器。不会在插件中私自解析 v4：
 该格式由 DSH 0.2 的 `sessionQuery` 负责读取和迁移。
+
+状态中的可选 `protocolVersion` 与 `runtime.acpVersion` 分别报告接入协议及实际加载的 ACP 包版本。
+
+旧 npm 发行物的依赖使用版本范围：`DSH 0.1.5-rc.2` 可解析到 `ACP 0.1.5-rc.3`。兼容矩阵分别记录两个版本；依赖范围包含该 ACP 版本不表示已经验收同号的 DSH 发行物。
+无法识别的已有历史服务会报告 `history: false`，不尝试以旧格式读取新数据。
 
 ## 版本变更
 
@@ -251,8 +245,8 @@ DSH 冷启动时，插件会先等待用户设置加载完成再开放端口，�
 | 方法 | 该插件所需的 params | 该插件的回复 | 起始版本 |
 | --- | --- | --- | --- |
 | `dsh-door/status` | `{}` | `{ version, model: {ready, source, provider?, model?}, capabilities }` | 0.0.14 |
-| `dsh-door/sessions/list` | `{}`（可选 `cwd`） | `{ skipped, sessions: [...] }` | 0.0.8 |
-| `dsh-door/sessions/get` | `{ id, limit? }` | `{ card, entries, truncated }` | 0.0.8 |
+| `dsh-door/sessions/list` | `{}`（可选 `cwd`；从 0.3.0 起支持 `limit`、`offset`、`query`） | `{ skipped, sessions: [...] }`；0.3.0 起含 `total`、`offset`、`nextOffset?` | 0.0.8 |
+| `dsh-door/sessions/get` | `{ id }` | `{ card, entries, truncated }` | 0.0.8 |
 | `dsh-door/permission/get` | `{ id }` | `{ currentValue, options: [{value, name?, description?}], defaultPreset? }` | 0.0.12 |
 | `dsh-door/permission/set` | `{ id, value }` | 同 `permission/get`（**修改之后回读**的真实状态） | 0.0.12 |
 
@@ -285,8 +279,7 @@ dsh plugin --profile <profile> add "file:<本目录>\dsh-acp-door-<版本>.tgz"
 
 **不应使用 `link:`。** 该方式会建立真实符号链接，Node 解析依赖时按**真实路径**向上查找，
 因此 `import '@deepseek-ai/dsh-acp'` 无法解析（该包不在源码树中，而在 profile/DSH 安装目录中），
-导致该插件无法启动。更严重的是，删除该链接时 pnpm 可能**同时清空源码目录** ——
-该情况已实际发生一次，依靠 profile 中的那份副本才得以恢复。
+导致该插件无法启动。删除该链接时，包管理器也可能对源目录执行清理；使用独立的发行归档可以明确安装与源码的边界。
 
 **修改源码后必须重新执行一次 `add`。** `file:` 是**拷贝**而非链接，且 pnpm 存在缓存，
 源码变更后有时直接报告 `added 0`（内容未替换）。`packages/vscode-extension/test/helpers/door.js`
@@ -316,8 +309,7 @@ dsh plugin --profile <profile> add "file:<本目录>\dsh-acp-door-<版本>.tgz"
 
 ## 已知限制
 
-- **没有鉴权**：本机上的任何程序均可连接该端口。这是本机使用的明确边界：该插件固定
-  监听 `127.0.0.1`，不支持通过改地址、端口转发或隧道把接入点提供给其它设备。
+- **普通 ACP 传输没有鉴权**：本机程序可连接该端口；IDE Bridge 的能力调用另有本机凭据、客户端租约和风险授权。接入点固定监听 `127.0.0.1`，不支持通过改地址、端口转发或隧道提供给其它设备。
 - **硬依赖 `agentPresets`**：不提供预设机制的 profile（例如纯 base 的 `acp` profile）
   不会加载该插件。该限制属刻意设计 —— 见上文第 1 项约束。
 - 需重启 DSH 后才会加载（profile 的 `patchReload` 为 `live` 时，配置改动可以热生效，

@@ -19,15 +19,27 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { pathToFileURL } = require('node:url');
 const { SCENARIOS, buildHtml, buildReplayScript, OUT, ROOT } = require('./preview');
 const { findChrome, missingChromeMessage } = require('./chrome.cjs');
 
 const CHROME = findChrome();
-const WORK = path.join(ROOT, 'build', 'uitest');
-const PROFILE = path.join(ROOT, 'build', 'chrome-profile');
+const WORK = process.env.DSH_PANEL_UI_WORK ? path.resolve(process.env.DSH_PANEL_UI_WORK) : path.join(ROOT, 'build', 'uitest');
+const PROFILE = path.join(WORK, 'chrome-profile');
+const TEST_SCENARIOS = {
+  ...SCENARIOS,
+  usability() { return SCENARIOS.composer(); },
+  testrepair() { return SCENARIOS.composer(); },
+  controls() { return SCENARIOS.composer(); },
+};
 
 /** 每个场景特有的额外期望。 */
 const EXPECTATIONS = {
+  controls: { needsUser: false, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0, controlsScene: true },
+  testrepair: { needsUser: false, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0, testRepairScene: true },
+  usability: { needsUser: false, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0, usabilityScene: true },
+  composer: { needsUser: false, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0, composerScene: true },
+  drafts: { needsUser: false, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0, draftScene: true },
   // 未发送任何内容：所有「按需出现」的控件均需保持隐藏状态。
   bare: { needsUser: false, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, emptyChrome: true, minAssistantChars: 0 },
   empty: { needsUser: false, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0 },
@@ -148,7 +160,6 @@ function assertionsScript(scene) {
     }
 
     // ── 1.6 顶栏配置行的宽度分配 ─────────────────────
-    // 用户曾报告：「文字被挤在一起了，模型的占地有点大，其他两点有点小」。
     // 起因是三个格子均使用「flex: 1 1 auto」（基准取内容宽度），模型那个 <select>
     // 的基准为其最长选项，因此它占满整行、另两个被压到 40~60px 并截断文字。
     // 现在按 7:6:6 分配并各自设有下限 —— 这几条断言即用于固定该行为。
@@ -356,7 +367,7 @@ function assertionsScript(scene) {
       });
       assert('刷新后附件标签反映最新状态', details.some(function (d) { return d.indexOf('未保存修改') >= 0; }), details.join(' | '));
       assert('刷新已有附件时提示的是刚刷新的文件',
-        document.getElementById('hint').textContent.indexOf('未保存修改') >= 0,
+        document.getElementById('hint').textContent.includes('更新快照') && document.getElementById('hint').textContent.includes('src/panel/view.js'),
         document.getElementById('hint').textContent);
 
       // 每个已挂载的小块都需要可移除 —— 并且是就地移除，无需等待扩展回话。
@@ -389,7 +400,9 @@ function assertionsScript(scene) {
         assert('发走的附件带着正文（选区的内容不能丢）', carried[0] && carried[0].text === '<footer class="composer">',
           JSON.stringify(carried[0] && carried[0].text));
       }
-      assert('发送后已附加的附件已清空', document.querySelectorAll('#attachments .chip').length === 0);
+      assert('接收确认前附件仍保留', document.querySelectorAll('#attachments .chip').length === 1);
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'sendResult', requestId: withAttach[0] && withAttach[0].requestId, success: true } }));
+      assert('接收确认后已附加的附件已清空', document.querySelectorAll('#attachments .chip').length === 0);
       assert('清空后附件块已隐藏', !visible(attachmentBox));
 
       // 回看对话记录：那条用户消息应当仍能看出当时携带的内容。
@@ -398,6 +411,24 @@ function assertionsScript(scene) {
         '有 ' + bubbleChips.length + ' 块');
       assert('历史消息中的附件不带移除按钮（已发送）',
         document.querySelectorAll('.msg-user .bubble .chip-close').length === 0);
+      var reportAttachment = { kind: 'review', id: 'review:fixture', name: '代码审查报告', detail: '1 条发现', text: '# 代码审查\\n\\n报告正文标记' };
+      window.__received.length = 0;
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'busy', busy: false } }));
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'attach', items: [reportAttachment] } }));
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'attach', items: [reportAttachment] } }));
+      assert('报告附加不自动发送', window.__received.filter(function (m) { return m.type === 'send'; }).length === 0);
+      assert('同一报告只保留一个附件', document.querySelectorAll('#attachments .chip').length === 1);
+      var reportChip = document.querySelector('#attachments .chip');
+      assert('报告正文可从附件提示查看', reportChip && reportChip.title.indexOf('报告正文标记') >= 0);
+      document.querySelector('#attachments .chip-close').click();
+      assert('报告可在发送前移除', document.querySelectorAll('#attachments .chip').length === 0 && !visible(attachmentBox));
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'attach', items: [reportAttachment] } }));
+      ctxInput.value = '解释报告'; ctxSend.click();
+      var reportSends = window.__received.filter(function (m) { return m.type === 'send'; });
+      assert('显式发送才携带完整报告', reportSends.length === 1 && reportSends[0].attachments[0].text === reportAttachment.text);
+      assert('接收报告前附件保留', document.querySelectorAll('#attachments .chip').length === 1);
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'sendResult', requestId: reportSends[0] && reportSends[0].requestId, success: true } }));
+      assert('接收报告后附件清空', document.querySelectorAll('#attachments .chip').length === 0);
     }
 
     // ── 7.6 压力：几百个流式增量的耗时 ────────────────
@@ -609,7 +640,7 @@ function assertionsScript(scene) {
 
       // 模拟扩展应答（形状对齐 ACP 接入点插件（dsh-acp-door）0.0.8 版的应答）。
       window.postMessage({ type: 'history', skipped: 5, sessions: [
-        { id: 'session-alpha', title: '修门插件的依赖注入', turns: 12, lastTime: Date.now() - 3600e3, cwd: '<仓库根目录>', preset: 'standard' },
+        { id: 'session-alpha', title: '检查示例加法函数', turns: 12, lastTime: Date.now() - 3600e3, cwd: '<仓库根目录>', preset: 'standard' },
         { id: 'session-beta', title: '重写界面的渲染循环', turns: 4, lastTime: Date.now() - 86400e3, cwd: '<仓库根目录>/packages/vscode-extension', preset: 'ptc' },
         { id: 'session-gamma', title: '', fallbackTitle: '帮我看看这个报错', turns: 1, lastTime: Date.parse('2025-11-02T09:12:00'), cwd: '<用户目录>', decodeError: '有一帧解码失败' },
       ] }, '*');
@@ -619,7 +650,7 @@ function assertionsScript(scene) {
       assert('统计中写明更早的记录未列出', (document.getElementById('history-meta').textContent || '').indexOf('5') >= 0,
         document.getElementById('history-meta').textContent);
       var firstTitle = overlay.querySelector('.history-item-title');
-      assert('第一条显示内核生成的标题', !!firstTitle && firstTitle.textContent.indexOf('修门插件') === 0,
+      assert('第一条显示内核生成的标题', !!firstTitle && firstTitle.textContent.indexOf('检查示例') === 0,
         firstTitle ? firstTitle.textContent : '无');
       var sub2 = overlay.querySelectorAll('.history-item-sub')[1];
       assert('非默认模式的名字显示在副行', !!sub2 && sub2.textContent.indexOf('ptc') >= 0, sub2 ? sub2.textContent : '无');
@@ -636,18 +667,19 @@ function assertionsScript(scene) {
       assert('点回放会向扩展要这段会话（带 id）',
         window.__received.some(function (m) { return m.type === 'historyOpen' && m.id === 'session-alpha'; }),
         JSON.stringify(window.__received));
-      window.postMessage({ type: 'replay', truncated: false, card: { id: 'session-alpha', title: '修门插件的依赖注入', turns: 12, lastTime: Date.now() - 3600e3 }, entries: [
-        { kind: 'user', text: '门插件报 cannot get property 是怎么回事？' },
-        { kind: 'assistant', text: '原因是 cordis 不允许在没有 **inject** 的情况下读服务属性。', thinking: '先查 cordis 的服务解析规则。' },
+      window.postMessage({ type: 'replay', truncated: false, card: { id: 'session-alpha', title: '检查示例加法函数', turns: 12, lastTime: Date.now() - 3600e3 }, entries: [
+        { kind: 'user', text: '示例加法函数为什么返回错误结果？' },
+        { kind: 'assistant', text: '示例函数使用了**减法**运算，需要按加法规则检查。', thinking: '检查示例函数的返回值。' },
         { kind: 'tool', name: 'read', args: { file_path: 'lib/index.js' }, output: 'export const inject = [];' },
-        { kind: 'assistant', text: '补上 inject 就好了。' },
+        { kind: 'assistant', text: '将返回表达式改为加法。' },
       ] }, '*');
       await new Promise(function (resolve) { setTimeout(resolve, 500); });
       assert('回放开始后浮层收起来了', !visible(overlay));
       assert('回放重建了用户气泡', document.querySelectorAll('.msg-user .bubble').length === 1,
         document.querySelectorAll('.msg-user .bubble').length + ' 个');
       var bodies = document.querySelectorAll('.msg-assistant .body');
-      assert('回放重建了两段回答', bodies.length === 2 && bodies[0].textContent.indexOf('cordis') >= 0,
+      assert('回放重建了两段回答', bodies.length === 2 && bodies[0].textContent.indexOf('减法') >= 0
+        && bodies[1].textContent.indexOf('加法') >= 0,
         bodies.length + ' 段');
       assert('回放的思考块也在（且默认可见）', document.querySelectorAll('details.thinking:not([hidden])').length === 1);
       var replayTools = document.querySelectorAll('.tool');
@@ -670,7 +702,7 @@ function assertionsScript(scene) {
       hbtn.click();
       assert('回放之后还能再打开浮层', visible(overlay));
       window.postMessage({ type: 'history', skipped: 5, sessions: [
-        { id: 'session-alpha', title: '修门插件的依赖注入', turns: 12, lastTime: Date.now() - 3600e3, cwd: '<仓库根目录>', preset: 'standard' },
+        { id: 'session-alpha', title: '检查示例加法函数', turns: 12, lastTime: Date.now() - 3600e3, cwd: '<仓库根目录>', preset: 'standard' },
       ] }, '*');
       await new Promise(function (resolve) { setTimeout(resolve, 400); });
       var again = overlay.querySelectorAll('.history-item');
@@ -743,6 +775,32 @@ function assertionsScript(scene) {
         errStyle ? (errStyle.color + ' vs ' + (emptyColor || '（空状态的颜色没取到）')) : '取不到');
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       assert('出错之后 Esc 同样可关闭', !visible(overlay));
+      hbtn.click();
+      var search=document.getElementById('history-search'),project=document.getElementById('history-project');
+      search.value='needle';search.dispatchEvent(new Event('input',{bubbles:true}));
+      await new Promise(function(resolve){setTimeout(resolve,300);});
+      var queryRequest=window.__received.filter(function(message){return message.type==='historyList';}).pop();
+      assert('搜索正文传给扩展且重置页码',queryRequest.query==='needle'&&queryRequest.offset===0);
+      project.checked=true;project.dispatchEvent(new Event('change',{bubbles:true}));
+      var projectRequest=window.__received.filter(function(message){return message.type==='historyList';}).pop();
+      assert('项目筛选传给扩展',projectRequest.projectOnly===true);
+      window.postMessage({type:'history',requestId:projectRequest.requestId,total:205,offset:0,nextOffset:100,sessions:[{id:'paged',title:'Current page'}]},'*');
+      await new Promise(function(resolve){setTimeout(resolve,30);});
+      window.postMessage({type:'history',requestId:queryRequest.requestId,total:0,sessions:[]},'*');
+      await new Promise(function(resolve){setTimeout(resolve,30);});
+      assert('旧搜索应答不覆盖当前结果',overlay.querySelector('.history-item-title').textContent==='Current page');
+      overlay.querySelectorAll('.history-item-actions button')[2].click();
+      assert('导出发送会话 ID',window.__received.some(function(message){return message.type==='historyExport'&&message.id==='paged';}));
+      document.getElementById('history-next').click();
+      var nextRequest=window.__received.filter(function(message){return message.type==='historyList';}).pop();
+      assert('下一页使用接入点返回的位置',nextRequest.offset===100);
+      window.postMessage({type:'history',requestId:nextRequest.requestId,total:205,offset:100,nextOffset:200,sessions:[{id:'paged-next',title:'Next page'}]},'*');
+      await new Promise(function(resolve){setTimeout(resolve,30);});
+      assert('分页统计及上一页可用',!document.getElementById('history-prev').disabled&&document.getElementById('history-page').textContent.indexOf('101')===0);
+      document.getElementById('history-prev').click();
+      assert('上一页回到前一页',window.__received.filter(function(message){return message.type==='historyList';}).pop().offset===0);
+      document.getElementById('history-close').click();
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'historyState', readonly: false } }));
     }
 
     // ── 7.8 权限选择器：清单由扩展（内核）提供，界面只负责渲染与点击 ──────────
@@ -806,6 +864,8 @@ function assertionsScript(scene) {
         window.__received.some(function (m) { return m.type === 'setPermission' && m.value === 'read-only'; }),
         JSON.stringify(window.__received));
       assert('发完就收起来了', !visible(accessPop));
+      var normalPermissionRequest = window.__received.filter(function (m) { return m.type === 'setPermission'; }).pop();
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'settingResult', requestId: normalPermissionRequest.requestId, phase: 'completed', success: true, text: '权限已确认' } }));
 
       // 完全权限：必须先通过确认步骤 —— 该档位一经选定即不再逐条询问用户，误选代价较大。
       window.__received.length = 0;
@@ -834,6 +894,8 @@ function assertionsScript(scene) {
         window.__received.some(function (m) { return m.type === 'setPermission' && m.value === 'danger-full-access'; }),
         JSON.stringify(window.__received));
       assert('确认后小卡片收起', !visible(accessPop));
+      var dangerPermissionRequest = window.__received.filter(function (m) { return m.type === 'setPermission'; }).pop();
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'settingResult', requestId: dangerPermissionRequest.requestId, phase: 'completed', success: true, text: '权限已确认' } }));
 
       // Esc 与点击外部区域：这两种习惯性操作都需要生效。
       accessBtn.click();
@@ -884,7 +946,7 @@ function assertionsScript(scene) {
 
       // 无法切换时（所连版本较旧 / 未提供权限设置）：按钮置灰 + 给出可读说明，
       // 并且该说明挂在悬浮提示上（顶栏该行容不下长文本，完整原因走对话流）。
-      // ⚠️ 这段文案里**不得含内部词**（插件简称 / 包名 / 版本号 / 档位名）—— 用户提过意见，
+      // 这段提示不使用内部词（插件简称 / 包名 / 版本号 / 档位名），
       // 此处即用扩展实际会发送的那两句作为素材（见 src/dsh/permission.js）。
       window.postMessage({ type: 'permissionState', unavailable: {
         state: 'old-door',
@@ -909,7 +971,687 @@ function assertionsScript(scene) {
       assert('置灰后点击也不弹出清单', !visible(accessPop));
     }
 
-    // ── 8. 交互：发送 / 换行 / 空输入 / 忙碌时不得发送 ──
+
+    if (EXPECT.testRepairScene) {
+      var recv = function (message) { window.dispatchEvent(new MessageEvent('message', { data: message })); };
+      var input = document.getElementById('input'), preview = document.getElementById('attachment-preview');
+      var count = function (type) { return window.__received.filter(function (m) { return m.type === type; }).length; };
+      var last = function (type) { return window.__received.filter(function (m) { return m.type === type; }).pop(); };
+      var answer = function (request, changes) { recv(Object.assign({}, request, { type: 'workflowResult' }, changes)); };
+      var attachment = { id: 'file-snapshot', kind: 'content', scope: 'file', name: 'current.js', sourcePath: '/test-project/current.js', text: 'A', isDirty: false };
+      recv({ type: 'meta', cwd: '/test-project', trusted: true, sessionId: 's1' });
+      recv({ type: 'attach', cwd: '/test-project', sessionId: 's1', items: [attachment] });
+      document.querySelector('#attachments .chip-label').click();
+      assert('重新加入前真实预览显示A', document.getElementById('preview-body').textContent === 'A');
+      recv({ type: 'attach', cwd: '/test-project', sessionId: 's1', items: [Object.assign({}, attachment, { text: 'B', isDirty: true })] });
+      assert('右键回执更新同ID时关闭旧预览要求重看', preview.hidden);
+      document.querySelector('#attachments .chip-label').click();
+      assert('重看准确显示更新B及未保存元数据', document.getElementById('preview-body').textContent === 'B' && document.getElementById('preview-meta').textContent.includes('未保存'));
+      document.getElementById('preview-close').click(); input.value = '明确发送'; input.dispatchEvent(new Event('input'));
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      var send = last('send'); assert('用户Enter实际发送更新快照B', send.attachments[0].text === 'B');
+      recv({ type: 'sendResult', requestId: send.requestId, cwd: '/test-project', success: true, phase: 'accepted' });
+      recv({ type: 'sendCompleted', requestId: send.requestId, cwd: '/test-project', success: true });
+      recv({ type: 'workflow', files: [], turns: [], test: { id: 'pre-initial', turnId: '', status: 'passed', label: 'previous' } });
+      document.getElementById('workflow-run-test').click(); var initialRequest = last('workflowAction');
+      assert('无轮次总览测试请求使用空字符串轮次契约', initialRequest.turnId === '' && initialRequest.testId === '');
+      answer(initialRequest, {});
+      var initialTest = { id: 'initial-test', turnId: '', status: 'passed', label: 'initial', exitCode: 0 };
+      recv({ type: 'workflow', files: [], test: initialTest }); document.getElementById('workflow-view-test').click(); initialRequest = last('workflowAction');
+      answer(initialRequest, { items: [{ id: 'initial-evidence', kind: 'content', name: 'initial', scope: 'test', text: '无轮次真实测试结果' }] });
+      assert('无轮次测试结果可精确查看不被null拒绝', initialRequest.turnId === '' && initialRequest.testId === 'initial-test' && !preview.hidden && document.getElementById('preview-body').textContent === '无轮次真实测试结果');
+      document.getElementById('preview-close').click();
+      var sends = count('send');
+      var test = { id: 'test1', label: '<img src=x> long test task', cwd: '/test-project', turnId: 'turn1', status: 'failed', exitCode: 1, duration: 1200, freshness: 'unknown' };
+      var evidence = { id: 'test:test1', kind: 'content', scope: 'test', source: 'vscode-task', name: '测试结果：失败', text: '执行ID：test1\\n退出码：1\\n未自动取得终端输出。\\n<img src=x>\\n编辑器诊断可能与任务无关', sourcePath: '/test-project', snapshotAt: '2026-10-12T03:00:00.000Z' };
+      recv({ type: 'workflow', turnId: 'turn1', files: [], test: test });
+      assert('失败卡明确缺输出且标签不解析HTML', document.getElementById('workflow-test').textContent.includes('未自动取得终端输出') && !document.querySelector('#workflow-test img'));
+      document.getElementById('workflow-view-test').click(); var request = last('workflowAction');
+      assert('查看带精确轮次执行请求目录会话身份', request.turnId === 'turn1' && request.testId === 'test1' && request.requestId && request.cwd === '/test-project' && request.sessionId === 's1');
+      answer(request, { items: [evidence] });
+      assert('结果预览只读且不冒充文件日志', !preview.hidden && document.getElementById('preview-body').textContent === evidence.text && !preview.querySelector('img') && document.getElementById('preview-note').textContent.includes('未自动核实'));
+      document.getElementById('preview-close').click();
+      input.value = '原有正文'; input.dispatchEvent(new Event('input')); recv({ type: 'attach', items: [Object.assign({}, attachment, { text: '原有附件' })] });
+      document.getElementById('workflow-attach-test').click(); request = last('workflowAction'); answer(request, { items: [evidence] });
+      assert('附加保留正文和已有附件', input.value === '原有正文' && document.querySelectorAll('#attachments .chip').length === 2);
+      document.getElementById('workflow-prepare-test').click(); request = last('workflowAction');
+      input.value = '等待回执时新增正文'; input.dispatchEvent(new Event('input'));
+      answer(request, { items: [evidence], text: '请修复此次失败。修复后重新验证。' });
+      assert('准备失败草稿准确显示且提醒重验', input.value.includes('请修复此次失败') && document.getElementById('hint').textContent.includes('重新运行测试'));
+      assert('等待期间新输入及完整旧附件进入保留草稿', window.__draftState.recoveries.some(function (draft) { return draft.text === '等待回执时新增正文' && draft.attachments.length === 2 && draft.attachments[0].text === '原有附件'; }));
+      assert('查看附加准备全过程发送与排队为零', count('send') === sends && count('queueAction') === 0);
+      document.getElementById('recover-draft').click();
+      assert('恢复旧草稿带回全部正文附件', input.value === '等待回执时新增正文' && document.querySelectorAll('#attachments .chip').length === 2);
+      document.getElementById('workflow-log-test').click();
+      assert('日志浮层说明用户提供和归属限制', !document.getElementById('test-log-panel').hidden && document.getElementById('test-log-panel').textContent.includes('未自动核实'));
+      document.getElementById('test-log-body').value = '汉'.repeat(44000); document.getElementById('test-log-accept').click();
+      assert('日志按UTF8拒绝128KiB超限且保留输入', !document.getElementById('test-log-panel').hidden && document.getElementById('test-log-note').textContent.includes('128 KiB'));
+      document.getElementById('test-log-body').value = '<img src=x> assertion failed'; document.getElementById('test-log-accept').click(); request = last('workflowAction');
+      assert('明确日志提交带执行身份且没有发送', request.action === 'logTest' && request.testId === 'test1' && request.logText.includes('<img') && count('send') === sends);
+      var log = { id: 'test-log:test1', kind: 'content', scope: 'test-log', source: 'user-provided', name: '用户提供日志（归属未核实）', text: '用户提供；未自动核实属于此次执行\\n<img src=x> assertion failed' };
+      answer(request, { items: [evidence, log] });
+      assert('补充后预览全部证据且HTML为文本', document.getElementById('preview-body').textContent.includes(log.text) && !preview.querySelector('img'));
+      document.getElementById('preview-close').click();
+      document.getElementById('workflow-terminal').click(); request = last('workflowAction');
+      assert('通用任务终端视图请求仍按本执行寻址', request.action === 'taskTerminals' && request.testId === 'test1'); answer(request, {});
+      document.getElementById('workflow-view-test').click(); request = last('workflowAction');
+      recv({ type: 'workflow', turnId: 'turn1', files: [], test: Object.assign({}, test, { id: 'test2' }) }); answer(request, { items: [evidence] });
+      assert('同轮重跑覆盖后拒绝迟到旧结果', preview.hidden && document.getElementById('hint').textContent.includes('覆盖'));
+      document.getElementById('workflow-prepare-test').click(); request = last('workflowAction'); var original = input.value;
+      recv({ type: 'meta', cwd: '/test-project', trusted: true, sessionId: 's2' }); answer(request, { text: '迟到修复', items: [evidence] });
+      assert('会话变化后迟到草稿不能覆盖新输入', input.value === original);
+      document.getElementById('workflow-view-test').click(); request = last('workflowAction');
+      recv({ type: 'meta', cwd: '/other-project', trusted: true, sessionId: 's2' }); answer(request, { items: [evidence] });
+      assert('目录变化后迟到证据不能进入另一段草稿', preview.hidden && document.getElementById('attachments').hidden);
+      recv({ type: 'meta', cwd: '/test-project', trusted: true, sessionId: 's2' });
+      document.getElementById('workflow-attach-test').click(); request = last('workflowAction');
+      recv({ type: 'meta', cwd: '/test-project', trusted: false, sessionId: 's2' }); answer(request, { items: [evidence] });
+      assert('信任撤销后迟到附件被拒绝', document.getElementById('attachments').hidden);
+      recv({ type: 'meta', cwd: '/limits', trusted: true, sessionId: 's3' });
+      recv({ type: 'workflow', turnId: 'turn1', files: [], test: test });
+      input.value = '限额原正文'; input.dispatchEvent(new Event('input'));
+      recv({ type: 'attach', items: Array.from({ length: 20 }, function (_, i) { return { id: 'limit' + i, name: 'limit' + i, kind: 'content', text: 'x' }; }) });
+      document.getElementById('workflow-attach-test').click(); request = last('workflowAction'); answer(request, { items: [evidence] });
+      assert('测试附加计入已有20项且原内容不丢', document.querySelectorAll('#attachments .chip').length === 20 && input.value === '限额原正文' && document.getElementById('hint').textContent.includes('20 项'));
+      recv({ type: 'meta', cwd: '/bytes', trusted: true, sessionId: 's3' }); input.value = '字节限额原正文'; input.dispatchEvent(new Event('input'));
+      recv({ type: 'attach', items: [{ id: 'full', name: 'full', kind: 'content', text: 'x'.repeat(256 * 1024) }] });
+      document.getElementById('workflow-attach-test').click(); request = last('workflowAction'); answer(request, { items: [evidence] });
+      assert('测试证据计入256KiB且不覆盖既有正文', document.querySelectorAll('#attachments .chip').length === 1 && input.value === '字节限额原正文' && document.getElementById('hint').textContent.includes('256 KiB'));
+      recv({ type: 'meta', cwd: '/draft-budget', trusted: true, sessionId: 's3' });
+      recv({ type: 'draftRestore', cwd: '/draft-budget', draft: { version: 1, cwd: '/draft-budget', savedAt: Date.now(), text: 'x'.repeat(100000), attachments: [], recoveries: [{ text: 'a'.repeat(120000), attachments: [] }, { text: 'b'.repeat(120000), attachments: [] }, { text: 'c'.repeat(120000), attachments: [] }] } });
+      document.getElementById('workflow-prepare-test').click(); request = last('workflowAction'); answer(request, { items: [Object.assign({}, evidence, { text: 'y'.repeat(80000) })], text: '准备修复' });
+      assert('准备计入512KiB保留草稿总量且原正文不丢', input.value.length === 100000 && document.getElementById('hint').textContent.includes('512 KiB'));
+      assert('全部证据与日志操作未触发额外send或queue', count('send') === sends && count('queueAction') === 0);
+      var old = { id: 'old-turn', finished: true, status: 'completed', files: [], test: Object.assign({}, test, { id: 'old-test', status: 'passed', exitCode: 0, stale: true }) };
+      var current = { id: 'current-turn', finished: true, status: 'completed', files: [], test: Object.assign({}, test, { id: 'current-test', status: 'cancelled' }) };
+      recv({ type: 'workflow', turnId: 'current-turn', test: current.test, files: [], turns: [old, current] });
+      var oldCard = document.querySelector('[data-turn="old-turn"]'); oldCard.open = true;
+      assert('陈旧通过仍保留真实通过和需重跑状态', oldCard.querySelector('summary').textContent.includes('测试通过') && oldCard.querySelector('summary').textContent.includes('需重跑'));
+      Array.from(oldCard.querySelectorAll('button')).find(function (button) { return button.textContent === '查看此次结果'; }).click(); request = last('workflowAction');
+      assert('旧轮查看精确寻址旧结果而非最新', request.turnId === 'old-turn' && request.testId === 'old-test');
+      assert('取消结果准备明确称排查而非失败修复', Array.from(document.querySelector('[data-turn="current-turn"]').querySelectorAll('button')).some(function (button) { return button.textContent === '准备排查草稿'; }));
+      recv({ type: 'workflow', turnId: 'current-turn', test: current.test, files: [], turns: [current] }); answer(request, { items: [evidence] });
+      assert('旧轮淘汰后迟到查看不显示', preview.hidden);
+      var raceTest = Object.assign({}, test, { id: 'race-test', turnId: 'race-turn' });
+      recv({ type: 'meta', cwd: '/preview-race', trusted: true, sessionId: 's4' });
+      recv({ type: 'workflow', turnId: 'race-turn', files: [], test: raceTest, turns: [] });
+      input.value = '只在明确发送后执行'; input.dispatchEvent(new Event('input'));
+      document.getElementById('workflow-view-test').click(); var previewRequest = last('workflowAction');
+      document.getElementById('workflow-attach-test').click(); var attachRequest = last('workflowAction');
+      var raceEvidence = Object.assign({}, evidence, { id: 'test:race-test', text: 'A:变化文件当前' });
+      answer(previewRequest, { items: [raceEvidence] });
+      assert('并发查看先返回准确显示A证据', !preview.hidden && document.getElementById('preview-body').textContent === raceEvidence.text);
+      recv({ type: 'workflow', turnId: 'race-turn', files: [], test: Object.assign({}, raceTest, { stale: true }), turns: [] });
+      answer(attachRequest, { items: [Object.assign({}, raceEvidence, { text: 'B:代码已变化需要重验' })] });
+      assert('并发附加新鲜度变化B回执关闭同执行旧A预览', preview.hidden && document.getElementById('hint').textContent.includes('附加快照'));
+      document.querySelector('#attachments .chip-label').click();
+      assert('同执行重看实际待发证据B', document.getElementById('preview-body').textContent === 'B:代码已变化需要重验');
+      assert('并发查看附加仍未自动发送', count('send') === sends);
+      document.getElementById('preview-close').click(); input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      var raceSend = last('send'); assert('同执行并发更新后用户Enter确实发送B', raceSend.attachments[0].text === 'B:代码已变化需要重验');
+      recv({ type: 'sendResult', requestId: raceSend.requestId, success: true, cwd: '/preview-race', phase: 'accepted' });
+      recv({ type: 'sendCompleted', requestId: raceSend.requestId, success: true, cwd: '/preview-race' });
+
+      recv({ type: 'workflow', files: [], turns: [] });
+    }
+
+    if (EXPECT.composerScene) {
+      var ci = document.getElementById('input'), menu = document.getElementById('composer-menu');
+      var receive = function (data) { window.dispatchEvent(new MessageEvent('message', { data: data })); };
+      var type = async function (value) { ci.focus(); ci.value = value; ci.setSelectionRange(value.length, value.length); ci.dispatchEvent(new Event('input')); await new Promise(function (r) { setTimeout(r, 140); }); return window.__received.filter(function (m) { return m.type === 'composerQuery'; }).pop(); };
+      var key = function (value, extra) { ci.dispatchEvent(new KeyboardEvent('keydown', Object.assign({ key: value, bubbles: true, cancelable: true }, extra))); };
+      var sentCount = function () { return window.__received.filter(function (m) { return m.type === 'send'; }).length; };
+      await type('mail@example.com'); assert('邮箱不打开候选', menu.hidden);
+      await type('https://example.com'); assert('URL 不打开技能候选', menu.hidden);
+      var cq = await type('解释 @src/'); assert('路径查询来自光标前的 @', cq.trigger === '@' && cq.query === 'src/');
+      receive({ type: 'composerSuggestions', requestId: cq.requestId - 1, items: [{ id: 'stale', label: '旧候选' }] });
+      assert('迟到搜索不覆盖新候选', !document.querySelector('.composer-option'));
+      var before = sentCount(); key('Enter'); assert('加载时 Enter 不发送', sentCount() === before);
+      receive({ type: 'composerSuggestions', requestId: cq.requestId, items: [{ id: 'one', label: 'src/one.js' }, { id: 'two', label: '<img src=x onerror=alert(1)>.js' }] });
+      assert('文件名作为纯文本显示', !document.querySelector('#composer-options img'));
+      key('ArrowDown'); assert('方向键更新活动候选', ci.getAttribute('aria-activedescendant') === 'composer-option-1');
+      key('Enter'); var select = window.__received.filter(function (m) { return m.type === 'composerSelect'; }).pop();
+      assert('Enter 选中候选而不发送', select.id === 'two' && sentCount() === before);
+      document.getElementById('send').click(); assert('附加尚未完成不能误发', sentCount() === before);
+      receive({ type: 'composerSelected', requestId: select.requestId, item: { kind: 'content', id: 'file-one', name: 'src/one.js', text: 'unsaved snapshot' } });
+      assert('成功后只移除快捷查询，保留原消息', ci.value === '解释 ' && document.querySelectorAll('#attachments .chip').length === 1);
+      cq = await type('/review'); receive({ type: 'composerSuggestions', requestId: cq.requestId, items: [{ id: 'skill', label: 'code-review' }] });
+      key('Tab'); select = window.__received.filter(function (m) { return m.type === 'composerSelect'; }).pop();
+      receive({ type: 'composerSelected', requestId: select.requestId, item: { kind: 'skill', id: 'skill-one', name: 'code-review', text: 'skill instructions' } });
+      assert('Tab 附加技能正文且不自动发送', document.querySelectorAll('#attachments .chip').length === 2 && sentCount() === before);
+      document.getElementById('send').click(); var sent = window.__received.filter(function (m) { return m.type === 'send'; }).pop();
+      assert('显式发送携带文件和技能', sent.attachments.length === 2 && sent.attachments[1].kind === 'skill');
+      receive({ type: 'sendResult', requestId: sent.requestId, success: false });
+      assert('失败发送恢复技能附件', document.querySelectorAll('#attachments .chip').length === 2);
+      cq = await type('#selection'); receive({ type: 'composerSuggestions', requestId: cq.requestId, items: [{ id: 'selection', label: '当前选区' }] });
+      document.querySelector('.composer-option').click(); select = window.__received.filter(function (m) { return m.type === 'composerSelect'; }).pop();
+      receive({ type: 'composerSelected', requestId: select.requestId, error: '选区已变化' });
+      assert('读取失败保留输入', ci.value === '#selection');
+      cq = await type('@one'); receive({ type: 'composerSuggestions', requestId: cq.requestId, items: [{ id: 'one', label: 'one' }] }); key('Enter');
+      select = window.__received.filter(function (m) { return m.type === 'composerSelect'; }).pop(); ci.value = '新的输入'; ci.dispatchEvent(new Event('input'));
+      receive({ type: 'composerSelected', requestId: select.requestId, item: { kind: 'content', id: 'file-one', name: 'src/one.js', text: 'updated' } });
+      assert('异步附加不覆盖新输入且同一文件去重', ci.value === '新的输入' && document.querySelectorAll('#attachments .chip').length === 2);
+      await type('@'); key('Escape'); assert('Esc 关闭候选并保留文字', menu.hidden && ci.value === '@');
+      key(' ', { ctrlKey: true }); assert('Ctrl+Space 重新打开候选', !menu.hidden);
+      key('Escape'); await type('继续解释'); document.querySelector('[data-composer="/"]').click();
+      await new Promise(function (r) { setTimeout(r, 140); });
+      cq = window.__received.filter(function (m) { return m.type === 'composerQuery'; }).pop();
+      assert('点击技能按钮保留原消息并补上分隔空格', ci.value === '继续解释 /' && cq.trigger === '/');
+      receive({ type: 'composerSuggestions', requestId: cq.requestId, items: [{ id: 'local', label: 'local-skill' }] }); key('Enter');
+      select = window.__received.filter(function (m) { return m.type === 'composerSelect'; }).pop();
+      ci.value += ' 后续文字'; ci.setSelectionRange(ci.value.length, ci.value.length); ci.dispatchEvent(new Event('input'));
+      receive({ type: 'composerSelected', requestId: select.requestId, item: { kind: 'skill', id: 'skill-one', name: 'local-skill', text: 'local skill' } });
+      assert('异步附加保留新增文字且只移除原查询', ci.value === '继续解释  后续文字');
+      assert('统一上下文与编辑器一步入口可点击', document.querySelectorAll('.composer-shortcuts button').length === 4 && visible(document.getElementById('context-open')) && visible(document.querySelector('[data-context-add="selection"]')));
+      ci.dispatchEvent(new CompositionEvent('compositionstart')); await type('@中'); key('Enter', { isComposing: true });
+      assert('中文输入期间不打开候选或发送', menu.hidden && sentCount() === before + 1);
+      ci.dispatchEvent(new CompositionEvent('compositionend')); await new Promise(function (r) { setTimeout(r, 140); });
+      assert('中文输入完成后恢复搜索', !menu.hidden);
+      key('Escape'); document.querySelectorAll('#attachments .chip-close').forEach(function (button) { button.click(); }); ci.value = ''; ci.dispatchEvent(new Event('input'));
+      cq = await type('/help'); receive({ type: 'composerSuggestions', requestId: cq.requestId, items: [{ id: 'command:help', kind: 'command', label: '/help · 使用帮助' }] });
+      before = sentCount(); key('Enter'); var command = window.__received.filter(function (m) { return m.type === 'composerCommand'; }).pop();
+      assert('命令走单独入口且不发送模型消息', command.id === 'command:help' && sentCount() === before);
+      receive({ type: 'composerSelected', requestId: command.requestId, command: true });
+      assert('命令完成后移除查询且不创建附件', ci.value === '' && document.querySelectorAll('#attachments .chip').length === 0);
+      cq = await type('/model'); receive({ type: 'composerSuggestions', requestId: cq.requestId, items: [{ id: 'command:model', kind: 'command', label: '/model', disabled: true }] });
+      key('Enter'); assert('不可用命令不能执行', window.__received.filter(function (m) { return m.type === 'composerCommand'; }).pop() === command);
+      key('Escape');
+      receive({ type: 'workflow', turnId: 'turn1', finished: true, files: [{ id: 'f1', name: '<img>.js', kind: 'modified', added: 1, removed: 1, canUndo: true }], note: '保留本轮开始前的修改' });
+      receive({ type: 'workflowFocus' });
+      assert('本轮改动可展开且文件名按文本显示', document.getElementById('workflow').open && !document.querySelector('#workflow-files img'));
+      document.querySelector('#workflow-files button').click();
+      assert('差异按钮带上候选标识', window.__received.filter(function (m) { return m.type === 'workflowAction'; }).pop().id === 'f1');
+      receive({ type: 'workflow', turnId: 'turn1', files: [], test: { label: 'test-task', status: 'running' } });
+      assert('运行时禁用重复测试并显示停止', document.getElementById('workflow-run-test').disabled && !document.getElementById('workflow-stop-test').hidden && document.getElementById('workflow-attach-test').hidden);
+      receive({ type: 'workflow', turnId: 'turn1', files: [], test: { label: 'test-task', status: 'failed', exitCode: 1, duration: 1200 } });
+      assert('测试失败展示真实退出码及耗时', document.getElementById('workflow-test').textContent.includes('失败') && document.getElementById('workflow-test').textContent.includes('退出码 1') && document.getElementById('workflow-test').textContent.includes('1.2 秒'));
+      document.getElementById('workflow-attach-test').click();
+      assert('测试摘要只附加不自动发送', window.__received.filter(function (m) { return m.type === 'workflowAction'; }).pop().action === 'attachTest' && sentCount() === before);
+      receive({ type: 'workflow', files: [] }); ci.value = ''; ci.dispatchEvent(new Event('input'));
+
+      // 独立上下文入口不改变消息，也不执行命令或自动发送。
+      receive({ type: 'meta', cwd: '/context-project', trusted: true, sessionId: 'context-session' });
+      await type('保留这段消息'); before = sentCount();
+      var contextPanel = document.getElementById('context-panel'), contextSearch = document.getElementById('context-search');
+      var latestContext = function (kind) { return window.__received.filter(function (m) { return m.type === kind; }).pop(); };
+      var contextWait = function () { return new Promise(function (r) { setTimeout(r, 150); }); };
+      document.getElementById('context-open').click(); await contextWait(); cq = latestContext('composerQuery');
+      assert('上下文入口独立搜索且保留消息', !contextPanel.hidden && cq.origin === 'context' && cq.source === 'search' && ci.value === '保留这段消息' && sentCount() === before);
+      receive({ type: 'composerSuggestions', origin: 'context', source: 'search', requestId: cq.requestId, items: [{ id: 'context-file', kind: 'file', label: '<img>.js', description: '全文件' }] });
+      assert('独立候选仍按文本显示', document.querySelectorAll('#context-options button').length === 1 && !document.querySelector('#context-options img'));
+      contextSearch.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); select = latestContext('composerSelect');
+      var snapshotBody = '中文正文\\r\\n尾部空白  \\n<img src=x>\\n';
+      var snapshotItem = { id: 'context-file', kind: 'content', scope: 'file', name: 'very-long-file-name.js', sourcePath: '/context-project/src/a-long-folder/very-long-file-name.js', text: snapshotBody, isDirty: true, snapshotAt: '2026-10-12T03:00:00.000Z', byteLength: new TextEncoder().encode(snapshotBody).length };
+      receive({ type: 'composerSelected', origin: 'context', source: 'search', cwd: '/context-project', requestId: select.requestId, item: snapshotItem });
+      assert('独立选择仅附加且不移除消息正文', ci.value === '保留这段消息' && document.querySelectorAll('#attachments .chip').length === 1 && sentCount() === before);
+      var previewTrigger = document.querySelector('#attachments .chip-label'); previewTrigger.click();
+      var preview = document.getElementById('attachment-preview'), previewBody = document.getElementById('preview-body');
+      assert('预览只读且正文逐字一致', !preview.hidden && previewBody.tagName === 'PRE' && !previewBody.isContentEditable && previewBody.textContent === snapshotBody && !preview.querySelector('img'));
+      assert('预览包含实际来源范围保存状态时间和字节', document.getElementById('preview-meta').textContent.includes(snapshotItem.sourcePath) && document.getElementById('preview-meta').textContent.includes('全文件') && document.getElementById('preview-meta').textContent.includes('未保存') && document.getElementById('preview-meta').textContent.includes('字节'));
+      document.getElementById('preview-close').dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }));
+      assert('预览键盘焦点可到达正文并循环', document.activeElement === previewBody);
+      receive({ type: 'busy', busy: true }); var stops = window.__received.filter(function (m) { return m.type === 'stop'; }).length;
+      previewBody.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      assert('预览 Esc 消费按键恢复附件焦点且不停止任务', preview.hidden && document.activeElement === previewTrigger && window.__received.filter(function (m) { return m.type === 'stop'; }).length === stops);
+      document.getElementById('context-open').click();
+      contextSearch.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      assert('上下文 Esc 优先关闭且恢复按钮焦点', contextPanel.hidden && document.activeElement === document.getElementById('context-open') && window.__received.filter(function (m) { return m.type === 'stop'; }).length === stops);
+      receive({ type: 'busy', busy: false });
+      document.querySelector('.composer-shortcuts [data-context-add="file"]').click(); select = latestContext('contextAdd');
+      assert('当前文件一步加入使用明确全文件来源', select.source === 'file' && select.origin === 'context' && ci.value === '保留这段消息');
+      var cancelCount = window.__received.filter(function (m) { return m.type === 'composerCancel'; }).length;
+      ci.value += '，补充问题'; ci.dispatchEvent(new Event('input'));
+      assert('读取快照期间继续编辑不取消读取或误发送', window.__received.filter(function (m) { return m.type === 'composerCancel'; }).length === cancelCount && sentCount() === before);
+      receive({ type: 'composerSelected', origin: 'context', requestId: select.requestId, cwd: '/context-project', item: Object.assign({}, snapshotItem, { text: '更新后的快照' }) });
+      assert('再次加入更新快照且给出明确反馈', document.querySelectorAll('#attachments .chip').length === 1 && document.getElementById('hint').textContent.includes('更新快照'));
+      document.querySelector('.composer-shortcuts [data-context-add="selection"]').click(); select = latestContext('contextAdd');
+      receive({ type: 'composerSelected', origin: 'context', requestId: select.requestId, cwd: '/context-project', item: { id: 'selection-snapshot', kind: 'selection', scope: 'selection', name: 'a.js', text: '仅选区', sourcePath: '/context-project/a.js', startLine: 2, endLine: 3, startCharacter: 1, endCharacter: 0, snapshotAt: snapshotItem.snapshotAt, isDirty: false } });
+      assert('全文件与选区分别加入且不覆盖消息', select.source === 'selection' && document.querySelectorAll('#attachments .chip').length === 2 && ci.value === '保留这段消息，补充问题');
+      document.getElementById('context-open').click(); document.querySelector('[data-context-source="skill"]').click(); await contextWait(); cq = latestContext('composerQuery');
+      receive({ type: 'composerSuggestions', origin: 'context', source: 'skill', requestId: cq.requestId, items: [{ id: 'command:help', kind: 'command', label: '不应执行' }, { id: 'only-skill', kind: 'skill', label: '技能' }] });
+      assert('独立技能入口只展示技能不混入命令', cq.source === 'skill' && document.querySelectorAll('#context-options button').length === 1 && document.getElementById('context-options').textContent === '技能');
+      document.querySelector('#context-options button').click(); select = latestContext('composerSelect');
+      receive({ type: 'meta', cwd: '/context-project', trusted: true, sessionId: 'another-session' });
+      receive({ type: 'composerSelected', origin: 'context', requestId: select.requestId, cwd: '/context-project', item: { id: 'late-skill', kind: 'skill', name: '迟到技能', text: 'late' } });
+      assert('同目录会话变化丢弃迟到添加', !document.getElementById('attachments').textContent.includes('迟到技能'));
+      document.getElementById('send').click(); sent = latestContext('send');
+      assert('最终发送附件仍为已确认快照和元数据', sent.attachments[0].text === '更新后的快照' && sent.attachments[0].sourcePath === snapshotItem.sourcePath && sent.attachments[1].text === '仅选区' && sent.attachments[1].endLine === 3);
+      receive({ type: 'sendResult', requestId: sent.requestId, success: false });
+      receive({ type: 'meta', cwd: '/context-project', trusted: true });
+      document.querySelector('.composer-shortcuts [data-context-add="file"]').click(); select = latestContext('contextAdd');
+      receive({ type: 'meta', cwd: '/context-project', trusted: true, sessionId: 'initial-connected-session' });
+      receive({ type: 'composerSelected', origin: 'context', requestId: select.requestId, item: { id: 'initial-late', kind: 'content', name: 'initial-late.txt', text: 'late' } });
+      assert('首次连接改变会话身份也解除旧读取等待', !document.getElementById('send').disabled && !document.getElementById('attachments').textContent.includes('initial-late'));
+      var extras = Array.from({ length: 18 }, function (_, n) { return { id: 'limit-' + n, kind: 'content', name: n + '.txt', text: '小附件' }; });
+      receive({ type: 'attach', items: extras });
+      assert('20项附件上限允许恰好20项', document.querySelectorAll('#attachments .chip').length === 20);
+      receive({ type: 'attach', items: [{ id: 'limit-21', kind: 'content', name: '21.txt', text: '超限' }] });
+      assert('第21项拒绝并保留现有正文附件', document.querySelectorAll('#attachments .chip').length === 20 && ci.value === '保留这段消息，补充问题' && document.getElementById('hint').textContent.includes('20 项'));
+      document.querySelectorAll('#attachments .chip-close').forEach(function (button) { button.click(); });
+      var exactUtf8 = '中'.repeat(87381) + 'a';
+      receive({ type: 'attach', items: [{ id: 'utf8', kind: 'content', name: 'utf8.txt', text: exactUtf8 }] });
+      assert('UTF-8总量恰好256KiB允许加入', document.querySelectorAll('#attachments .chip').length === 1 && new TextEncoder().encode(exactUtf8).length === 256 * 1024);
+      receive({ type: 'attach', items: [{ id: 'utf8', kind: 'content', name: 'utf8.txt', text: exactUtf8 + '中' }] });
+      document.querySelector('#attachments .chip-label').click();
+      assert('UTF-8超限更新不破坏原快照', document.getElementById('preview-body').textContent === exactUtf8 && ci.value === '保留这段消息，补充问题');
+      document.getElementById('preview-close').click();
+      document.querySelectorAll('#attachments .chip-close').forEach(function (button) { button.click(); });
+      receive({ type: 'attach', items: [{ id: 'legacy', kind: 'file', name: 'legacy.txt', uri: 'file:///context-project/legacy.txt' }] });
+      document.querySelector('#attachments .chip-label').click();
+      assert('旧链接明确提示重新添加且不假预览磁盘正文', document.getElementById('preview-body').hidden && document.getElementById('preview-note').textContent.includes('重新添加'));
+      document.getElementById('preview-close').click();
+      receive({ type: 'meta', cwd: '/untrusted', trusted: false });
+      assert('信任撤销清附件并禁用新入口', document.getElementById('attachments').hidden && document.getElementById('context-open').disabled);
+      cq = await type('/help'); receive({ type: 'composerSuggestions', requestId: cq.requestId, items: [{ id: 'command:help', kind: 'command', label: '/help' }] }); key('Enter'); command = latestContext('composerCommand');
+      receive({ type: 'composerSelected', requestId: command.requestId, command: true });
+      assert('受限工作区仍正确处理允许的命令回执', ci.value === '' && !document.getElementById('hint').textContent.includes('正在执行'));
+    }
+    if (EXPECT.usabilityScene) {
+      var uiInput = document.getElementById('input'), uiSend = document.getElementById('send'), uiStop = document.getElementById('stop');
+      function receiveUi(message) { window.dispatchEvent(new MessageEvent('message', { data: message })); }
+      function countUi(type) { return window.__received.filter(function (message) { return message.type === type; }).length; }
+      function latestUi(type) { return window.__received.filter(function (message) { return message.type === type; }).pop(); }
+      function setUiText(text) { uiInput.value = text; uiInput.setSelectionRange(text.length, text.length); uiInput.dispatchEvent(new Event('input')); }
+      function uiEscape(target, options) { (target || document).dispatchEvent(new KeyboardEvent('keydown', Object.assign({ key: 'Escape', bubbles: true, cancelable: true }, options || {}))); }
+      receiveUi({ type: 'busy', busy: true });
+      setUiText('排队请求一'); uiSend.click();
+      var firstQueued = latestUi('send');
+      assert('排队接受前保留草稿并禁止重复提交', uiInput.value === '排队请求一' && uiSend.disabled);
+      setUiText('后续尚未提交的草稿');
+      receiveUi({ type: 'sendResult', requestId: firstQueued.requestId, success: true, phase: 'accepted', queued: true, id: 'queued-one' });
+      assert('迟到的接受确认不会清空更新后的草稿', uiInput.value === '后续尚未提交的草稿');
+      receiveUi({ type: 'sendCompleted', requestId: firstQueued.requestId, id: 'queued-one', success: false, retained: true });
+      assert('失败项保留队列时不重复恢复到输入框', uiInput.value === '后续尚未提交的草稿' && document.getElementById('recover-draft').hidden);
+      var queueItems = [{ id: 'queued-one', text: '<img src=x>排队请求一', attachmentCount: 1, cwd: '/fixture', sessionId: 'session-active' }, { id: 'queued-two', text: '排队请求二', attachmentCount: 0, cwd: '/fixture', sessionId: 'session-active' }];
+      receiveUi({ type: 'queueState', items: queueItems, paused: false });
+      var queueList = document.getElementById('queue-list');
+      assert('队列显示顺序和附件数量且正文作为文本', queueList.querySelectorAll('.queue-item').length === 2 && queueList.textContent.indexOf('1 个附件') >= 0 && !queueList.querySelector('img'));
+      queueList.querySelector('[data-action="remove"][data-id="queued-two"]').click();
+      assert('移除待发项带正确身份', latestUi('queueAction').action === 'remove' && latestUi('queueAction').id === 'queued-two');
+      queueList.querySelector('[data-action="edit"][data-id="queued-one"]').click();
+      assert('取回编辑只请求指定队列项', latestUi('queueAction').action === 'edit' && latestUi('queueAction').id === 'queued-one');
+      receiveUi({ type: 'queueState', items: [queueItems[1]], paused: false });
+      receiveUi({ type: 'queueEdit', id: 'queued-one', text: '取回的消息', attachments: [{ id: 'queued-file', kind: 'content', name: 'queued.js', text: 'queued snapshot' }] });
+      assert('队列取回不覆盖正在编辑的草稿', uiInput.value === '后续尚未提交的草稿' && !document.getElementById('recover-draft').hidden);
+      assert('当前和恢复草稿都占用时禁用继续取回', queueList.querySelector('[data-action="edit"][data-id="queued-two"]').disabled);
+      setUiText('');
+      document.getElementById('recover-draft').click();
+      assert('取回消息恢复正文和附件而不自动发送', uiInput.value === '取回的消息' && document.querySelectorAll('#attachments .chip').length === 1 && countUi('send') === 1);
+      receiveUi({ type: 'queueState', items: [queueItems[1]], paused: true, reason: '上一个任务未完成' });
+      receiveUi({ type: 'busy', busy: false });
+      assert('暂停队列显示原因和继续入口', document.getElementById('queue-summary').textContent.indexOf('未完成') >= 0 && visible(document.getElementById('queue-continue')));
+      document.getElementById('queue-continue').click();
+      assert('继续队列是独立动作不重发草稿', latestUi('queueAction').action === 'continue' && countUi('send') === 1);
+      receiveUi({ type: 'queueState', items: [], paused: false });
+      assert('后端清空队列后入口隐藏', !visible(document.getElementById('queue')));
+      document.querySelectorAll('#attachments .chip-close').forEach(function (button) { button.click(); }); setUiText('');
+
+      receiveUi({ type: 'replay', card: { id: 'read-only-history', title: '历史只读测试' }, entries: [{ kind: 'assistant', text: '历史内容' }] });
+      receiveUi({ type: 'historyState', readonly: true, id: 'read-only-history' });
+      var readOnlySends = countUi('send'); setUiText('不得发送到原会话'); uiSend.click();
+      uiInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      assert('历史回放持续显示只读上下文且不能发送', uiInput.readOnly && uiSend.disabled && visible(document.getElementById('history-context')) && countUi('send') === readOnlySends);
+      document.getElementById('history-resume').click();
+      assert('继续此历史会话发送正确身份', latestUi('historyResume').id === 'read-only-history');
+      receiveUi({ type: 'historyState', readonly: true, id: 'read-only-history', reason: '上下文未能恢复' });
+      assert('恢复失败仍保持只读并说明原因', uiInput.readOnly && document.getElementById('history-context-text').textContent.indexOf('未能恢复') >= 0);
+      document.getElementById('history-back').click();
+      assert('返回当前对话使用独立动作', !!latestUi('historyBack'));
+      receiveUi({ type: 'conversationSnapshot', events: [{ type: 'assistant', id: 'active-restored' }, { type: 'text', id: 'active-restored', delta: '活动对话正文' }, { type: 'done', id: 'active-restored', status: 'done' }] });
+      receiveUi({ type: 'historyState', readonly: false });
+      assert('实际恢复状态到达后才解除只读', !uiInput.readOnly && !uiSend.disabled && !visible(document.getElementById('history-context')));
+      receiveUi({ type: 'conversationSnapshot', events: [{ type: 'replay', readonly: false, card: { id: 'resumed-live', title: '已接回的会话' }, entries: [{ kind: 'assistant', text: '恢复后的上下文' }] }] });
+      assert('恢复到活动对话的回放说明可以直接继续', document.getElementById('messages').textContent.indexOf('已恢复的对话') >= 0 && document.getElementById('messages').textContent.indexOf('可在下方继续对话') >= 0 && !uiInput.readOnly);
+
+      var presetItems = [{ id: 'standard', name: '标准模式', description: '日常工作' }, { id: 'ptc', name: '工具模式', description: '使用工具' }];
+      receiveUi({ type: 'presets', current: 'standard', pending: 'ptc', presets: presetItems });
+      var pendingPreset = document.getElementById('preset-note');
+      assert('当前模式保持真实值并持续显示待生效模式', document.getElementById('preset-select').value === 'standard' && visible(pendingPreset) && pendingPreset.textContent.indexOf('工具模式') >= 0);
+      document.getElementById('preset-new').click();
+      assert('待生效模式提供明确新建入口', !!latestUi('newSession'));
+      receiveUi({ type: 'presets', current: 'ptc', pending: undefined, presets: presetItems });
+      assert('实际生效后更新模式并清掉待生效提示', document.getElementById('preset-select').value === 'ptc' && !visible(pendingPreset));
+
+      receiveUi({ type: 'busy', busy: true }); setUiText('Esc 保留的草稿');
+      receiveUi({ type: 'attach', items: [{ id: 'esc-preserved-file', kind: 'content', name: 'escape-context.js', text: 'escaped context' }] }); uiInput.focus();
+      var stopCount = countUi('stop'); uiEscape(uiInput);
+      assert('输入区 Esc 可以停止但不会清空草稿或附件', countUi('stop') === stopCount + 1 && uiInput.value === 'Esc 保留的草稿' && document.querySelectorAll('#attachments .chip').length === 1);
+      stopCount = countUi('stop');
+      setUiText('@'); await new Promise(function (resolve) { setTimeout(resolve, 150); });
+      uiEscape(uiInput);
+      assert('忙时 Esc 优先关闭候选', document.getElementById('composer-menu').hidden && countUi('stop') === stopCount);
+      document.getElementById('history-btn').click(); uiEscape(document);
+      assert('忙时 Esc 优先关闭历史', !visible(document.getElementById('history')) && countUi('stop') === stopCount);
+      receiveUi({ type: 'permissionState', currentValue: 'workspace-write', label: '工作区内修改', options: [{ value: 'workspace-write', label: '工作区内修改', description: '工作区', active: true }] });
+      document.getElementById('access-btn').click(); uiEscape(document);
+      assert('忙时 Esc 优先关闭权限设置', !visible(document.getElementById('access-pop')) && countUi('stop') === stopCount);
+      document.getElementById('messages').focus();
+      uiInput.dispatchEvent(new CompositionEvent('compositionstart')); uiEscape(document, { isComposing: true });
+      assert('输入法组合期间 Esc 不请求停止', countUi('stop') === stopCount);
+      uiInput.dispatchEvent(new CompositionEvent('compositionend'));
+      setUiText('保留的停止草稿'); document.getElementById('messages').focus(); uiEscape(document);
+      assert('非编辑焦点 Esc 请求停止并保留草稿', countUi('stop') === stopCount + 1 && uiInput.value === '保留的停止草稿');
+      receiveUi({ type: 'busy', busy: false }); uiEscape(document);
+      assert('空闲 Esc 不产生额外停止请求', countUi('stop') === stopCount + 1);
+      document.querySelectorAll('#attachments .chip-close').forEach(function (button) { button.click(); });
+
+      receiveUi({ type: 'queueState', active: { id: 'preparing-turn', text: '准备文件基线', attachments: [] }, items: [], paused: false });
+      receiveUi({ type: 'busy', busy: false });
+      document.getElementById('history-btn').click();
+      receiveUi({ type: 'history', sessions: [{ id: 'preparing-history', title: '准备阶段历史', cwd: '/fixture', turns: 1 }] });
+      var preparingResume = document.querySelector('#history-list [data-history-resume]');
+      document.getElementById('history-close').click();
+      assert('准备阶段保持停止和排队入口并暂停切换', !uiStop.hidden && uiSend.getAttribute('aria-label').indexOf('排队') >= 0 && document.getElementById('model-select').disabled && !!preparingResume && preparingResume.disabled);
+      setUiText('保留的停止草稿');
+      receiveUi({ type: 'attach', items: [{ id: 'preparing-file', kind: 'content', name: 'preparing-context.js', text: 'preparing context' }] });
+      var preparingStops = countUi('stop'); uiEscape(uiInput);
+      assert('准备阶段 Esc 请求停止且保留草稿与附件', countUi('stop') === preparingStops + 1 && uiInput.value === '保留的停止草稿' && document.querySelectorAll('#attachments .chip').length === 1);
+      receiveUi({ type: 'queueState', items: [], paused: false });
+      assert('活动队列真正结束后才隐藏停止并恢复切换', uiStop.hidden && !document.getElementById('model-select').disabled && !preparingResume.disabled);
+      document.querySelectorAll('#attachments .chip-close').forEach(function (button) { button.click(); });
+
+      receiveUi({ type: 'assistant', id: 'result-old' }); receiveUi({ type: 'done', id: 'result-old', status: 'done' });
+      receiveUi({ type: 'assistant', id: 'result-new' }); receiveUi({ type: 'done', id: 'result-new', status: 'done' });
+      var priorTurn = { id: 'turn-old', messageId: 'result-old', status: 'done', started: Date.now() - 2000, finished: true, finishedAt: Date.now() - 1000, files: [{ id: 'old-file', name: 'old.js', kind: 'modified', canUndo: true, added: 1, removed: 1 }], test: { label: 'unit-test', status: 'passed', exitCode: 0, stale: true, freshness: 'stale', freshnessNote: '测试后文件发生修改', trackedFilesCount: 1 } };
+      var newestTurn = { id: 'turn-new', messageId: 'result-new', status: 'done', started: Date.now(), finished: true, files: [{ id: 'new-file', name: 'new.js', kind: 'added', canUndo: true }], test: { label: 'unit-test', status: 'failed', exitCode: 1, stale: false, freshness: 'fresh', trackedFilesCount: 1 } };
+      receiveUi({ type: 'workflow', turnId: newestTurn.id, files: newestTurn.files, test: newestTurn.test, turns: [priorTurn, newestTurn] });
+      var oldCard = document.querySelector('.turn-result[data-turn="turn-old"]'), newCard = document.querySelector('.turn-result[data-turn="turn-new"]');
+      assert('连续两轮结果卡挂在各自回答内', !!oldCard && !!newCard && oldCard.closest('.msg-assistant') !== newCard.closest('.msg-assistant'));
+      assert('旧轮陈旧测试不冒充当前通过', !!oldCard && oldCard.textContent.indexOf('old.js') >= 0 && /陈旧|需要重新|需重新|不再代表/.test(oldCard.textContent));
+      assert('新轮测试显示实际失败与退出码', !!newCard && newCard.textContent.indexOf('失败') >= 0 && /退出码[^0-9]*1/.test(newCard.textContent));
+      if (oldCard) {
+        oldCard.open = true;
+        var oldDiff = Array.from(oldCard.querySelectorAll('button')).find(function (button) { return button.textContent.indexOf('差异') >= 0; });
+        assert('旧轮提供就地差异按钮', !!oldDiff);
+        if (oldDiff) oldDiff.click();
+        assert('旧轮差异动作定位对应的文件记录', latestUi('workflowAction') && latestUi('workflowAction').action === 'preview' && latestUi('workflowAction').id === 'old-file');
+      }
+      receiveUi({ type: 'historyState', readonly: true, id: 'read-only-history' });
+      assert('历史只读时旧轮撤销不可点击', Array.from(document.querySelectorAll('.turn-result button')).filter(function (button) { return button.textContent.indexOf('撤销') >= 0; }).every(function (button) { return button.disabled; }));
+      receiveUi({ type: 'historyState', readonly: false });
+
+      assert('返回当前对话后最新结果卡动作恢复', Array.from(newCard.querySelectorAll('button')).filter(function (button) { return button.textContent.indexOf('差异') >= 0 || button.textContent.indexOf('运行测试') >= 0; }).every(function (button) { return !button.disabled; }));
+
+      receiveUi({ type: 'queueState', active: { id: 'finishing-turn', requestId: 'finishing-request' }, items: [], paused: false });
+      var workflowButtons = function () { return Array.from(document.querySelectorAll('.workflow button')).filter(function (button) { return /撤销|运行测试/.test(button.textContent); }); };
+      assert('内核空闲但队列仍活动时结果卡和总览禁止测试撤销', workflowButtons().length >= 4 && workflowButtons().every(function (button) { return button.disabled; }));
+      receiveUi({ type: 'queueState', items: [], paused: false });
+      assert('活动队列收尾结束后最新轮测试和撤销恢复', Array.from(newCard.querySelectorAll('button')).filter(function (button) { return /撤销|运行测试/.test(button.textContent); }).every(function (button) { return !button.disabled; }));
+
+      receiveUi({ type: 'error', message: 'ECONNRESET', human: { title: '连接中断', advice: '可以重新连接', actions: [{ id: 'reconnect', label: '重新连接' }, { id: 'log', label: '查看日志' }] } });
+      var actionError = Array.from(document.querySelectorAll('.msg-error')).pop();
+      var errorButtons = actionError.querySelectorAll('button'), beforeRepair = countUi('send');
+      assert('错误卡有就地恢复动作', errorButtons.length === 2 && errorButtons[0].textContent === '重新连接');
+      if (errorButtons[0]) errorButtons[0].click();
+      assert('恢复动作只提交允许的动作标识', latestUi('errorAction') && latestUi('errorAction').action === 'reconnect' && countUi('send') === beforeRepair);
+      assert('恢复动作保留草稿', uiInput.value === '保留的停止草稿');
+      var usabilityRecovery = latestUi('errorAction');
+      receiveUi({ type: 'recoveryResult', requestId: usabilityRecovery.requestId, phase: 'completed', success: true, text: '连接已恢复，队列保持暂停' });
+      receiveUi({ type: 'queueState', items: [{ id: 'edit-first', text: '第一份取回内容', attachmentCount: 0 }, { id: 'edit-second', text: '第二份取回内容', attachmentCount: 0 }], paused: true });
+      queueList.querySelector('[data-action="edit"][data-id="edit-first"]').click();
+      queueList.querySelector('[data-action="edit"][data-id="edit-second"]').click();
+      assert('取回响应到达前不允许再取回另一项', !window.__received.some(function (message) { return message.type === 'queueAction' && message.action === 'edit' && message.id === 'edit-second'; }));
+      receiveUi({ type: 'queueState', items: [{ id: 'edit-second', text: '第二份取回内容', attachmentCount: 0 }], paused: true });
+      receiveUi({ type: 'queueEdit', id: 'edit-first', text: '第一份取回内容', attachments: [] });
+      assert('取回响应保留当前草稿并提供切换', uiInput.value === '保留的停止草稿' && !document.getElementById('recover-draft').hidden);
+      receiveUi({ type: 'queueState', items: [], paused: false });
+      setUiText(''); document.getElementById('recover-draft').click();
+      uiSend.click(); var editedSend = latestUi('send');
+      receiveUi({ type: 'sendResult', requestId: editedSend.requestId, success: true });
+      receiveUi({ type: 'queueState', items: [{ id: 'edit-error', text: '取回失败仍留在队列', attachmentCount: 0 }], paused: true });
+      setUiText('取回失败时的草稿');
+      queueList.querySelector('[data-action="edit"][data-id="edit-error"]').click();
+      receiveUi({ type: 'queueEdit', id: 'edit-error', error: '队列项暂时不可取回' });
+      assert('取回失败解除等待并保留当前草稿', !queueList.querySelector('[data-action="edit"][data-id="edit-error"]').disabled && uiInput.value === '取回失败时的草稿' && document.getElementById('recover-draft').hidden);
+      var retryEditCount = countUi('queueAction');
+      queueList.querySelector('[data-action="edit"][data-id="edit-error"]').click();
+      assert('取回失败后可以再次请求', countUi('queueAction') === retryEditCount + 1 && latestUi('queueAction').id === 'edit-error');
+      receiveUi({ type: 'queueEdit', id: 'edit-error', error: '队列项已不存在' });
+      receiveUi({ type: 'queueState', items: [], paused: false });
+      setUiText('正在发送的正文');
+      receiveUi({ type: 'queueEdit', id: 'draft-conflict', text: '之前取回的恢复正文', attachments: [] });
+      uiSend.click(); var conflictingSend = latestUi('send');
+      assert('发送等待确认仍保存已有恢复正文', JSON.stringify(window.__draftState).indexOf('之前取回的恢复正文') >= 0);
+      document.getElementById('recover-draft').click();
+      assert('发送等待确认不能切换待确认草稿', uiInput.value === '正在发送的正文');
+      setUiText('等待确认期间写的新正文');
+      receiveUi({ type: 'sendResult', requestId: conflictingSend.requestId, success: false });
+      assert('发送被拒绝完整保留三份正文', JSON.stringify(window.__draftState).indexOf('之前取回的恢复正文') >= 0 && JSON.stringify(window.__draftState).indexOf('正在发送的正文') >= 0 && uiInput.value === '等待确认期间写的新正文');
+      var recoveredTexts = [], beforeRecoverySends = countUi('send');
+      for (var recoveryIndex = 0; recoveryIndex < 3; recoveryIndex += 1) { document.getElementById('recover-draft').click(); recoveredTexts.push(uiInput.value); }
+      assert('三份保留正文均可通过切换找回', ['正在发送的正文', '之前取回的恢复正文', '等待确认期间写的新正文'].every(function (text) { return recoveredTexts.indexOf(text) >= 0; }));
+      assert('循环切换保留草稿不会自动发送', countUi('send') === beforeRecoverySends);
+      setUiText('');
+      for (var cleanupIndex = 0; cleanupIndex < 4 && !document.getElementById('recover-draft').hidden; cleanupIndex += 1) {
+        document.getElementById('recover-draft').click(); uiSend.click(); var conflictCleanup = latestUi('send');
+        receiveUi({ type: 'sendResult', requestId: conflictCleanup.requestId, success: true });
+      }
+      receiveUi({ type: 'workflow', files: [], turns: [] });
+      receiveUi({ type: 'presets', presets: [] }); receiveUi({ type: 'permissionState' });
+      receiveUi({ type: 'reset' }); setUiText('');
+    }
+    if (EXPECT.controlsScene) {
+      var controlsRecv = function (message) { window.dispatchEvent(new MessageEvent('message', { data: message })); };
+      var controlsCount = function (type) { return window.__received.filter(function (message) { return message.type === type; }).length; };
+      var controlsLast = function (type) { return window.__received.filter(function (message) { return message.type === type; }).pop(); };
+      controlsRecv({ type: 'meta', cwd: '/fixture/long-project-name', sessionId: 'controls-session', trusted: true });
+      var onset = document.getElementById('onboarding-stage'), onnext = document.getElementById('onboarding-next');
+      assert('首屏显示完整项目来源', document.getElementById('onboarding-project').textContent.indexOf('/fixture/long-project-name') >= 0);
+      assert('首屏阶段可以被辅助技术播报', onset.getAttribute('role') === 'status' && onset.getAttribute('aria-live') === 'polite');
+      controlsRecv({ type: 'status', state: 'connecting', detail: '正在同步准备 DSH…' });
+      assert('同步阶段说明等待且不虚构安全取消', onset.textContent.indexOf('同步') >= 0 && onnext.textContent.indexOf('不支持安全取消') >= 0);
+      controlsRecv({ type: 'status', state: 'ready', detail: '会话已建立' });
+      assert('会话就绪明确模型与凭据尚待真实任务验证', onnext.textContent.indexOf('凭据') >= 0 && onnext.textContent.indexOf('任务') >= 0);
+      controlsRecv({ type: 'notice', text: '已完成同步准备' });
+      controlsRecv({ type: 'status', state: 'connecting', detail: '正在建立新会话：等待内核返回当前项目的实际会话身份' });
+      assert('首次系统notice不隐藏项目与连接阶段', visible(document.getElementById('empty')) && onset.textContent.indexOf('建立') >= 0);
+      var controlsStatus = document.getElementById('status-text');
+      assert('顶栏完整连接阶段换行且可播报', controlsStatus.textContent.indexOf('实际会话身份') >= 0 && controlsStatus.getAttribute('aria-live') === 'polite' && getComputedStyle(controlsStatus).whiteSpace !== 'nowrap');
+      controlsRecv({ type: 'error', message: '401 Unauthorized', human: { title: '认证来源待核对', advice: '先查日志', actions: [{ id: 'log', label: '查看日志' }] } });
+      assert('首次错误后项目与必要阶段仍可见', visible(document.getElementById('empty')));
+      controlsRecv({ type: 'status', state: 'ready', detail: '会话已建立' });
+      var controlsConfig = [
+        { id: 'model', currentValue: 'model-a', options: [{ value: 'model-a', name: 'A' }, { value: 'model-b', name: 'B' }] },
+        { id: 'reasoning_effort', currentValue: 'low', options: [{ value: 'low', name: '低' }, { value: 'high', name: '高' }] }
+      ];
+      controlsRecv({ type: 'config', configOptions: controlsConfig });
+      var controlsModel = document.getElementById('model-select'), controlsReason = document.getElementById('reasoning-select');
+      controlsModel.value = 'model-b'; controlsModel.dispatchEvent(new Event('change'));
+      var settingRequest = controlsLast('setModel'), settingCount = controlsCount('setModel');
+      assert('设置请求携带当前来源和请求身份', settingRequest && settingRequest.requestId && settingRequest.cwd === '/fixture/long-project-name' && settingRequest.sessionId === 'controls-session');
+      assert('等待模型回读显示最后确认值和等待提示', controlsModel.value === 'model-a' && controlsModel.disabled && document.getElementById('hint').textContent.indexOf('确认') >= 0);
+      controlsModel.value = 'model-b'; controlsModel.dispatchEvent(new Event('change'));
+      assert('快速重复设置等待时不重复请求', controlsCount('setModel') === settingCount && controlsModel.value === 'model-a');
+      controlsRecv({ type: 'settingResult', requestId: 'old-setting', phase: 'completed', success: true, text: '旧成功' });
+      assert('旧设置回执不能解除当前等待', controlsModel.disabled);
+      controlsRecv({ type: 'settingResult', requestId: settingRequest.requestId, phase: 'completed', success: false, error: '实际回读失败' });
+      assert('设置失败解锁并保留确认值', !controlsModel.disabled && controlsModel.value === 'model-a' && document.getElementById('hint').textContent.indexOf('回读失败') >= 0);
+      controlsReason.value = 'high'; controlsReason.dispatchEvent(new Event('change'));
+      var reasonRequest = controlsLast('setOption');
+      assert('思考请求等待时仍显示确认值', controlsReason.value === 'low' && controlsReason.disabled && reasonRequest.value === 'high');
+      controlsConfig[1].currentValue = 'high'; controlsRecv({ type: 'config', configOptions: controlsConfig });
+      assert('真实config更新等待期间的有效值', controlsReason.value === 'high' && controlsReason.disabled);
+      controlsRecv({ type: 'settingResult', requestId: reasonRequest.requestId, phase: 'completed', success: true, text: '已确认：高' });
+      assert('确认完成后思考恢复可选且显示成功', !controlsReason.disabled && controlsReason.value === 'high' && document.getElementById('hint').textContent.indexOf('已确认') >= 0);
+      controlsRecv({ type: 'settingResult', requestId: 'model-command-external', setting: 'model', cwd: '/fixture/long-project-name', sessionId: 'controls-session', phase: 'pending', text: '正在确认原生命令的模型设置' });
+      assert('外部模型pending直接入站也锁控件和发送并显示等待', controlsModel.disabled && controlsReason.disabled && document.getElementById('send').disabled && document.getElementById('hint').textContent.indexOf('原生命令') >= 0);
+      var externalInput = document.getElementById('input'); externalInput.value = '外部设置等待时的草稿'; externalInput.dispatchEvent(new Event('input'));
+      var externalSends = controlsCount('send'); externalInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      assert('外部模型等待时Enter保留草稿且不发送', controlsCount('send') === externalSends && externalInput.value === '外部设置等待时的草稿');
+      controlsConfig[0].currentValue = 'model-b'; controlsRecv({ type: 'config', configOptions: controlsConfig });
+      controlsRecv({ type: 'settingResult', requestId: 'model-command-external', setting: 'model', cwd: '/fixture/long-project-name', sessionId: 'controls-session', phase: 'completed', success: true, currentValue: 'model-b', text: '原生命令模型已确认：B' });
+      assert('外部模型完成解锁并保留实际回读值', !controlsModel.disabled && !document.getElementById('send').disabled && controlsModel.value === 'model-b' && document.getElementById('hint').textContent.indexOf('已确认') >= 0);
+      controlsRecv({ type: 'settingResult', requestId: 'reloaded-setting', setting: 'reasoning_effort', cwd: '/fixture/long-project-name', sessionId: 'controls-session', phase: 'pending', text: '重载界面收到仍在等待的设置' });
+      assert('没有本地请求的重载pending也保持设置锁', controlsModel.disabled && controlsReason.disabled && document.getElementById('send').disabled);
+      controlsRecv({ type: 'settingResult', requestId: 'reloaded-setting', phase: 'completed', success: false, text: '重载设置未确认' });
+      assert('重载设置失败解锁并保留最后确认值', !controlsModel.disabled && !controlsReason.disabled && controlsReason.value === 'high' && document.getElementById('hint').textContent.indexOf('未确认') >= 0);
+      var confirmedHint = document.getElementById('hint').textContent;
+      controlsRecv({ type: 'settingResult', requestId: 'old-cwd-pending', setting: 'model', cwd: '/fixture/other-project', sessionId: 'controls-session', phase: 'pending', text: '旧目录设置等待' });
+      assert('不同目录的旧pending不锁当前界面或替换反馈', !controlsModel.disabled && !document.getElementById('send').disabled && document.getElementById('hint').textContent === confirmedHint);
+      controlsRecv({ type: 'settingResult', requestId: 'old-session-pending', setting: 'model', cwd: '/fixture/long-project-name', sessionId: 'old-session', phase: 'pending', text: '旧会话设置等待' });
+      assert('不同会话的旧pending不锁当前界面或替换反馈', !controlsModel.disabled && !document.getElementById('send').disabled && document.getElementById('hint').textContent === confirmedHint);
+      controlsRecv({ type: 'historyState', readonly: true, id: 'controls-history' }); controlsRecv({ type: 'config', configOptions: controlsConfig });
+      assert('历史只读收到config仍锁模型和思考', controlsModel.disabled && controlsReason.disabled);
+      var readonlySettingCount = controlsCount('setModel'); controlsModel.value = 'model-b'; controlsModel.dispatchEvent(new Event('change'));
+      assert('历史界面无法触发隐藏活动会话模型变更', controlsCount('setModel') === readonlySettingCount);
+      controlsRecv({ type: 'historyState', readonly: false });
+      controlsRecv({ type: 'queueState', active: { id: 'controls-preparation' }, items: [], paused: false }); controlsRecv({ type: 'config', configOptions: controlsConfig });
+      assert('准备收尾收到config仍锁模型思考', controlsModel.disabled && controlsReason.disabled);
+      controlsRecv({ type: 'queueState', items: [], paused: true, reason: '恢复后需显式继续' });
+      var controlsInput = document.getElementById('input'); controlsInput.value = '恢复必须保留的草稿'; controlsInput.dispatchEvent(new Event('input'));
+      controlsRecv({ type: 'error', message: 'ECONNRESET', human: { title: '连接中断', advice: '修复后恢复', recoveryScope: 'controls-error-scope', actions: [{ id: 'reconnect', label: '重新连接' }, { id: 'settings', label: '打开扩展设置' }, { id: 'log', label: '查看日志' }] } });
+      var controlsCard = Array.from(document.querySelectorAll('.msg-error')).pop(), controlsButtons = controlsCard.querySelectorAll('button');
+      var recoveryBefore = controlsCount('errorAction'); controlsButtons[0].click(); controlsButtons[0].click();
+      var recoveryRequest = controlsLast('errorAction');
+      assert('重复恢复仅提交一次且绑定错误来源', controlsCount('errorAction') === recoveryBefore + 1 && recoveryRequest.recoveryScope === 'controls-error-scope' && !!recoveryRequest.requestId);
+      assert('恢复等待只锁连接动作设置和日志仍可用', controlsButtons[0].disabled && !controlsButtons[1].disabled && !controlsButtons[2].disabled);
+      assert('恢复等待保留草稿且没有自动发送', controlsInput.value === '恢复必须保留的草稿' && controlsCount('send') === 0);
+      controlsRecv({ type: 'recoveryResult', requestId: 'old-recovery', phase: 'completed', success: true, text: '旧成功' });
+      assert('旧恢复回执不能解锁当前恢复', controlsButtons[0].disabled);
+      controlsRecv({ type: 'recoveryResult', requestId: recoveryRequest.requestId, phase: 'completed', success: false, text: '恢复失败，请核对设置' });
+      assert('恢复失败显示回执且重新允许恢复', !controlsButtons[0].disabled && document.getElementById('hint').textContent.indexOf('恢复失败') >= 0 && controlsInput.value === '恢复必须保留的草稿');
+      controlsButtons[0].click(); recoveryRequest = controlsLast('errorAction');
+      controlsRecv({ type: 'recoveryResult', requestId: recoveryRequest.requestId, phase: 'completed', success: true, text: '连接已恢复，队列保持暂停' });
+      assert('恢复成功明确完成且不重发任务', !controlsButtons[0].disabled && controlsCount('send') === 0 && document.getElementById('hint').textContent.indexOf('保持暂停') >= 0);
+      controlsRecv({ type: 'historyState', readonly: true, id: 'controls-history' });
+      controlsButtons[0].click(); recoveryRequest = controlsLast('errorAction');
+      controlsRecv({ type: 'recoveryResult', requestId: recoveryRequest.requestId, phase: 'completed', success: true, text: '连接已恢复，仍在阅读历史' });
+      assert('恢复回执不解除历史只读且日志设置仍可用', controlsInput.readOnly && !controlsButtons[1].disabled && !controlsButtons[2].disabled);
+      controlsRecv({ type: 'historyState', readonly: false });
+      controlsRecv({ type: 'presets', current: 'standard', pending: 'ptc', presets: [{ id: 'standard', name: '标准模式' }, { id: 'ptc', name: '工具模式' }] });
+      controlsRecv({ type: 'permissionState', currentValue: 'workspace-write', label: '工作区内修改', options: [{ value: 'workspace-write', label: '工作区内修改', active: true }] });
+      controlsRecv({ type: 'settingResult', requestId: 'permission-controls', setting: 'permission', cwd: '/fixture/long-project-name', sessionId: 'controls-session', phase: 'pending', text: '正在等待权限回读' });
+      assert('权限等待锁重连与新建而不锁发送', controlsButtons[0].disabled && document.getElementById('preset-new').disabled && document.getElementById('preset-select').disabled && !document.getElementById('send').disabled);
+      var blockedRecoveryCount = controlsCount('errorAction'), blockedNewCount = controlsCount('newSession');
+      controlsButtons[0].click(); document.getElementById('preset-new').click();
+      assert('权限等待点击切换按钮不会提交恢复或新建', controlsCount('errorAction') === blockedRecoveryCount && controlsCount('newSession') === blockedNewCount);
+      if (controlsCount('errorAction') !== blockedRecoveryCount) {
+        var unexpectedRecovery = controlsLast('errorAction');
+        controlsRecv({ type: 'recoveryResult', requestId: unexpectedRecovery.requestId, phase: 'completed', success: false, text: '未执行恢复' });
+      }
+      document.getElementById('history-btn').click();
+      controlsRecv({ type: 'history', sessions: [{ id: 'permission-history', title: '权限等待中的历史', cwd: '/fixture/long-project-name' }] });
+      var permissionHistoryResume = document.querySelector('[data-history-resume]');
+      assert('权限等待时新渲染的历史接回按钮也禁用', permissionHistoryResume && permissionHistoryResume.disabled);
+      document.getElementById('history-close').click();
+      controlsRecv({ type: 'historyState', readonly: true, id: 'permission-history' });
+      assert('权限等待中的持续历史继续按钮禁用', document.getElementById('history-resume').disabled);
+      controlsRecv({ type: 'historyState', readonly: false });
+      controlsRecv({ type: 'queueState', items: [{ id: 'permission-queued', text: '权限等待中的下一条', attachments: [] }], paused: true });
+      var permissionQueueContinue = document.getElementById('queue-continue'), continueBefore = controlsCount('queueAction');
+      assert('权限等待不锁已暂停队列的显式继续', !permissionQueueContinue.disabled);
+      permissionQueueContinue.click();
+      assert('权限等待仍可显式请求继续队列', controlsCount('queueAction') === continueBefore + 1 && controlsLast('queueAction').action === 'continue');
+      controlsRecv({ type: 'queueState', active: { id: 'permission-active' }, items: [], paused: false });
+      assert('权限等待时活动回合仍可排队和停止', !document.getElementById('send').disabled && visible(document.getElementById('stop')) && !document.getElementById('stop').disabled);
+      controlsInput.value = '权限确认中仍可排队'; controlsInput.dispatchEvent(new Event('input'));
+      var permissionSends = controlsCount('send'), permissionStops = controlsCount('stop');
+      controlsInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      var permissionSendRequest = controlsLast('send');
+      assert('权限等待Enter可以提交下一条排队正文', controlsCount('send') === permissionSends + 1 && permissionSendRequest.text === '权限确认中仍可排队');
+      controlsRecv({ type: 'sendResult', requestId: permissionSendRequest.requestId, success: true, phase: 'accepted', queued: true, id: 'permission-next' });
+      document.getElementById('stop').click();
+      assert('权限等待仍可请求停止当前回合', controlsCount('stop') === permissionStops + 1);
+      controlsRecv({ type: 'queueState', items: [], paused: true });
+      controlsRecv({ type: 'settingResult', requestId: 'permission-controls', phase: 'completed', success: false, text: '权限回读结束，设置未确认' });
+      assert('权限失败完成后会话控制与权限选择重新可用', !controlsButtons[0].disabled && !document.getElementById('preset-new').disabled && !document.getElementById('access-btn').disabled);
+      controlsRecv({ type: 'presets', current: 'standard', presets: [] });
+      var expiredTest = { id: 'expired-test', turnId: 'expired-turn', label: 'unit', status: 'failed', exitCode: 3, sourceCurrent: false, sourceNote: '测试来源已变化，请重新测试。' };
+      controlsRecv({ type: 'workflow', turnId: 'expired-turn', test: expiredTest, files: [], turns: [{ id: 'expired-turn', finished: true, test: expiredTest, files: [] }] });
+      var expiredCard = document.querySelector('.turn-result'); expiredCard.open = true;
+      assert('连接来源变化的旧结果说明需重跑并禁用证据操作', expiredCard.textContent.indexOf('来源已变化') >= 0 && Array.from(expiredCard.querySelectorAll('button')).filter(function (button) { return /查看此次|附加测试|准备修复|补充日志/.test(button.textContent); }).every(function (button) { return button.disabled; }));
+      assert('旧退出状态依然如实显示失败', expiredCard.textContent.indexOf('失败') >= 0 && expiredCard.textContent.indexOf('退出码 3') >= 0);
+      assert('关键反馈允许换行而不省略', getComputedStyle(document.getElementById('hint')).whiteSpace !== 'nowrap' && getComputedStyle(onnext).textOverflow !== 'ellipsis');
+      controlsRecv({ type: 'workflow', files: [], turns: [] }); controlsRecv({ type: 'reset' });
+    }
+    if (EXPECT.draftScene) {
+      var draftInput = document.getElementById('input'), draftSend = document.getElementById('send');
+      assert('窗口恢复文字和未保存附件快照', draftInput.value === '恢复的草稿' && document.querySelectorAll('#attachments .chip').length === 1);
+      var reasoning = document.getElementById('reasoning-select');
+      assert('思考选项来自内核', reasoning.options.length === 2 && reasoning.value === 'low');
+      reasoning.value = 'high'; reasoning.dispatchEvent(new Event('change'));
+      assert('思考选择原样发送', window.__received.some(function(m) { return m.type === 'setOption' && m.id === 'reasoning_effort' && m.value === 'high'; }));
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'busy', busy: true } }));
+      assert('模型运行时禁止切换思考强度', reasoning.disabled);
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'busy', busy: false } }));
+      var draftSetting = window.__received.filter(function (m) { return m.type === 'setOption'; }).pop();
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'settingResult', requestId: draftSetting.requestId, phase: 'completed', success: true, text: '思考已确认' } }));
+      draftSend.click(); var draftSent = window.__received.filter(function(m) { return m.type === 'send'; }).pop();
+      assert('待发送内容在窗口状态中保存', JSON.stringify(window.__draftState).indexOf('恢复的草稿') >= 0);
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'sendResult', requestId: draftSent.requestId + 1, success: false } }));
+      assert('过期发送结果不会改变待确认的输入', draftInput.value === '恢复的草稿');
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'sendResult', requestId: draftSent.requestId, success: false } }));
+      assert('发送失败恢复文字和附件', draftInput.value === '恢复的草稿' && document.querySelectorAll('#attachments .chip').length === 1);
+      draftSend.click(); draftSent = window.__received.filter(function(m) { return m.type === 'send'; }).pop();
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'sendResult', requestId: draftSent.requestId, success: true, phase: 'accepted', id: 'draft-turn' } }));
+      assert('接受消息后才清空原草稿', draftInput.value === '' && document.querySelectorAll('#attachments .chip').length === 0);
+      draftInput.value = '新的草稿'; draftInput.dispatchEvent(new Event('input'));
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'sendCompleted', requestId: draftSent.requestId, id: 'draft-turn', success: false } }));
+      assert('恢复不会覆盖新的输入', draftInput.value === '新的草稿' && !document.getElementById('recover-draft').hidden);
+      document.getElementById('recover-draft').click();
+      assert('可以手动切回失败的内容', draftInput.value === '恢复的草稿');
+      document.getElementById('recover-draft').click();
+      assert('新草稿仍然保留', draftInput.value === '新的草稿');
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'draftRestore', draft: { version: 1, cwd: '/fixture', savedAt: Date.now(), text: '迟到的旧草稿' } } }));
+      assert('迟到的恢复消息不覆盖正在编辑的草稿', draftInput.value === '新的草稿');
+      function draftReceive(message) { window.dispatchEvent(new MessageEvent('message', { data: message })); }
+      function draftText(text) { draftInput.value = text; draftInput.dispatchEvent(new Event('input')); }
+      var projectB = { version: 1, cwd: '/fixture-b', savedAt: Date.now(), text: 'B 已有正文', attachments: [{ kind: 'content', id: 'b-file', name: 'b.txt', text: 'B 附件快照' }], recoveries: [{ text: 'B 保留正文', attachments: [{ kind: 'content', id: 'b-held', name: 'held.txt', text: 'B 保留附件' }] }] };
+      draftReceive({ type: 'meta', cwd: '/fixture-b', trusted: true });
+      assert('首次切换工作目录清空旧项目正文附件和恢复按钮', draftInput.value === '' && document.querySelectorAll('#attachments .chip').length === 0 && document.getElementById('recover-draft').hidden);
+      var departingA = window.__received.filter(function(m) { return m.type === 'draft' && m.draft.cwd === '/fixture'; }).pop();
+      assert('离开目录保存原目录完整草稿而非覆盖目标', departingA && departingA.draft.text === '新的草稿' && departingA.draft.recoveries.some(function(d) { return d.text === '恢复的草稿' && d.attachments.length === 1; }));
+      draftReceive({ type: 'draftRestore', cwd: '/fixture', draft: { version: 1, cwd: '/fixture', savedAt: Date.now(), text: '迟到的 A' } });
+      assert('新目录尚未编辑时也拒绝迟到其他目录恢复', draftInput.value === '' && document.getElementById('recover-draft').hidden);
+      draftReceive({ type: 'draftRestore', cwd: '/fixture-b', draft: projectB });
+      assert('首次目标目录恢复既有正文附件和保留草稿', draftInput.value === 'B 已有正文' && document.querySelectorAll('#attachments .chip').length === 1 && !document.getElementById('recover-draft').hidden);
+      draftText('B 新编辑正文');
+      draftReceive({ type: 'meta', cwd: '/fixture', trusted: true });
+      assert('返回 A 恢复 A 正文和恢复集合', draftInput.value === '新的草稿' && !document.getElementById('recover-draft').hidden && document.querySelectorAll('#attachments .chip').length === 0);
+      document.getElementById('recover-draft').click();
+      assert('往返后 A 保留正文仍有原附件', draftInput.value === '恢复的草稿' && document.querySelectorAll('#attachments .chip').length === 1);
+      draftReceive({ type: 'meta', cwd: '/fixture-b', trusted: true });
+      assert('返回 B 保留 B 新编辑与附件', draftInput.value === 'B 新编辑正文' && document.querySelectorAll('#attachments .chip').length === 1);
+      draftReceive({ type: 'draftRestore', cwd: '/fixture-b', draft: projectB });
+      assert('返回 B 编辑标记仍阻止旧持久化正文覆盖', draftInput.value === 'B 新编辑正文');
+      document.getElementById('recover-draft').click();
+      assert('B 保留正文附件独立于 A', draftInput.value === 'B 保留正文' && document.querySelector('#attachments .chip').textContent.indexOf('held.txt') >= 0);
+      draftSend.click(); var delayedB = window.__received.filter(function(m) { return m.type === 'send'; }).pop();
+      draftReceive({ type: 'meta', cwd: '/fixture-c', trusted: true });
+      draftReceive({ type: 'draftRestore', cwd: '/fixture-c', draft: { version: 1, cwd: '/fixture-c', savedAt: Date.now(), text: 'C 正文', attachments: [] } });
+      draftReceive({ type: 'sendResult', requestId: delayedB.requestId, success: true, phase: 'accepted' });
+      draftReceive({ type: 'sendCompleted', requestId: delayedB.requestId, success: false, cwd: '/fixture-b' });
+      assert('跨目录迟到发送确认和失败不清空或混入 C 草稿', draftInput.value === 'C 正文' && document.getElementById('recover-draft').hidden);
+      draftReceive({ type: 'meta', cwd: '/fixture-b', trusted: true });
+      assert('迟到失败正文及附件只恢复原 B 目录', draftInput.value === 'B 保留正文' && document.querySelector('#attachments .chip').textContent.indexOf('held.txt') >= 0);
+      draftReceive({ type: 'meta', cwd: '/fixture-b', trusted: false });
+      assert('同目录信任撤销清理当前与保留草稿附件', draftInput.value === 'B 保留正文' && document.querySelectorAll('#attachments .chip').length === 0 && window.__draftState.attachments.length === 0 && window.__draftState.recoveries.every(function(d) { return d.attachments.length === 0; }));
+      draftReceive({ type: 'queueEdit', cwd: '/fixture-b', text: '迟到取回正文', attachments: [{ kind: 'content', name: 'private.txt', text: '旧附件' }] });
+      assert('信任撤销后迟到取回不恢复旧附件', window.__draftState.recoveries.some(function(d) { return d.text === '迟到取回正文' && d.attachments.length === 0; }));
+      draftReceive({ type: 'meta', cwd: '/fixture-limit', trusted: true });
+      draftText('小草稿');
+      var beforeLargeRecovery = JSON.stringify(window.__draftState), largeRecovery = '大'.repeat(128 * 1024 + 1);
+      draftReceive({ type: 'queueEdit', text: largeRecovery, attachments: [] });
+      assert('任一保留正文超限时不声称完整持久化', JSON.stringify(window.__draftState) === beforeLargeRecovery && document.getElementById('hint').textContent.indexOf('当前窗口') >= 0);
+      draftReceive({ type: 'meta', cwd: '/fixture-limit-other', trusted: true });
+      draftReceive({ type: 'meta', cwd: '/fixture-limit', trusted: true });
+      document.getElementById('recover-draft').click();
+      assert('超限内容在当前窗口跨目录往返仍完整保留', draftInput.value === largeRecovery);
+      draftReceive({ type: 'meta', cwd: '/fixture-prune', trusted: true });
+      for (var pruneAction of ['remove', 'edit']) {
+        draftText('仅队列保留 ' + pruneAction); draftSend.click();
+        var pruneSend = window.__received.filter(function(m) { return m.type === 'send'; }).pop();
+        draftReceive({ type: 'queueState', items: [{ id: 'prune-' + pruneAction, requestId: pruneSend.requestId, text: '仅队列保留 ' + pruneAction, cwd: '/fixture-prune' }] });
+        draftReceive({ type: 'sendResult', requestId: pruneSend.requestId, success: true, phase: 'accepted' });
+        draftReceive({ type: 'queueState', items: [] });
+        if (pruneAction === 'edit') draftReceive({ type: 'queueEdit', cwd: '/fixture-prune', text: '取回后编辑', attachments: [] });
+        draftText('当前正文 ' + pruneAction);
+        draftReceive({ type: 'sendCompleted', requestId: pruneSend.requestId, success: false });
+        assert('队列' + (pruneAction === 'edit' ? '取回' : '移除') + '后清理已接收草稿索引', draftInput.value === '当前正文 ' + pruneAction && document.getElementById('recover-draft').hidden);
+      }
+      draftReceive({ type: 'meta', cwd: '/fixture', trusted: true });
+    }
+    // ── 8. 交互：发送 / 换行 / 空输入 / 忙碌时排队 ──
     var input = document.getElementById('input');
     var send = document.getElementById('send');
     var stop = document.getElementById('stop');
@@ -922,12 +1664,16 @@ function assertionsScript(scene) {
       send.click();
       var sent = window.__received.filter(function (m) { return m.type === 'send'; });
       assert('点发送按钮会发出消息', sent.length === 1 && sent[0].text === '测试发送', JSON.stringify(sent));
-      assert('发送后输入框清空', input.value === '');
+      assert('接收确认前输入框保留内容', input.value === '测试发送');
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'sendResult', requestId: sent[0].requestId, success: true } }));
+      assert('接收确认后输入框清空', input.value === '');
 
       window.__received.length = 0;
       input.value = '回车发送';
       input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
       assert('Enter 会发送', window.__received.some(function (m) { return m.type === 'send'; }));
+      var enterSend = window.__received.find(function(m) { return m.type === 'send'; });
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'sendResult', requestId: enterSend && enterSend.requestId, success: true } }));
 
       window.__received.length = 0;
       input.value = '换行不发送';
@@ -939,12 +1685,15 @@ function assertionsScript(scene) {
       send.click();
       assert('空白输入不发送', !window.__received.some(function (m) { return m.type === 'send'; }));
     } else {
-      // 回合执行期间，发送按钮应当让位于停止按钮。
-      assert('忙碌时显示停止按钮、隐藏发送按钮', !stop.hidden && send.hidden);
+      // 回合执行期间仍可提交下一轮，当前停止动作保持独立。
+      assert('忙碌时显示停止和排队入口', !stop.hidden && !send.hidden && send.getAttribute('aria-label').indexOf('排队') >= 0);
       window.__received.length = 0;
-      input.value = '忙碌时不该发出去';
+      input.value = '忙碌时的下一条';
       send.click();
-      assert('忙碌时点发送不会发消息', !window.__received.some(function (m) { return m.type === 'send'; }));
+      var queuedSend = window.__received.filter(function (m) { return m.type === 'send'; }).pop();
+      assert('忙碌时提交下一条交由后端排队', !!queuedSend && queuedSend.text === '忙碌时的下一条');
+      assert('排队被接收前内容仍保留', input.value === '忙碌时的下一条');
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'sendResult', requestId: queuedSend && queuedSend.requestId, success: true, phase: 'accepted', queued: true, id: 'queue-fixture' } }));
       input.value = '忙碌时还能打字';
       assert('忙碌时输入框没被禁用', !input.disabled);
       window.__received.length = 0;
@@ -1088,7 +1837,7 @@ function assertionsScript(scene) {
 
 function runChrome(scene) {
   const html = buildHtml('dark');
-  const steps = SCENARIOS[scene]().steps;
+  const steps = TEST_SCENARIOS[scene]().steps;
   // 错误捕获器需置于**最前面**：此后任何一段内联脚本（包括断言脚本）
   // 即使存在语法错误，也会被其捕获并写入 DOM，可从 dump 中读到原因。
   const catcher =
@@ -1104,15 +1853,9 @@ function runChrome(scene) {
   fs.writeFileSync(page, withChecks, 'utf8');
 
   const dom = path.join(WORK, `${scene}.dom.html`);
-  const url = `file:///${page.replace(/\\/g, '/')}`;
-  const script = [
-    '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)',
-    `& '${CHROME}' --headless=new --disable-gpu --hide-scrollbars --no-first-run --no-default-browser-check ` +
-      `--force-device-scale-factor=1 --window-size=420,900 --virtual-time-budget=9000 ` +
-      `--user-data-dir='${PROFILE}' --dump-dom '${url}' | Set-Content -Path '${dom}' -Encoding utf8`,
-  ].join('; ');
-
-  execFileSync('pwsh', ['-NoProfile', '-Command', script], { stdio: 'inherit' });
+  const url = pathToFileURL(page).href;
+  fs.writeFileSync(dom, execFileSync(CHROME, ['--headless=new', '--disable-gpu', '--hide-scrollbars', '--no-first-run', '--no-default-browser-check',
+    '--force-device-scale-factor=1', '--window-size=420,900', '--virtual-time-budget=9000', `--user-data-dir=${PROFILE}`, '--dump-dom', url], { maxBuffer: 16 * 1024 * 1024 }));
 
   const dumped = fs.readFileSync(dom, 'utf8');
   const match = /<pre id="__results">([\s\S]*?)<\/pre>/.exec(dumped);
@@ -1140,7 +1883,7 @@ function main() {
   fs.copyFileSync(path.join(ROOT, 'media', 'markdown.js'), path.join(WORK, 'markdown.js'));
 
   const only = process.argv[2];
-  const scenes = Object.keys(SCENARIOS).filter((name) => !only || name === only);
+  const scenes = Object.keys(TEST_SCENARIOS).filter((name) => !only || name === only);
 
   let passed = 0;
   let failed = 0;

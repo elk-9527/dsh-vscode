@@ -6,9 +6,8 @@
  * ── 面板侧需要独立实现的原因 ──────────────────────────────────────
  * ACP 接入点插件（`dsh-acp-door`）自 0.0.8 起通过 `dsh-door/sessions/list|get` 两个旁路方法
  * 对外提供该数据，面板优先使用这两个方法。但该能力有版本要求：**该插件安装在用户档中，
- * 而用户的档由 DSH 桌面端自身管理** —— 实测（2026-09-19 00:05）桌面端重启时
- * 会将档中的依赖重写回旧版 tgz，于是出现「插件版本过低、不提供旁路方法」的情形，
- * 历史会话在**最常用的模式（连接桌面端那一个内核）下直接不可用**。要求用户为查看
+ * 而用户的档由 DSH 桌面端自身管理**。接入点过旧或旁路方法不可用时，
+ * 客户端仍需要能读取本机会话。要求用户为查看
  * 历史而修改自己的生产档并再次重启，属于将扩展自身的依赖问题转由用户承担。
  *
  * 面板与内核运行在**同一台机器**上（默认连接回环地址），会话文件位于本地
@@ -24,13 +23,13 @@
  * ── 文件格式（v3，实测逆向，非官方文档）─────────────────────────
  * `session.v3.jsonl.zstd` 为**多帧 zstd 拼接**：每帧包含一批 JSONL 事件，
  * 帧以魔数 `28 B5 2F FD` 开头。Node 的一次性 `zstdDecompressSync` 仅解压第一帧，
- * 需要按魔数切帧并逐帧解压（实测 3944 帧零失败）。关键事件：
+ * 需要按魔数切帧并逐帧解压。关键事件：
  *
  *   {type:'session', id, createdAt, cwd, agentPreset}          首帧首行（会话头）
  *   {type:'session/title', data:{title, source:{kind}}}        内核生成的标题
  *   {type:'user/message', data:{content:[{type:'text',text}], source:{kind:'user'|'plugin', ...}}}
  *   {type:'assistant/message', data:{turn, step, message:{content:[{type:'reasoning'|'text'|'tool-call',...}]}}}
- *       —— 每 step 恰好一条，content 是该步的**完整**内容（实测确认，不是增量）
+ *       —— 每 step 恰好一条，content 是该步的**完整**内容（非增量）
  *   {type:'tool/call', data:{callId, name, arguments:"<JSON 字符串>"}}
  *   {type:'tool/result', data:{message:{source:{callId}, content:[{type:'tool-result', content:[...]}]}}}
  *   {type:'turn/start', data:{turn}} / {type:'turn/end', ...}
@@ -45,6 +44,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const zlib = require('node:zlib');
+const { historyOptions, historyPage, pageMetadata } = require('./history-query');
 
 /** 会话主文件的固定文件名。 */
 const SESSION_FILE = 'session.v3.jsonl.zstd';
@@ -55,7 +55,7 @@ const ZSTD_MAGIC = [0x28, 0xb5, 0x2f, 0xfd];
 /** 列表默认返回的最大条数（按修改时间由新到旧截断）。 */
 const DEFAULT_LIST_LIMIT = 100;
 
-/** 单个会话文件超过该大小（字节）时跳过内容解读，仅返回名片（保护性限制，实测最大约 7MB）。 */
+/** 单个会话文件超过该大小（字节）时跳过内容解读，仅返回名片（保护性限制）。 */
 const MAX_DECODE_BYTES = 64 * 1024 * 1024;
 
 /**
@@ -225,7 +225,8 @@ function summarizeSession(events, meta = {}) {
  * @param {number} [options.limit]
  * @returns {{sessions: object[], skipped: number, error?: string}}
  */
-function listSessions(root, { limit = DEFAULT_LIST_LIMIT } = {}) {
+function listSessions(root, params = {}) {
+  const options = historyOptions(params);
   const found = [];
   let groups = 0;
   let dirs;
@@ -258,7 +259,8 @@ function listSessions(root, { limit = DEFAULT_LIST_LIMIT } = {}) {
     }
   }
   found.sort((a, b) => b.mtime - a.mtime);
-  const taken = found.slice(0, Math.max(1, limit));
+  const filtering = Boolean(options.query || options.cwd);
+  const taken = filtering ? found : found.slice(options.offset, options.offset + options.limit);
   const sessions = [];
   for (const item of taken) {
     const { events, error } = decodeSessionFile(item.file);
@@ -271,7 +273,7 @@ function listSessions(root, { limit = DEFAULT_LIST_LIMIT } = {}) {
     sessions.push(card);
   }
   void groups;
-  return { sessions, skipped: Math.max(0, found.length - taken.length) };
+  return filtering ? historyPage(sessions, options) : pageMetadata(sessions, found.length, options);
 }
 
 /**
@@ -437,6 +439,7 @@ function sessionTranscript(events, { maxEntries = 2000, maxChars = 50000 } = {})
 }
 
 module.exports = {
+  ...require('./sessions-async.cjs').createAsyncHistory({ summarizeSession, sessionTranscript, historyOptions, historyPage, pageMetadata, SESSION_FILE }),
   SESSION_FILE,
   DEFAULT_LIST_LIMIT,
   resolveSessionsRoot,

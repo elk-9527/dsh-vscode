@@ -1,7 +1,7 @@
 param([string]$Profile, [int]$Port, [string]$Patch, [string]$Out)
 # Boot one kernel, wait for the door port, record the truth, then kill ONLY the
 # process tree we started (taskkill /PID /T).
-# Lesson (2026-09-19): never filter processes by command-line text and kill them --
+# Never select processes for termination using only command-line text:
 # the pwsh running this very script has that text in its own command line.
 # This file is ASCII-only on purpose: Windows PowerShell 5.1 parses .ps1 as ANSI,
 # and non-ASCII comments can break the parse.

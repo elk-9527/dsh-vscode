@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "platform": "win32",
+  "sources": {
+    "releases": "https://api.github.com/repos/deepseek-ai/deepseek-harness/releases",
+    "registry": "https://registry.npmjs.org"
+  },
+  "versions": [
+    {
+      "dsh": "0.1.5-rc.2",
+      "distribution": "npm",
+      "status": "passed",
+      "evidence": [
+        "compat/evidence/public-dsh-0.1.5-rc.2-npm-door-0.5.1-panel-0.15.0.json"
+      ],
+      "door": "0.5.1",
+      "panel": "0.15.0",
+      "acp": "0.1.5-rc.3",
+      "testedAt": "2026-10-13T17:16:42.109Z",
+      "fingerprint": "250c5e987aa686f3075efd5852d55fccba122ed396f8038462f7c03ef5ceff44"
+    },
+    {
+      "dsh": "0.2.0-rc.1",
+      "distribution": "npm",
+      "status": "passed",
+      "evidence": [
+        "compat/evidence/public-dsh-0.2.0-rc.1-npm-door-0.5.1-panel-0.15.0.json"
+      ],
+      "door": "0.5.1",
+      "panel": "0.15.0",
+      "acp": "0.2.0-rc.1",
+      "testedAt": "2026-10-13T17:16:57.557Z",
+      "fingerprint": "250c5e987aa686f3075efd5852d55fccba122ed396f8038462f7c03ef5ceff44"
+    },
+    {
+      "dsh": "0.2.0-rc.2",
+      "distribution": "npm",
+      "status": "passed",
+      "evidence": [
+        "compat/evidence/public-dsh-0.2.0-rc.2-npm-door-0.5.1-panel-0.15.0.json"
+      ],
+      "door": "0.5.1",
+      "panel": "0.15.0",
+      "acp": "0.2.0-rc.2",
+      "testedAt": "2026-10-13T17:17:13.360Z",
+      "fingerprint": "250c5e987aa686f3075efd5852d55fccba122ed396f8038462f7c03ef5ceff44"
+    },
+    {
+      "dsh": "0.2.0-rc.2",
+      "distribution": "desktop",
+      "status": "passed",
+      "evidence": [
+        "compat/evidence/public-dsh-0.2.0-rc.2-desktop-door-0.5.1-panel-0.15.0.json"
+      ],
+      "door": "0.5.1",
+      "panel": "0.15.0",
+      "acp": "0.2.0-rc.2",
+      "testedAt": "2026-10-13T17:17:50.315Z",
+      "fingerprint": "250c5e987aa686f3075efd5852d55fccba122ed396f8038462f7c03ef5ceff44"
+    },
+    {
+      "dsh": "0.2.1-alpha.1",
+      "distribution": "npm",
+      "status": "passed",
+      "door": "0.5.1",
+      "panel": "0.15.0",
+      "evidence": [
+        "compat/evidence/public-dsh-0.2.1-alpha.1-npm-door-0.5.1-panel-0.15.0.json"
+      ],
+      "acp": "0.2.1-alpha.1",
+      "testedAt": "2026-10-13T17:17:34.350Z",
+      "fingerprint": "250c5e987aa686f3075efd5852d55fccba122ed396f8038462f7c03ef5ceff44"
+    }
+  ]
+}

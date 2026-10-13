@@ -1,0 +1,38 @@
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const { shipFiles } = require('../tools/ship-list');
+const { contentTypesXml } = require('../tools/build-vsix');
+const root = path.resolve(__dirname, '..');
+
+function publication({ mismatch = false, failedList = false, privateContent = false } = {}) {
+  const calls = [];
+  let exitCode;
+  const stop = {};
+  try {
+    vm.runInNewContext(fs.readFileSync(path.join(root, 'tools/publish.js'), 'utf8'), {
+      __dirname: path.join(root, 'tools'), console: { log() {}, error() {} },
+      process: { execPath: process.execPath, platform: process.platform, argv: ['node', 'publish.js', '--yes'], env: { VSCE_PAT: 'fixture' }, exit(code) { exitCode = code; throw stop; } },
+      require(name) {
+        if (name === 'node:child_process') return { spawnSync(command, args) {
+          calls.push(args);
+          if (args.some(arg => String(arg).includes('check-public-paths.cjs'))) return { status: privateContent ? 1 : 0, stdout: '' };
+          if (args.includes('ls')) return { status: failedList ? 1 : 0, stdout: shipFiles(root).slice(mismatch ? 1 : 0).join('\n') };
+          return { status: 0, stdout: '' };
+        } };
+        if (name === './ship-list') return require('../tools/ship-list');
+        return require(name);
+      },
+    });
+    exitCode = 0;
+  } catch (error) { if (error !== stop) throw error; }
+  return { exitCode, published: calls.some(args => args.includes('publish')), calls };
+}
+assert.equal(publication({ mismatch: true }).published, false, 'Real publication must reject package content drift');
+assert.equal(publication({ failedList: true }).published, false, 'A failed file inventory must block publication');
+assert.equal(publication({ privateContent: true }).published, false, 'Public content check must run before publication');
+const valid = publication(); assert.equal(valid.published, true); assert.equal(valid.exitCode, 0);
+assert(!/Extension="\./.test(contentTypesXml()), 'Content type extensions must omit the leading dot');
+console.log('Publication content gates, inventory failures and package content types passed');

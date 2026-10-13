@@ -97,16 +97,18 @@ async function main() {
       session.configOptions.length === 1 && session.configOptions[0].id === 'model');
   }
   {
-    // 旧版内核不返回 configOptions 时，退回修改本地副本（否则下拉框会卡住）。
+    // 旧版内核不回读设置时，明确未确认且保留最后确认值。
     const client = fakeClient({
       newSessionReply: { sessionId: 's-1', configOptions: [modelOption(A)] },
       setConfigReply: () => ({}),
     });
     const session = new DshSession({ client, log: () => {} });
     await session.start({ cwd: 'D:\\x' });
-    await session.setModel(B);
+    let message = '';
+    try { await session.setModel(B); } catch (error) { message = error.message; }
     const now = session.configOptions.find((o) => o.id === 'model').currentValue;
-    check('内核没回配置时退回本地记请求值', now === B, `记成了 ${now}`);
+    check('内核没回配置时保留最后确认值', now === A, `记成了 ${now}`);
+    check('内核没回配置时明确未确认', /未返回设置回读/.test(message), message);
   }
   {
     // 内核未提供 model 项：不得抛出异常，也不得记录为已切换。
@@ -122,8 +124,8 @@ async function main() {
     } catch (error) {
       threw = error;
     }
-    check('内核不给 model 配置项时不抛错（只是没得切）', threw === null, threw && threw.message);
-    check('也确实没去调内核切一个不存在的项', client.calls.setConfigOption.length === 1);
+    check('内核未公布的模型配置项会明确拒绝', /清单/.test(threw?.message), threw && threw.message);
+    check('不向内核发送未公布的配置值', client.calls.setConfigOption.length === 0);
   }
   {
     // 无会话时切换模型：须明确报错，不得静默。
@@ -283,6 +285,23 @@ async function main() {
     client.emit('close', '内核退出了');
     check('断线只广播 disconnect，不重复广播 error', disconnects.length === 1 && errors.length === 0, JSON.stringify({ disconnects, errors }));
     check('断线事件里带着原因', String(disconnects[0].reason).includes('内核退出了'), disconnects[0].reason);
+  }
+
+  section('7. 更换会话清除旧会话状态');
+  {
+    const client = fakeClient();
+    const session = new DshSession({ client });
+    await session.start({ cwd: 'D:\\x' });
+    await session.send('old'); session.usage = { used: 10, size: 100 }; session.availableCommands = [{ name: 'old' }];
+    session.tools.set('old', {}); session.doorMeta = { current: 'old' };
+    await session.start({ cwd: 'D:\\x' });
+    check('新会话不保留旧消息、工具和用量', session.messages.size === 0 && session.tools.size === 0 && session.usage === null);
+    check('新会话不保留旧命令', session.availableCommands.length === 0);
+    await session.send('another'); session.doorMeta = { current: 'old' }; session.usage = { used: 20, size: 100 };
+    client.resumeSession = async () => ({});
+    await session.resume('history', 'D:\\x');
+    check('历史恢复不保留旧转录或旧预设', session.messages.size === 0 && session.usage === null && session.doorMeta === undefined);
+    session.dispose();
   }
 
   console.log('\n════════════════════════════════════════════════════════');

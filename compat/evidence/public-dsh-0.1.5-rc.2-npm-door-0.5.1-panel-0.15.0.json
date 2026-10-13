@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "status": "passed",
+  "platform": "win32",
+  "source": {
+    "commit": "e0f4725012f35c2db896872a0e3d17e74ba485eb",
+    "fingerprint": "250c5e987aa686f3075efd5852d55fccba122ed396f8038462f7c03ef5ceff44"
+  },
+  "packages": {
+    "panel": "0.15.0",
+    "door": "0.5.1",
+    "sdk": "0.1.0"
+  },
+  "runtime": {
+    "version": "0.1.5-rc.2",
+    "acpVersion": "0.1.5-rc.3",
+    "distribution": "npm"
+  },
+  "stages": [
+    {
+      "name": "loopback-environment",
+      "status": "passed"
+    },
+    {
+      "name": "runtime",
+      "status": "passed"
+    },
+    {
+      "name": "package",
+      "status": "passed"
+    },
+    {
+      "name": "installation",
+      "status": "passed"
+    },
+    {
+      "name": "startup",
+      "status": "passed"
+    },
+    {
+      "name": "handshake",
+      "status": "passed"
+    },
+    {
+      "name": "status",
+      "status": "passed"
+    },
+    {
+      "name": "session",
+      "status": "passed"
+    },
+    {
+      "name": "model-switch",
+      "status": "passed"
+    },
+    {
+      "name": "preset-switch",
+      "status": "passed"
+    },
+    {
+      "name": "stream",
+      "status": "passed"
+    },
+    {
+      "name": "permissions",
+      "status": "passed"
+    },
+    {
+      "name": "tools",
+      "status": "passed"
+    },
+    {
+      "name": "permission-request",
+      "status": "passed"
+    },
+    {
+      "name": "permission-cancel",
+      "status": "passed"
+    },
+    {
+      "name": "history",
+      "status": "passed"
+    },
+    {
+      "name": "editor-context-snapshot",
+      "status": "passed"
+    },
+    {
+      "name": "resume",
+      "status": "passed"
+    },
+    {
+      "name": "cancel",
+      "status": "passed"
+    },
+    {
+      "name": "cleanup",
+      "status": "passed"
+    }
+  ],
+  "artifacts": [
+    {
+      "kind": "tgz",
+      "sha256": "546716824e2d6deea986a3f9f6f5e02d2d8b6d3b49c9a36134e583ade88ca6b9"
+    }
+  ]
+}

@@ -22,22 +22,19 @@ const TEST_EXTENSION_URI = { fsPath: path.resolve(__dirname, '..') };
 const openedLinks = [];
 const configValues = {
   host: '127.0.0.1',
-  port: 47821,
-  // ⚠️ 自启端口**有意不使用默认的 47831**：该路径的前提是「端口上必须没有监听」，
-  // 而 47831 正是面板自启内核的默认端口；用户自行开着 VS Code 面板时，该端口上
-  // 即有一个正在使用的内核（实测遇到：§8.5 直接连上了它，于是「命令错误」
-  // 这条路径未被走到，测试失败原因不明）。测试不应依赖外部机器状态。
+  port: Number(process.env.DSH_PANEL_PORT || 47821),
+  // 使用不同于默认 47831 的自启端口，避免已有内核使启动失败分支失去测试前提。
   selfStartPort: 47845,
   autoStart: false,
   fallbackProfile: 'dshdoor',
-  dshCommand: 'dsh',
+  dshCommand: process.env.DSH_PANEL_DSH || 'dsh',
   provider: '',
   model: '',
   // 本套件中一律「面板一关闭即回收内核」（旧行为），以便回收类断言保持简单直接。
   // 宽限期路径（视图销毁不终止内核、重开面板继续使用）在 test/fallback.js §6
   // 使用真实进程验证。
   kernelIdleMinutes: 0,
-  cwd: path.resolve(__dirname, '..', '..', '..', 'spike', 'scratch'),
+  cwd: require('./helpers/door').createTestWorkspace('panel'),
 };
 
 const mockVscode = {
@@ -119,8 +116,7 @@ function waitFor(predicate, { totalMs = 30000, intervalMs = 40 } = {}) {
  * 本套件运行期间，面板发送过的**全部**消息（每个模拟视图的消息都汇总到此处）。
  *
  * 用途在最后一节：约束是「面向用户的提示与报错都需精炼」——
- * 与其逐条断言，不如扫描所有实际发送过的消息（这样后续新增的长文案
- * 会立即被捕获，而不必等用户再次反馈）。
+ * 扫描所有实际发送过的消息，确保新增提示也遵守相同的长度限制。
  */
 const everyMessage = [];
 
@@ -154,6 +150,18 @@ function typesOf(items) {
   return items.map((item) => (item && item.message ? item.message.type : item && item.type));
 }
 
+let nextSendRequestId = 0;
+let activeDoor, activePanel;
+async function sendMessage(panel, view, text) {
+  const requestId = ++nextSendRequestId, start = view.messages.length;
+  await panel.onWebviewMessage({ type: 'send', requestId, text });
+  const result = () => view.messages.slice(start).map(item => item.message).find(message => message.requestId === requestId &&
+    (message.type === 'sendCompleted' || message.type === 'sendResult' && message.phase === 'rejected'));
+  // Model latency is independent of the short UI/state-transition deadline.
+  await waitFor(() => Boolean(result()), { totalMs: 180000 });
+  return result();
+}
+
 (async () => {
   const log = (level, message) => {
     if (process.env.DSH_PANEL_TEST_VERBOSE) console.log(`     [${level}] ${message}`);
@@ -167,9 +175,11 @@ function typesOf(items) {
   // 该插件需先与源码对齐 —— 这里测试的正是 dsh-door/sessions 等新方法。
   syncDoor({ log });
   const door = await ensureDoor({ log });
+  activeDoor = door;
 
   section('1. 视图注册与 HTML 生成');
   const panel = new DshPanelView({ extensionUri: TEST_EXTENSION_URI, log });
+  activePanel = panel;
   const view = makeFakeView();
   panel.resolveWebviewView(view);
 
@@ -193,15 +203,16 @@ function typesOf(items) {
   section('3. 发一条消息，走完整条链路');
   const before = view.messages.length;
   const prompt = '读取 spike/scratch/hello.ts 的第一行，只回那一行，不要解释。';
-  await panel.onWebviewMessage({ type: 'send', text: prompt });
+  await sendMessage(panel, view, prompt);
   const after = view.messages.slice(before).map((item) => item.message);
 
-  check('界面先收到自己发的话', after[0] && after[0].type === 'user', JSON.stringify(after[0]));
+  check('对话先收到自己发的话', after.find(item => ['user', 'assistant', 'text', 'tool'].includes(item.type))?.type === 'user');
+  check('发送接受与回合完成分别确认', after.some(item => item.type === 'sendResult' && item.phase === 'accepted') && after.some(item => item.type === 'sendCompleted'));
   check('收到 assistant 开始', after.some((item) => item.type === 'assistant'));
   if (after.some((item) => item.type === 'error' && isMissingModelCredentials(item.message))) {
     panel.dispose();
     door.stop();
-    console.log('  ⏭  面板连接与建会话成功，但本机没有当前模型的凭据；跳过真实模型回合。');
+    console.log('  ⏭  面板连接与建会话成功，但测试环境没有当前模型的凭据；跳过真实模型回合。');
     process.exit(2);
   }
   check('收到正文增量', after.some((item) => item.type === 'text' && item.delta));
@@ -248,15 +259,14 @@ function typesOf(items) {
   await panel.onWebviewMessage({ type: '完全不认识的类型' });
   await panel.onWebviewMessage(null);
   check('未知消息之后仍能正常发送消息', panel.session.sessionId !== null);
-  await panel.onWebviewMessage({ type: 'send', text: '说一句：收到。' });
+  await sendMessage(panel, view, '说一句：收到。');
   check('之后仍能收到回复', view.messages.some((item) => item.message.type === 'done'));
 
   section('8. 断线：必须能自动接回上下文');
   // 这是实际会遇到的场景：DSH 桌面端被关闭或重启，而面板仍处于打开状态。
-  // 实测 session/resume 有效（test/resume.js），因此面板不应开启一个没有记忆的
-  // 新会话 —— 否则用户会认为上文对话仍然保留。
+  // 断线后应恢复原会话，保留上下文；session/resume 的真实链路由 test/resume.js 验证。
   const beforeDrop = panel.session.sessionId;
-  await panel.onWebviewMessage({ type: 'send', text: `记住数字 ${MARKER}，只回答「已记住」。` });
+  await sendMessage(panel, view, `记住数字 ${MARKER}，只回答「已记住」。`);
   check('断线前这一段能正常跑完', view.messages.some((item) => item.message.type === 'done'));
 
   const dropIndex = view.messages.length;
@@ -282,7 +292,7 @@ function typesOf(items) {
   check('断线后会话被释放，下次发送时重新连接', !panel.session, String(panel.session));
 
   const resumeIndex = view.messages.length;
-  await panel.onWebviewMessage({ type: 'send', text: '之前要求记住的数字是多少？只回答数字。' });
+  await sendMessage(panel, view, '之前要求记住的数字是多少？只回答数字。');
   check('重新连接后取回了会话', Boolean(panel.session && panel.session.sessionId));
   check(
     '取回的是原来那个会话（并未新建会话）',
@@ -290,17 +300,17 @@ function typesOf(items) {
     `${beforeDrop} → ${panel.session.sessionId}`,
   );
   const resumeMessages = view.messages.slice(resumeIndex).map((item) => item.message);
+  const resumeText = resumeMessages.filter((item) => item.type === 'text').map((item) => String(item.delta)).join('');
   check(
     '上下文确实接回（回答中包含断线前的数字）',
-    resumeMessages.some((item) => item.type === 'text' && String(item.delta).includes(MARKER)),
+    resumeText.includes(MARKER),
     JSON.stringify(resumeMessages.filter((i) => i.type === 'text').map((i) => i.delta)).slice(0, 200),
   );
 
   section('8.5 自启内核失败时，不应让用户长时间等待');
   {
     // 场景：该插件无法连接 + 自动拉起 + 命令错误（dshCommand 填写了不存在的路径）。
-    // 此前此处会完整等待 120 秒的 waitForPort，用户面对
-    // 「正在启动 DSH…」等待两分钟，最终只得到一句「没开门」。
+    // 命令执行失败须立即结束等待，并提供可读原因与诊断原文。
     const saved = { ...configValues };
     configValues.autoStart = true;
     configValues.port = 47844; // 该端口上没有该插件监听
@@ -348,11 +358,9 @@ function typesOf(items) {
     Object.assign(configValues, saved);
   }
 
-  section('8.6 自启内核失败的两种情形，各自给出对应说明（该分支此前从未被测试）');
+  section('8.6 自启内核失败的两种情形，各自给出对应说明');
   {
-    // 此前无法测试的原因：要进入「进程存活、但端口始终未监听」这条分支，正常情况下
-    // 需要等待 120 秒，因此该分支长期未被验证。为 waitForFallbackDoor 增加了
-    // 一个仅在测试中使用的超时参数，数秒内即可覆盖。
+    // 使用测试超时参数覆盖进程存活但端口未监听的分支，避免等待完整启动期限。
     const { fallbackFailureText } = require('../src/panel/view');
     const emitter = require('node:events');
 
@@ -389,17 +397,13 @@ function typesOf(items) {
       /dsh-acp-door/.test(noDoor) && /plugin --profile desktop list/.test(noDoor) && /port/.test(noDoor),
       noDoor);
     /*
-     * 说明段的结论句（原文段开头这一句）**不得出现该插件的简称** —— 依据用户 2026-09-19
-     * 的反馈：「『门』都出来了，别人能知道是什么意思？」。技术细节留在原文段中
-     * 没有问题（该区为折叠区，供排查使用），但结论句必须是面向用户的表述。
+     * 结论句使用可理解的产品描述。包名等技术细节只保留在折叠的诊断原文中。
      */
     check('「未连接」一句的结论是面向用户的表述（不含「门」）',
       !/没开门|门没开|门插件/.test(noDoor.split('\n')[0]), noDoor.split('\n')[0]);
 
     // (3b) 内核自身给出了原因时：如实转述并附上原文，**不得**再断言为 PATH 问题。
-    //      2026-09-19 那次「面板无法启动」，内核已明确给出
-    //      `profile "desktop" is managed exclusively by the Electron application`，
-    //      面板却推测为「多半是 dsh 不在 PATH 中」，把用户引向错误方向。
+    //      Electron 专管配置的启动错误必须按原始原因说明，不能误归类为命令路径错误。
     const { explainKernelFailure } = require('../src/door/locate');
     const managedStderr = 'error: profile "desktop" is managed exclusively by the Electron application';
     const managedText = fallbackFailureText({
@@ -408,7 +412,7 @@ function typesOf(items) {
       explained: explainKernelFailure({ profile: 'desktop', stderr: managedStderr }),
     });
     check('失败说明附带了内核原文', managedText.includes('managed exclusively'), managedText);
-    check('失败说明不再断言为 PATH 问题（此前因此引入误导）', !/PATH/.test(managedText), managedText);
+    check('失败说明不将配置管理限制误判为 PATH 问题', !/PATH/.test(managedText), managedText);
     check('失败说明指向正确的处理方式（先启动桌面端 / 更换一套配置）',
       /桌面端/.test(managedText) && /设置|配置/.test(managedText), managedText);
 
@@ -432,9 +436,7 @@ function typesOf(items) {
 
   section('8.7 内核的错误必须给出可读说明，且不得丢弃原文');
   {
-    // 背景：内核的报错是**原样**穿过 ACP 的，此前用户看到的就是一段英文 JSON
-    // （最典型的是 429 额度限制）。该文本对用户没有用 —— 既未说明发生了什么，
-    // 也未说明下一步如何处理，长期只会得出「该插件不可用」的结论。
+    // ACP 错误须保留原文，同时附带可读分类和下一步操作，覆盖额度等错误形状。
     const { describeError } = require('../src/dsh/errors');
 
     const cases = [
@@ -476,9 +478,8 @@ function typesOf(items) {
     ];
 
     /*
-     * 同一批文案还需通过**内部词黑名单**（2026-09-20 添加）：这些 title/advice
+     * 同一批文案还需通过**内部词黑名单**：这些 title/advice
      * 会直接显示在错误卡片上，因此不得出现该插件的简称、「档」与设置项全名。
-     * 依据为用户原话：「『门』都出来了，别人能知道是什么意思？」。
      */
     const JARGON = /门|档|dshPanel\.|settings\.yaml|fallbackProfile|dsh-acp-door/;
 
@@ -510,7 +511,8 @@ function typesOf(items) {
       throw new Error(fake);
     };
     try {
-      await panel.onWebviewMessage({ type: 'send', text: '触发一次模拟错误' });
+      const result = await sendMessage(panel, view, '触发一次模拟错误');
+      if (result.retained) await panel.queueAction({ action: 'remove', id: result.id });
     } finally {
       panel.session.send = realSend;
     }
@@ -529,11 +531,9 @@ function typesOf(items) {
     check('原文与说明一并发送（未丢弃）', Boolean(posted && posted.message === fake));
   }
 
-  section('8.8 dshCommand 可以带参数（本机 dsh 不在 PATH 上时需这样写）');
+  section('8.8 dshCommand 支持程序名与附加参数');
   {
-    // 实测问题：将「node D:\...\bin.js」**整串**视为一个程序名并加引号时，
-    // cmd.exe 会查找一个名称中含空格的程序，直接以退出码 1 失败
-    // （原文为「不是内部或外部命令」）。因此命令必须先拆分，再逐段加引号。
+    // 程序名与脚本参数须分别引用，不能将整条命令当作可执行文件路径。
     const { splitCommand, commandLine } = require('../src/door/locate');
 
     check('普通的命令名原样保留', JSON.stringify(splitCommand('dsh')) === JSON.stringify(['dsh']));
@@ -568,19 +568,9 @@ function typesOf(items) {
   section('8.85 权限预设（dsh-door/permission 旁路方法，需要该插件 0.0.12+）');
   {
     /*
-     * 本套件默认连接 47821 —— 桌面端运行时该端口即**桌面端的内核**，
-     * 而桌面档中的连接组件为 0.0.7（该档由桌面端自身管理，命令行无法修改），
-     * 因此本节分两条路径执行，两条均为真实断言：
-     *
-     *   - 所连内核支持权限方法（自行启动的 vscode-panel / dshdoor）→ 验证完整链路；
-     *   - 所连内核不支持（桌面端那个）→ 验证**降级**：用一句可读说明解释为什么无法切换。
-     *
-     * ⚠️ 本套件配置中 `autoStart` 为 **false**（第 30 行）：该情况下面板
-     * 只作解释，不自行在后台拉起进程；「换一台可切换权限的内核」这条路径需要
-     * autoStart 打开（生产默认打开），其判据在下一节用纯函数验证，实际拉起内核
-     * 那条路径在 test/fallback.js 与 test/permission-live.js 中验证。
-     *
-     * 「切换一次确实生效」在 test/permission-live.js 中通过**自行启动的内核**验证。
+     * 支持权限方法的内核须完成读取与切换；不支持时须提供可读的降级说明。
+     * 本套件关闭 autoStart，因此降级不启动新进程。允许自启时的替换判据由
+     * 下一节验证，真实启动和权限切换由 fallback.js / permission-live.js 覆盖。
      */
     const beforePermission = view.messages.length;
     await panel.onWebviewMessage({ type: 'refreshPermission' });
@@ -603,9 +593,7 @@ function typesOf(items) {
       check('说明了属于哪一种情况（能够给出下一步）',
         ['old-door', 'no-service'].includes(info.state), info.state);
       /*
-       * 依据用户 2026-09-19 的反馈（第二次提出）：面板中不得出现该插件的简称
-       * 「dsh-acp-door」「0.0.12」「档」等仅内部可理解的词。本条断言守在
-       * **实际发送的消息**上：不是检查源码，而是检查本轮实际产生的界面文案。
+       * 权限不可用时的实际提示不得出现包名、版本号和配置集等内部术语。
        */
       const JARGON = /门|dsh-acp-door|dsh-base|dsh-door|@deepseek-ai|0\.0\.\d+|档|profile|settings\.yaml|dshPanel\.|zstd/;
       check('该说明中没有内部词（门 / 包名 / 版本号 / 档 / 设置项）',
@@ -637,7 +625,7 @@ function typesOf(items) {
         `第一次 ${countBefore} 条，再次读取后为 ${noticesOf().length} 条`);
       check('无法切换时面板其他功能照常（仍保持连接）',
         Boolean(panel.client && panel.client.isConnected));
-      console.log(`     本轮连接的内核不支持权限方法（${info.state}），走降级路径`);
+      console.log(`     当前内核不支持权限方法（${info.state}），走降级路径`);
     } else if (permissionState) {
       const options = Array.isArray(permissionState.options) ? permissionState.options : [];
       const ids = options.map((item) => item.value);
@@ -672,7 +660,7 @@ function typesOf(items) {
         afterSwitch.some((item) => item.type === 'permissionState' && item.currentValue === 'read-only'),
         JSON.stringify(afterSwitch.map((item) => item.type)));
       check('对话流中给出了切换结果（不只是顶栏文字变化）',
-        afterSwitch.some((item) => item.type === 'notice' && /权限已切到/.test(item.text)),
+        afterSwitch.some((item) => item.type === 'notice' && /当前权限为「仅可查看」.*内核已确认/.test(item.text)),
         JSON.stringify(afterSwitch.filter((item) => item.type === 'notice').map((item) => item.text)));
 
       if (original && original !== 'read-only') {
@@ -691,10 +679,8 @@ function typesOf(items) {
   section('8.86 「无法切换权限时改用可切换的一台」——判据为纯函数，逐项验证');
   {
     /*
-     * 本节存在的原因：用户 2026-09-19 反馈「修改之后无法切换权限」。
-     * 原因并非代码缺陷，而是**面板连接到了桌面端的内核**（桌面档中的连接组件
-     * 为 0.0.7，没有权限方法）。面板此前只会提示「无法切换」，用户需要自行
-     * 判断原因；现在面板会改用自行启动的那一台（其组件为新版本）。
+     * 已有内核的连接组件不支持权限方法时，允许自启的面板可以改用兼容内核。
+     * 更换只执行一次，且仅针对组件版本过低的已有连接。
      *
      * 实际拉起内核的路径（耗时较长、需要进程）在其他文件中验证；此处只验证**判据**：
      * 何种情况应当更换、何种情况不应更换。
@@ -733,7 +719,7 @@ function typesOf(items) {
       .find((item) => item.type === 'history');
     check('界面上收到 history 消息', Boolean(historyMsg), JSON.stringify(view.messages.slice(beforeHistory).map((i) => i.message.type)));
     const sessions = historyMsg && historyMsg.sessions;
-    check('清单是数组且非空（本机上一定有历史记录）', Array.isArray(sessions) && sessions.length > 0,
+    check('历史清单是非空数组', Array.isArray(sessions) && sessions.length > 0,
       historyMsg ? `共 ${Array.isArray(sessions) ? sessions.length : '?'} 段` : '没有 history 消息');
     if (Array.isArray(sessions) && sessions.length > 0) {
       const card = sessions[0];
@@ -768,15 +754,10 @@ function typesOf(items) {
     check('失败后面板仍可继续使用', Boolean(panel.client && panel.client.isConnected));
   }
 
-  section('8.9 面向用户的文本都必须简短（用户两次提出意见）');
+  section('8.9 面向用户的文本都必须简短');
   {
     /*
-     * 用户的约束（原话大意）：提示与报错都需**精炼**，不得在面板中放入
-     * 「没有现成的内核，正在启动一个（档：vscode-panel）。第一次会慢一点…」
-     * 这类长句。
-     *
-     * 因此此处不针对某一条文案断言，而是扫描本套件运行期间**实际发送过的全部消息**。
-     * 后续新增的长文案会在此处立即失败，不必等用户再次反馈。
+     * 扫描本套件实际发送过的全部消息，验证提示、状态和报错的统一长度契约。
      *
      * 三条界限（均有依据）：
      *   - 顶栏该行 ≤ 24 字、不得换行（该行本身只能容纳少量字符）；
@@ -826,9 +807,6 @@ function typesOf(items) {
     console.log(`     最长报错：${longest(errors, (m) => m.human && m.human.title)}`);
 
     /*
-     * 第二条约束（用户 2026-09-19 第二次反馈的原话）：
-     * 「『门』都出来了，别人能知道是什么意思？类似的提示全删了。」
-     *
      * 面板面向用户，而非用于内部排障 —— 因此**本套件运行期间实际发送过的
      * 全部提示/报错/顶栏文案**中不得出现内部词：该插件的简称、包名
      * （dsh-acp-door / dsh-base / @deepseek-ai/*）、版本号（0.0.12）、「档」
@@ -865,6 +843,9 @@ function typesOf(items) {
   }
   process.exit(failed === 0 ? 0 : 1);
 })().catch((error) => {
+  activePanel?.dispose();
+  activePanel?.kernels.disposeAll('测试异常收尾');
+  activeDoor?.stop();
   console.error('💥 测试异常终止：', error.stack || error.message);
   process.exit(1);
 });

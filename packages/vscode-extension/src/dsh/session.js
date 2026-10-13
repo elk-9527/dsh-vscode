@@ -84,11 +84,14 @@ class DshSession extends EventEmitter {
    * @returns {Promise<string>} sessionId
    */
   async start({ cwd, provider, model, preset }) {
+    if (this.busy) throw new Error('请等当前回合结束后再更换会话');
     const result = await this.client.newSession(cwd, { preset });
     if (!result || !result.sessionId) {
       throw new Error(`session/new 未返回 sessionId：${JSON.stringify(result)}`);
     }
+    this.resetState();
     this.sessionId = result.sessionId;
+    this.cwd = cwd;
     this.configOptions = Array.isArray(result.configOptions) ? result.configOptions : [];
     this.emit('session', { sessionId: this.sessionId });
     this.emit('config', { configOptions: this.configOptions });
@@ -125,8 +128,11 @@ class DshSession extends EventEmitter {
    *   指定（或自身记录的）值补挂 —— 不补充时，恢复后的会话不具备工具。
    */
   async resume(sessionId, cwd, { preset } = {}) {
+    if (this.busy) throw new Error('请等当前回合结束后再更换会话');
     const result = await this.client.resumeSession(sessionId, cwd, { preset });
+    this.resetState();
     this.sessionId = sessionId;
+    this.cwd = cwd;
     this.configOptions = Array.isArray(result && result.configOptions) ? result.configOptions : [];
     // 该插件在 resume 的回复中同样会附加预设清单，处理方式与 session/new 一致，
     // 以避免重连后面板上的「模式」下拉框为空。
@@ -208,27 +214,31 @@ class DshSession extends EventEmitter {
    * @param {string} value `configOptions` 中的 value 原样回传（该值为 JSON 字符串）。
    */
   async setModel(value) {
+    return this.setOption('model', value);
+  }
+
+  async setOption(id, value) {
     if (!this.sessionId) throw new Error('还没有会话');
-    const reply = await this.client.setConfigOption(this.sessionId, 'model', value);
+    if (this.busy) throw new Error('请等当前回合结束后再调整模型配置');
+    const option = this.configOptions.find(item => item?.id === id);
+    if (!option || !flattenChoices(option).some(choice => choice.value === value)) throw new Error('该配置值不在内核提供的清单中');
+    const reply = await this.client.setConfigOption(this.sessionId, id, value);
     // 内核（dsh-acp 的 setSessionConfigOption）明确返回
     // `{configOptions: [...]}`，这是权威值 —— 内核可能将请求归一化为其他值，
-    // 也可能同时修改其他项。此处原先的实现是将本地副本改为请求的值，
-    // 相当于在内核未采纳时向用户展示错误状态（已发生过：注释中写明"不要自行推测"，
-    // 而代码实际在推测）。当前以内核回复为准，仅在旧版内核不返回该字段时才退回本地修改。
+    // 也可能同时修改其他项。没有权威回读时保留最后确认值，明确报告无法确认。
     const options = reply && Array.isArray(reply.configOptions) ? reply.configOptions : null;
     if (options) {
       this.configOptions = options;
-      const current = modelCurrentValue(this.configOptions);
+      const current = this.configOptions.find(option => option?.id === id)?.currentValue;
       if (current && current !== value) {
-        this.log('warn', `请求的模型为 ${value}，内核确定为 ${current}（以内核为准）`);
+        this.log('warn', `${id} 请求值为 ${value}，内核确定为 ${current}（以内核为准）`);
       }
     } else {
-      this.configOptions = this.configOptions.map((option) =>
-        option && option.id === 'model' ? { ...option, currentValue: value } : option,
-      );
+      this.emit('config', { configOptions: this.configOptions });
+      throw new Error('内核未返回设置回读，无法确认已生效；仍显示最后确认值。');
     }
     this.emit('config', { configOptions: this.configOptions });
-    this.log('info', `模型已切换为 ${modelCurrentValue(this.configOptions) || value}`);
+    this.log('info', `会话配置 ${id} 已更新`);
   }
 
   /** 内核请求权限时，代替用户作答。 */
@@ -241,6 +251,11 @@ class DshSession extends EventEmitter {
     this.client.off('update', this._onUpdate);
     this.client.off('close', this._onClose);
     this.removeAllListeners();
+  }
+
+  resetState() {
+    this.messages.clear(); this.tools.clear(); this.usage = null;
+    this.availableCommands = []; this.doorMeta = undefined;
   }
 
   // ── 内部 ────────────────────────────────────────────────────────

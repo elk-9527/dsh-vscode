@@ -192,7 +192,7 @@ const doorPort = Number(/^\s*port:\s*(\d+)/m.exec(doorPatch)?.[1]);
 const doorHost = /^\s*host:\s*([\d.]+)/m.exec(doorPatch)?.[1];
 
 check(
-  '市场身份不再使用已被全局唯一性检查拒绝的 dsh-panel',
+  '市场身份与显示名称符合发布约定',
   extensionManifest.name === 'dsh-acp-panel' && extensionManifest.displayName === 'DSH ACP Panel',
   `${extensionManifest.publisher}.${extensionManifest.name} / ${extensionManifest.displayName}`,
 );
@@ -205,7 +205,7 @@ check(
   '该插件发布显式指向 npm 官方注册表',
   /NPM_REGISTRY\s*=\s*'https:\/\/registry\.npmjs\.org'/.test(doorPublishTool) &&
     /\['publish', '--access', 'public', '--registry', NPM_REGISTRY\]/.test(doorPublishTool),
-  '发布脚本会受本机镜像 registry 配置影响',
+  '发布脚本未固定官方 registry，可能受环境配置影响',
 );
 check(
   '检查工具可覆盖非标准 Chrome 与 VS Code 安装位置',
@@ -238,10 +238,7 @@ check(
   /resolveDoorHost/.test(doorRuntime) && /LOOPBACK_HOST\s*=\s*'127\.0\.0\.1'/.test(doorPortModule),
 );
 check(
-  // 2026-09-19 修改：默认档原为 desktop，而该档被桌面端独占，命令行无法启动
-  // （内核原话：profile "desktop" is managed exclusively by the Electron application）。
-  // 即「桌面端未启动」时面板必然无法启动 —— 而这正是最需要它自行启动的场景。
-  // 当前默认值为面板自身的档 vscode-panel（由官方 web 模板创建，已安装该插件）。
+  // 命令行不能启动 Electron 专管的 desktop；后备默认值必须使用可自行启动的配置。
   '后备档默认不是被桌面端独占的 desktop',
   settings['dshPanel.fallbackProfile'].default !== 'desktop',
   `实际是 ${settings['dshPanel.fallbackProfile'].default}`,
@@ -284,9 +281,10 @@ check(
   'client.js 的 resumeSession 没有 preset 参数',
 );
 check(
-  '面板接回旧会话时传递了当前预设',
-  /session\.resume\(\s*target,\s*this\.workdir\(\),\s*\{\s*preset:/.test(viewSource),
-  'view.js 的 resume 调用没带 preset',
+  '面板接回旧会话时保留原模式并传递恢复预设',
+  /restoreSession\(session,\s*target,\s*this\.workdir\(\),\s*this\.currentPreset\)/.test(viewSource) &&
+    /session\.resume\(id,\s*cwd,\s*\{\s*preset\s*\}\)/.test(viewSource),
+  '恢复调用必须使用原当前模式，并把它传给会话恢复方法',
 );
 
 // ── 权限预设这条链路：方法名跨两个包、标签与桌面端对齐、清单不得写死 ──────
@@ -338,12 +336,18 @@ check(
 );
 check(
   '完全权限必须附带确认步骤（该档位启用后不再逐条请求确认）',
-  /NEEDS_CONFIRM\s*=\s*new Set\(\['danger-full-access'\]\)/.test(panelPermission),
+  /NEEDS_CONFIRM\s*=\s*new Set\(\[[^\]]*'danger-full-access'/.test(panelPermission),
   'danger-full-access 没有进 NEEDS_CONFIRM',
 );
 check(
-  '面板**没有**把权限清单写死（插件添加的 auto-approval 等项必须随内核出现）',
-  // 允许出现在注释中（说明其来源），但不得出现在 BUILTIN 表中。
+  'DSH 0.2 的 Auto review 使用桌面端同级别的独立风险确认',
+  /NEEDS_CONFIRM\s*=\s*new Set\(\[[^\]]*'auto'/.test(panelPermission) &&
+    /AUTO_CONFIRM/.test(panelPermission) && /不使用沙箱/.test(panelPermission),
+  'auto 没有进入确认流程，或缺少无沙箱风险说明',
+);
+check(
+  '面板**没有**把第三方权限清单写死（auto-approval 等项必须随内核出现）',
+  // DSH 0.2 的官方 auto 需要专用标签与确认；第三方 auto-approval 仍不得写入 BUILTIN。
   !/'auto-approval'\s*:/.test(panelPermission),
   'src/dsh/permission.js 里出现了 auto-approval 的写死条目',
 );
@@ -354,7 +358,7 @@ check(
 );
 check(
   '会话一定下来就去读一次权限（换内核/换会话都可能不一样）',
-  /session\.on\('session'[\s\S]{0,220}refreshPermission\(\)/.test(viewSource),
+  /(?:session\.on|onSession)\('session'[\s\S]{0,1000}refreshPermission\(\)/.test(viewSource),
   'view.js 的 wire() 里没有在 session 事件上刷新权限',
 );
 
@@ -414,7 +418,7 @@ check(
 check(
   '界面不为展示项绑定点击，点击也不发送消息（渲染层与 chooseAccess 两道）',
   webviewJs.includes('if (option.selectable === false) {') &&
-    webviewJs.includes('if (!option || option.selectable === false) return;'),
+    webviewJs.includes('if (!option || option.selectable === false || el.accessBtn.disabled) return;'),
   'media/main.js 里少了一道 selectable 判定',
 );
 check(
@@ -454,7 +458,7 @@ check(
 );
 check(
   '扩展将编辑器内容整理为附件时使用了 view.workdir()（路径才会是相对路径）',
-  /attachmentFromEditor\(editor,\s*view\.workdir\(\)\)/.test(extensionSource),
+  /view\.addEditorContext\(editor,\s*wanted\)/.test(extensionSource) && /composer\.fromEditor/.test(viewSource),
   'extension.js 里的 attachFromEditor 没用 workdir',
 );
 check(
@@ -474,7 +478,7 @@ check(
 );
 check(
   '主进程发送消息时带上了已挂载的附件',
-  /post\(\{\s*type:\s*'send',\s*text,\s*attachments\s*\}\)/.test(webviewJs),
+  /post\(\{\s*type:\s*'send',\s*text,\s*attachments(?:,\s*requestId:[^}]+)?\s*\}\)/.test(webviewJs),
   'main.js 的 submit 没带 attachments',
 );
 check(
@@ -540,14 +544,15 @@ check(
 {
   // when 中使用的上下文键必须真实存在，写错则等价于该条件恒为假。
   // 按子句解析：`a == b` 只取左侧的键，`a` 单独出现时其自身即为键。
-  const knownWhen = new Set(['editorHasSelection', 'view', 'resourceScheme', 'inDiffEditor']);
+  const knownWhen = new Set(['editorHasSelection', 'editorTextFocus', 'editorReadonly', 'view', 'resourceScheme', 'inDiffEditor', 'isWorkspaceTrusted', 'scmProvider', 'viewItem']);
   const unknown = [];
   for (const items of Object.values(shipped.menus)) {
     for (const item of items) {
       if (!item.when) continue;
       for (const clause of item.when.split(/\s*(?:&&|\|\|)\s*/)) {
-        const comparison = /^([\w.]+)\s*(?:==|!=)\s*(.+)$/.exec(clause.trim());
-        const key = comparison ? comparison[1] : clause.trim();
+        const condition = clause.trim().replace(/^\(+|\)+$/g, '');
+        const comparison = /^([\w.]+)\s*(?:==|!=)\s*(.+)$/.exec(condition);
+        const key = comparison ? comparison[1] : condition.replace(/^!/, '');
         if (!key) continue;
         if (!knownWhen.has(key)) unknown.push(`${item.command}: ${key}`);
       }
@@ -576,8 +581,7 @@ check(
 }
 {
   // 用于后备拉起的候选命令：设置中填写的始终排第一，默认安装位置其次，去重并保持顺序。
-  // 这条链路曾修复「用户被迫先启动桌面端」的问题（直接给出的 dsh 不在 PATH 上），
-  // 固定其行为以免回退。
+  // PATH 中没有命令名时，仍须通过安装位置候选解析可执行命令。
   const { dshCommandCandidates } = require(path.join(ROOT, 'src/door/locate.js'));
   const tmp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'dsh-candidates-'));
   const binDir = path.join(tmp, '.dsh', 'profiles', 'node_modules', '@deepseek-ai', 'dsh', 'lib');
@@ -598,6 +602,12 @@ check(
 
   const dup = dshCommandCandidates({ dshCommand: `node ${bin}`, homedir: tmp, desktopExecutables: [] });
   check('候选清单：重复命令去重', dup.length === 1, dup.join(' | '));
+
+  const spacedHome = path.join(tmp, 'user name'), spacedBin = path.join(spacedHome, '.dsh/profiles/node_modules/@deepseek-ai/dsh/lib/bin.js');
+  fs.mkdirSync(path.dirname(spacedBin), { recursive: true }); fs.writeFileSync(spacedBin, '// fake\n');
+  const spaced = dshCommandCandidates({ homedir: spacedHome });
+  const { splitCommand } = require(path.join(ROOT, 'src/door/locate.js'));
+  check('候选清单：含空格的用户目录保持完整参数', splitCommand(spaced[0])[1] === spacedBin, spaced.join(' | '));
 
   if (process.platform === 'win32') {
     const install = path.join(tmp, 'DeepSeek Harness');
@@ -634,10 +644,8 @@ check(
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 {
-  // 2026-09-19 那次「面板无法启动」的根因：默认档为 desktop，而该档被桌面端
-  // 独占，命令行无法启动。此处固定两件事：
-  //   ① 能自动找到「已安装该插件 + 网页档」的备选（不再依赖写死的档名）；
-  //   ② 内核自身给出原因时如实转述，不再用「多半是 PATH 不对」覆盖它。
+  // 配置候选须包含接入点与网页运行组件，且不能依赖固定配置名称。
+  // Electron 专管配置等启动限制须按内核原因说明，不能误判为命令路径错误。
   const { panelProfileCandidates, explainKernelFailure } = require(path.join(ROOT, 'src/door/locate.js'));
   const tmp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'dsh-profiles-'));
   const profiles = path.join(tmp, '.dsh', 'profiles');
@@ -675,9 +683,8 @@ check(
   });
   check('退出原因：能识别「该档被桌面端独占」', managed.kind === 'app-managed-profile', managed.kind);
   /*
-   * 2026-09-20 修改：该句**面向用户**（错误卡片的「如何处理」），因此不再直接写出
-   * fallbackProfile 这类设置项全名，也不提「档」。要求为：使用可理解的表述 + 指出处理途径。
-   * 档名与设置项位于紧随其后的原文段中（human.raw 的 tail），不删减任何字符。
+   * 错误卡片的处理建议使用可理解的表述并指出操作途径，不包含配置名或设置项全名。
+   * 技术字段保留在诊断原文中。
    */
   check('退出原因：使用面向用户的表述（不出现档名 / 设置项全名）',
     !/desktop|fallbackProfile|档/.test(`${managed.reason} ${managed.advice}`),
@@ -718,11 +725,7 @@ check(
 
 {
   /*
-   * 内核终止时需要留下证据（2026-09-19 第二次遇到）。
-   *
-   * 第一次遇到的问题是「stderr 被丢弃」→ 已修复，但输出仅**保存在内存中**，
-   * 因此用户反馈「对话几轮后断开」时，面板日志中只有一句
-   * `后台 DSH 退出了（code=1）`，没有任何关于内核终止原因的信息。
+   * 内核终止时需要留下退出码与输出，便于排查连接断开。
    * 本节固定三件事：① 内核输出需转发到面板日志；② 其自行退出时需说明
    * 退出码与最后的输出（无输出时也需说明「没有输出」）；③ 日志需限量。
    */
@@ -756,12 +759,11 @@ check(
 
 {
   /*
-   * 内核归属与端口归属（2026-09-19 的结构性修复，见 kernel-manager.js 开头）。
+   * 内核归属与端口归属契约，见 kernel-manager.js。
    *
    * 两条规则，均不得回退：
    * ① **视图销毁不等于内核终止**：视图只是使用者，销毁仅释放引用；只有宽限期到期、
-   *    窗口关闭、用户显式停止时才真正回收。旧代码在 dispose 中执行 killTree，导致
-   *    折叠侧边栏、拖动面板、Reload Window 都变成一次「终止内核并重新连接」。
+   *    窗口关闭、用户显式停止时才真正回收，避免视图布局变化中断仍需复用的内核。
    * ② **端口由启动内核的一方决定**：面板将 selfStartPort 写入环境变量
    *    DSH_ACP_DOOR_PORT，该插件优先读取该变量；面板自启的内核不再占用桌面端的 47821。
    *    该变量名在扩展与该插件两侧各写一次，必须逐字一致 —— 即由这条断言固定。
@@ -796,10 +798,8 @@ check(
   check('端口归属：该插件中的判定顺序为 环境变量 > 档配置 > 默认值',
     /env\.DSH_ACP_DOOR_PORT[\s\S]{0,200}config\.port[\s\S]{0,120}DEFAULT_PORT/.test(doorPort));
   /*
-   * 2026-09-20 修改：本条从「固定监听两个端口」改为「监听 fallbackPorts 返回的清单」——
-   * 因为新增了一个**仅监听自身端口**的例外（所连内核无法切换权限、改用自行启动的
-   * 内核时；同时监听两个端口会把设置中该端口上现成的旧版插件视为「新内核已就绪」，
-   * 从而重新连接同一台）。两种清单都必须存在，且默认那份必须仍为两个端口。
+   * 默认后备清单监听两个端口，兼容不识别环境端口变量的旧接入点。
+   * 替换不支持权限方法的已有内核时，只监听自身端口，避免将原内核误判为新内核。
    */
   check('端口归属：该插件为旧版（不识别环境变量）时也能连接 —— 默认监听两个端口',
     /fallbackPorts\(cfg\)\s*\{[\s\S]{0,200}return \[cfg\.selfStartPort, cfg\.port\]/.test(viewSource) &&
@@ -807,6 +807,20 @@ check(
   check('端口归属：更换内核的路径只监听自身端口（否则会连回同一台）',
     /ownPortOnly[\s\S]{0,120}return \[cfg\.selfStartPort\]/.test(viewSource) &&
       /this\.ownPortOnly = true/.test(viewSource));
+  check('插件能力：vscode-panel 自启前会同步 desktop 中已启用的注册表插件',
+    /profile === 'vscode-panel'[\s\S]{0,500}syncPanelProfilePlugins\(\{ command, profile \}\)/.test(viewSource) &&
+      /planPanelPluginSync/.test(read('src/door/setup.js')));
+  check('插件能力：同步 DSH 运行时官方 bundle（不能只看 dependencies）',
+    /OFFICIAL_RUNTIME_BUNDLE/.test(read('src/door/setup.js')) &&
+      /runtimeBundleAdditions/.test(read('src/door/setup.js')) &&
+      /enableRuntimeBundles/.test(read('src/door/setup.js')));
+  check('插件能力：自启时通过 --patch 只读继承 desktop 的模型路由与插件配置',
+    /desktopProfilePatchArgs/.test(read('src/door/setup.js')) &&
+      /desktopProfilePatchArgs\(\{ profile \}\)/.test(viewSource) &&
+      /extraArgs:\s*\[\.\.\.inheritedConfigArgs,\s*\.\.\.this\.spawnArgs\]/.test(viewSource));
+  check('插件能力：同步不覆盖连接组件，也不自动复制本地或 Git 来源',
+    /isDoorPackage\(name\)/.test(read('src/door/setup.js')) &&
+      /file\|link\|workspace\|catalog\|git/.test(read('src/door/setup.js')));
 
   const soak = path.join(ROOT, 'tools', 'soak.cjs');
   check('有长时间运行的耐力测试（用于发现「能启动但存活时间短」这类问题）',
@@ -817,13 +831,8 @@ check(
 
 {
   /*
-   * 装机文件中不得包含 UTF-8 BOM（2026-09-19 的事故，已实际发生）。
-   *
-   * 当时使用 PowerShell 的 `Set-Content -Encoding UTF8` 修改该插件的 package.json，
-   * 该命令在文件开头静默写入了 EF BB BF。`npm pack` 将该 BOM 打入 tgz，装入用户档之后
-   * 内核加载插件时 `JSON.parse` 直接抛 `SyntaxError: Unexpected token '﻿'` ——
-   * 此后 `dsh plugin` 每次执行均崩溃，等同于破坏用户的那一套档。
-   * 此类事故必须由一条断言拦截：扩展自身的包、该插件的 package.json 与 lib/ 全部检查。
+   * 待打包文本不得以 UTF-8 BOM（EF BB BF）开头，避免 JSON.parse 加载失败。
+   * 检查扩展文件与接入点的 package.json / lib 文件，不能仅检查源码目录的单个文件。
    */
   const shippedFiles = [];
   const collect = (dir, relative) => {
@@ -849,6 +858,9 @@ check(
   check(`装机文件中没有 UTF-8 BOM（共检查 ${shippedFiles.length} 个；BOM 会使 JSON.parse 解析失败并影响整个档）`,
     bommed.length === 0, bommed.map((item) => item.relative).join(', '));
 }
+
+section('首屏提示与鉴权来源');
+require('./onboarding').run(check);
 
 console.log(`\n${'═'.repeat(56)}`);
 if (failed === 0) console.log(`✅ 全部通过：${passed} 项检查`);
