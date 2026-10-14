@@ -8,7 +8,7 @@ const fixture = { id: 'fixture', name: 'Fixture', version: '1.0.0', capabilities
 (async () => {
   const host = createMockHost(), dispose = registerProvider({ ideBridge: host }, fixture);
   assert.equal(host.catalog().capabilities.length, 1);
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-sdk-'));
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-sdk-')));
   const context = { cwd, clientId: 'one', workspaceTrusted: true, userInitiated: true, approved: true, signal: new AbortController().signal };
   assert.deepEqual(await host.invoke('fixture.echo', { text: 'echo' }, context), { text: 'echo' });
   await assert.rejects(host.invoke('fixture.echo', { text: 'too long' }, context), error => error.code === -32046);

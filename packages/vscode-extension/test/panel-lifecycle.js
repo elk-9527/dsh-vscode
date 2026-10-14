@@ -5,6 +5,8 @@
 const Module = require('node:module');
 const { EventEmitter } = require('node:events');
 const net = require('node:net');
+const path = require('node:path'), os = require('node:os');
+const { pathToFileURL } = require('node:url');
 
 const config = {
   host: '127.0.0.1',
@@ -337,7 +339,7 @@ section('8. 编辑器附件区分磁盘文件与未保存内容');
         uri: {
           scheme,
           fsPath: scheme === 'untitled' ? '' : fileName,
-          toString: () => (scheme === 'file' ? `file:///${fileName.replace(/\\/g, '/')}` : `${scheme}:${fileName}`),
+          toString: () => (scheme === 'file' ? pathToFileURL(fileName).href : `${scheme}:${fileName}`),
         },
         getText: (selection) => (selection ? selected : content),
       },
@@ -347,28 +349,30 @@ section('8. 编辑器附件区分磁盘文件与未保存内容');
     };
   }
 
+  const workspace = path.join(os.tmpdir(), 'dsh-panel-lifecycle-workspace');
+  const outsideFile = path.join(workspace + '-other', 'app.js');
   const clean = DshPanelView.attachmentFromEditor(
-    editor({ fileName: 'D:\\workspace\\src\\app.js' }),
-    'D:\\workspace',
+    editor({ fileName: path.join(workspace, 'src', 'app.js') }),
+    workspace,
   );
   check('已保存文件在加入时就携带全文快照', clean.kind === 'content' && typeof clean.text === 'string' && clean.scope === 'file', JSON.stringify(clean));
   check('工作区内文件显示相对路径', clean.name === 'src/app.js', clean.name);
 
   const dotted = DshPanelView.attachmentFromEditor(
-    editor({ fileName: 'D:\\workspace\\..cache\\app.js' }),
-    'D:\\workspace',
+    editor({ fileName: path.join(workspace, '..cache', 'app.js') }),
+    workspace,
   );
   check('以两个点开头的子目录不会被误判为工作区外', dotted.name === '..cache/app.js', dotted.name);
 
   const outside = DshPanelView.attachmentFromEditor(
-    editor({ fileName: 'D:\\workspace-other\\app.js' }),
-    'D:\\workspace',
+    editor({ fileName: outsideFile }),
+    workspace,
   );
-  check('相邻目录不会被误判为工作区内', outside.name === 'D:\\workspace-other\\app.js', outside.name);
+  check('相邻目录不会被误判为工作区内', outside.name === outsideFile, outside.name);
 
   const dirty = DshPanelView.attachmentFromEditor(
-    editor({ fileName: 'D:\\workspace\\src\\dirty.js', dirty: true, content: 'const unsaved = 42;' }),
-    'D:\\workspace',
+    editor({ fileName: path.join(workspace, 'src', 'dirty.js'), dirty: true, content: 'const unsaved = 42;' }),
+    workspace,
   );
   check('有未保存修改时改带编辑器快照', dirty.kind === 'content' && dirty.text === 'const unsaved = 42;', JSON.stringify(dirty));
   check('有未保存修改时不附带可能过期的磁盘链接', dirty.uri === undefined, JSON.stringify(dirty));
@@ -376,25 +380,25 @@ section('8. 编辑器附件区分磁盘文件与未保存内容');
 
   const untitled = DshPanelView.attachmentFromEditor(
     editor({ fileName: 'Untitled-1', scheme: 'untitled', dirty: true, untitled: true, content: '临时内容' }),
-    'D:\\workspace',
+    workspace,
   );
   check('未保存的新文件直接带正文', untitled.kind === 'content' && untitled.text === '临时内容', JSON.stringify(untitled));
   check('未保存的新文件不伪造可读取链接', untitled.uri === undefined && untitled.detail === '未保存文件', JSON.stringify(untitled));
 
   const dirtySelection = DshPanelView.attachmentFromEditor(
-    editor({ fileName: 'D:\\workspace\\src\\dirty.js', dirty: true, selected: 'unsaved();' }),
-    'D:\\workspace',
+    editor({ fileName: path.join(workspace, 'src', 'dirty.js'), dirty: true, selected: 'unsaved();' }),
+    workspace,
     'selection',
   );
   check('脏文件选区正文照常携带且不附旧磁盘链接',
     dirtySelection.kind === 'selection' && dirtySelection.text === 'unsaved();' && dirtySelection.uri === undefined,
     JSON.stringify(dirtySelection));
-  const wholeWithSelection = DshPanelView.attachmentFromEditor(editor({ fileName: 'D:\\workspace\\src\\app.js', selected: 'selectionOnly();', content: 'wholeFile();' }), 'D:\\workspace', 'file');
+  const wholeWithSelection = DshPanelView.attachmentFromEditor(editor({ fileName: path.join(workspace, 'src', 'app.js'), selected: 'selectionOnly();', content: 'wholeFile();' }), workspace, 'file');
   check('全文件命令存在选区时仍加入全文', wholeWithSelection.text === 'wholeFile();' && wholeWithSelection.scope === 'file');
-  const blankSelection = editor({ fileName: 'D:\\workspace\\src\\blank.js', selected: '   ' });
+  const blankSelection = editor({ fileName: path.join(workspace, 'src', 'blank.js'), selected: '   ' });
   blankSelection.selection.end = { line: 3, character: 0 };
   blankSelection.selection.start = { line: 2, character: 0 };
-  const exact = DshPanelView.attachmentFromEditor(blankSelection, 'D:\\workspace', 'selection');
+  const exact = DshPanelView.attachmentFromEditor(blankSelection, workspace, 'selection');
   check('空白选区不替换为全文；尾端零列不多报一行', exact.kind === 'selection' && exact.text === '   ' && exact.startLine === 3 && exact.endLine === 3);
   check('快照包含保存状态、时间和 UTF-8 大小', dirty.isDirty && !dirty.isUntitled && Number.isFinite(Date.parse(dirty.snapshotAt)) && dirty.byteLength === Buffer.byteLength(dirty.text));
 }

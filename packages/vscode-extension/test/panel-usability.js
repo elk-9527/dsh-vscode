@@ -3,9 +3,14 @@ const assert = require('node:assert/strict');
 const Module = require('node:module');
 const { EventEmitter } = require('node:events');
 const net = require('node:net');
+const path = require('node:path'), os = require('node:os');
+const { fileURLToPath, pathToFileURL } = require('node:url');
+const PROJECT = path.resolve(os.tmpdir(), 'dsh-panel-usability-project');
+const projectPath = (...parts) => path.join(PROJECT, ...parts);
+const OUTSIDE = path.resolve(os.tmpdir(), 'dsh-panel-usability-outside');
 const vscode = {
-  Uri: { file: value => ({ fsPath: value }), parse: value => ({ scheme: value.split(':')[0], fsPath: value.slice(7) }) },
-  workspace: { isTrusted: true, getWorkspaceFolder: () => ({ uri: { fsPath: 'C:/project' } }) },
+  Uri: { file: value => ({ scheme: 'file', fsPath: value }), parse: value => ({ scheme: value.split(':')[0], fsPath: value.startsWith('file:') ? fileURLToPath(value) : value.slice(7) }) },
+  workspace: { isTrusted: true, getWorkspaceFolder: () => ({ uri: { fsPath: PROJECT } }) },
   commands: { executeCommand: async () => {} },
 };
 const originalLoad = Module._load;
@@ -21,8 +26,8 @@ function fixture() {
   const output = [], calls = [], client = new EventEmitter(); client.isConnected = true; client.closeSession = async () => {};
   const panel = new DshPanelView({ extensionUri: {}, log() {}, kernels: { release() {}, acquire() {}, live() {} } });
   panel.view = { webview: { postMessage: async message => { output.push(structuredClone(message)); } } };
-  panel.workdir = () => 'C:/project'; panel.config = () => ({}); panel.refreshPermission = async () => {};
-  const session = new EventEmitter(); Object.assign(session, { sessionId: 'original', cwd: 'C:/project', client, messages: new Map(), configOptions: [], busy: false, dispose() {}, stop() {} });
+  panel.workdir = () => PROJECT; panel.config = () => ({}); panel.refreshPermission = async () => {};
+  const session = new EventEmitter(); Object.assign(session, { sessionId: 'original', cwd: PROJECT, client, messages: new Map(), configOptions: [], busy: false, dispose() {}, stop() {} });
   panel.session = session; panel.client = client; panel.connections.client = client; panel.connections.status = { instanceId: 'kernel-1' };
   panel.ensureConnection = async () => panel.session;
   session.send = async (text, { attachments }) => { calls.push({ text, attachments }); return { stopReason: 'end_turn' }; };
@@ -76,7 +81,7 @@ function fixture() {
   await assert.rejects(binding.panel.queueAction({ action: 'continue' }), /原会话/); assert.equal(binding.calls.length, 0);
   await binding.panel.queueAction({ action: 'edit', id: binding.panel.queue.items[0].id }); assert.equal(binding.panel.queue.items.length, 0);
   assert(binding.output.some(item => item.type === 'queueEdit' && item.text === 'bound'));
-  assert.equal(binding.output.find(item => item.type === 'queueEdit' && item.text === 'bound').cwd, 'C:/project');
+  assert.equal(binding.output.find(item => item.type === 'queueEdit' && item.text === 'bound').cwd, PROJECT);
   assert.equal(binding.panel.queue.paused, false);
   await binding.panel.queueAction({ action: 'edit', id: 'already-gone' });
   assert(binding.output.some(item => item.type === 'queueEdit' && item.id === 'already-gone' && item.error === '此消息已不在队列中'));
@@ -134,27 +139,27 @@ function fixture() {
 
   const switchingDraft = fixture(), savedDrafts = new Map(), oldFolder = vscode.workspace.getWorkspaceFolder;
   switchingDraft.panel.workspaceState = { get: key => savedDrafts.get(key), update: async (key, value) => savedDrafts.set(key, value) };
-  switchingDraft.panel.workdir = () => 'C:/project/B';
-  vscode.workspace.getWorkspaceFolder = uri => uri.fsPath.startsWith('C:/project/') ? {} : undefined;
+  switchingDraft.panel.workdir = () => projectPath('B');
+  vscode.workspace.getWorkspaceFolder = uri => uri.fsPath.startsWith(PROJECT + path.sep) ? {} : undefined;
   try {
-    const leavingDraft = { version: 1, cwd: 'C:/project/A', savedAt: Date.now(), text: 'departing A', attachments: [] };
+    const leavingDraft = { version: 1, cwd: projectPath('A'), savedAt: Date.now(), text: 'departing A', attachments: [] };
     await switchingDraft.panel.onWebviewMessage({ type: 'draft', draft: leavingDraft }); await switchingDraft.panel.draftWrites;
     assert.equal(savedDrafts.get(draftKey(leavingDraft.cwd)).text, 'departing A');
-    assert.equal(savedDrafts.has(draftKey('C:/project/B')), false);
-    for (const cwd of ['C:/outside', 'relative', 'C:/project/\0bad']) {
+    assert.equal(savedDrafts.has(draftKey(projectPath('B'))), false);
+    for (const cwd of [OUTSIDE, 'relative', projectPath('\0bad')]) {
       await switchingDraft.panel.onWebviewMessage({ type: 'draft', draft: { ...leavingDraft, cwd } }); await switchingDraft.panel.draftWrites;
       assert.equal(savedDrafts.size, 1);
     }
     vscode.workspace.isTrusted = false;
     await switchingDraft.panel.onWebviewMessage({ type: 'draft', draft: { ...leavingDraft, text: 'untrusted old directory' } }); await switchingDraft.panel.draftWrites;
     assert.equal(savedDrafts.get(draftKey(leavingDraft.cwd)).text, 'departing A');
-    savedDrafts.set(draftKey('C:/project/B'), { ...leavingDraft, cwd: 'C:/project/B', text: 'saved B', attachments: [{ kind: 'content', name: 'file', text: 'private' }] });
+    savedDrafts.set(draftKey(projectPath('B')), { ...leavingDraft, cwd: projectPath('B'), text: 'saved B', attachments: [{ kind: 'content', name: 'file', text: 'private' }] });
     switchingDraft.panel.postWorkspaceMeta();
     const restoreB = switchingDraft.output.at(-1), metaB = switchingDraft.output.at(-2);
     assert.equal(metaB.type, 'meta'); assert.equal(metaB.trusted, false);
     assert.equal(restoreB.type, 'draftRestore'); assert.equal(restoreB.cwd, metaB.cwd); assert.equal(restoreB.draft.text, 'saved B'); assert.deepEqual(restoreB.draft.attachments, []);
-    switchingDraft.panel.postWorkspaceMeta('C:/project/empty');
-    assert.equal(switchingDraft.output.at(-1).cwd, 'C:/project/empty'); assert.equal(switchingDraft.output.at(-1).draft, undefined);
+    switchingDraft.panel.postWorkspaceMeta(projectPath('empty'));
+    assert.equal(switchingDraft.output.at(-1).cwd, projectPath('empty')); assert.equal(switchingDraft.output.at(-1).draft, undefined);
   } finally { vscode.workspace.getWorkspaceFolder = oldFolder; vscode.workspace.isTrusted = true; }
 
   const capture = fixture(), captureGate = deferred(), finishes = [];
@@ -162,7 +167,7 @@ function fixture() {
   await capture.panel.acceptMessage({ requestId: 40, text: 'must not start after stop' });
   await tick(); await capture.panel.onWebviewMessage({ type: 'stop' }); captureGate.resolve(); await idle(capture.panel);
   assert.equal(capture.calls.length, 0); assert.deepEqual(finishes, ['failed']); assert.equal(capture.panel.queue.items[0].failed, true);
-  assert.equal(capture.output.find(item => item.type === 'sendCompleted').cwd, 'C:/project');
+  assert.equal(capture.output.find(item => item.type === 'sendCompleted').cwd, PROJECT);
 
   for (const phase of ['begin', 'finish']) {
     const recording = fixture(), recordingGate = deferred();
@@ -218,8 +223,8 @@ function fixture() {
     configChange.session.configOptions[0].currentValue = value === 'new' ? 'old' : value;
     activeChanges--;
   };
-  const firstChange = configChange.panel.onWebviewMessage({ type: 'setModel', requestId: 'setting-1', value: 'new', cwd: 'C:/project', sessionId: 'original' });
-  const nextChange = configChange.panel.onWebviewMessage({ type: 'setModel', requestId: 'setting-2', value: 'old', cwd: 'C:/project', sessionId: 'original' });
+  const firstChange = configChange.panel.onWebviewMessage({ type: 'setModel', requestId: 'setting-1', value: 'new', cwd: PROJECT, sessionId: 'original' });
+  const nextChange = configChange.panel.onWebviewMessage({ type: 'setModel', requestId: 'setting-2', value: 'old', cwd: PROJECT, sessionId: 'original' });
   await tick(); assert.deepEqual(configChange.calls, ['new']); assert.equal(configChange.session.configOptions[0].currentValue, 'old');
   assert.equal(configChange.output.filter(item => item.type === 'settingResult' && item.phase === 'pending').length, 2);
   await assert.rejects(configChange.panel.send('blocked during setting'), /设置/);
@@ -235,9 +240,9 @@ function fixture() {
   assert.equal(configChange.session.configOptions[0].currentValue, 'old');
   for (const cause of ['history', 'cwd', 'session', 'queue', 'test', 'undo', 'switch']) {
     const guarded = fixture(); let changed = 0; guarded.session.setModel = async () => { changed++; };
-    const request = { type: 'setModel', value: 'new', requestId: cause, cwd: 'C:/project', sessionId: 'original' };
+    const request = { type: 'setModel', value: 'new', requestId: cause, cwd: PROJECT, sessionId: 'original' };
     if (cause === 'history') guarded.panel.historyReadonly = true;
-    else if (cause === 'cwd') request.cwd = 'C:/other';
+    else if (cause === 'cwd') request.cwd = OUTSIDE;
     else if (cause === 'session') request.sessionId = 'other';
     else if (cause === 'queue') guarded.panel.queue.active = { id: 'finishing' };
     else if (cause === 'test') guarded.panel.workflow = { activeTest: true };
@@ -344,7 +349,7 @@ function fixture() {
     assert.equal(await guarded.panel.reconnect(), false, cause); assert.equal(teardown, 0, cause);
   }
   const recovery = fixture(), recoveryGate = deferred(); let recoveries = 0;
-  recovery.panel.queue.add(snapshotMessage('held draft', []), { cwd: 'C:/project', sessionId: 'original' }, 'held');
+  recovery.panel.queue.add(snapshotMessage('held draft', []), { cwd: PROJECT, sessionId: 'original' }, 'held');
   recovery.panel.teardown = () => { recoveries++; recovery.panel.pauseQueue('recovering'); };
   recovery.panel.ensureConnection = async () => { await recoveryGate.promise; return recovery.session; };
   recovery.panel.historyReadonly = true; recovery.panel.historyId = 'past';
@@ -357,7 +362,7 @@ function fixture() {
   for (const cause of ['cwd', 'session', 'connection', 'session-object', 'session-id']) {
     const staleRecovery = fixture(); let teardown = 0; staleRecovery.panel.teardown = () => { teardown++; };
     staleRecovery.panel.postError('无法连接'); const scope = staleRecovery.output.at(-1).human.recoveryScope;
-    if (cause === 'cwd') staleRecovery.panel.workdir = () => 'C:/other';
+    if (cause === 'cwd') staleRecovery.panel.workdir = () => OUTSIDE;
     else if (cause === 'session') staleRecovery.panel.contextSessionSerial++;
     else if (cause === 'session-object') staleRecovery.panel.session = { ...staleRecovery.session };
     else if (cause === 'session-id') staleRecovery.session.sessionId = 'other';
@@ -469,9 +474,9 @@ function fixture() {
     let readSignal;
     context.panel.composer.select = async (_id, signal) => { readSignal = signal; await readGate.promise; return { kind: 'content', text: 'original body', name: 'code.js' }; };
     context.panel.composer.query = async () => ({ items: [], note: '' });
-    const selecting = context.panel.onWebviewMessage({ type: 'composerSelect', id: 'candidate', requestId: cause, origin: 'context', source: 'search', cwd: 'C:/project' });
+    const selecting = context.panel.onWebviewMessage({ type: 'composerSelect', id: 'candidate', requestId: cause, origin: 'context', source: 'search', cwd: PROJECT });
     await tick();
-    if (cause === 'cwd') context.panel.workdir = () => 'C:/project/other';
+    if (cause === 'cwd') context.panel.workdir = () => projectPath('other');
     else if (cause === 'session-object') context.panel.session = { ...context.session };
     else if (cause === 'session-id') context.session.sessionId = 'another';
     else if (cause === 'view') context.panel.view = { ...context.panel.view };
@@ -487,26 +492,26 @@ function fixture() {
   const directContext = fixture(); let selectedId, selectedOptions;
   directContext.panel.composer.query = async (_trigger, _query, _signal, options) => { assert.equal(options.source, 'file'); return { items: [{ id: 'whole-file' }] }; };
   directContext.panel.composer.select = async (id, _signal, options) => { selectedId = id; selectedOptions = options; return { kind: 'content', text: 'whole document', name: 'code.js' }; };
-  await directContext.panel.onWebviewMessage({ type: 'contextAdd', source: 'file', requestId: 'add-whole', cwd: 'C:/project' });
+  await directContext.panel.onWebviewMessage({ type: 'contextAdd', source: 'file', requestId: 'add-whole', cwd: PROJECT });
   const added = directContext.output.find(item => item.type === 'composerSelected');
   assert.equal(selectedId, 'whole-file'); assert.equal(selectedOptions.origin, 'context');
-  assert.equal(added.cwd, 'C:/project'); assert.equal(added.sessionId, 'original'); assert.equal(added.origin, 'context'); assert.equal(added.item.text, 'whole document');
+  assert.equal(added.cwd, PROJECT); assert.equal(added.sessionId, 'original'); assert.equal(added.origin, 'context'); assert.equal(added.item.text, 'whole document');
   assert.equal(directContext.calls.length, 0);
   await directContext.panel.onWebviewMessage({ type: 'composerCommand', origin: 'context', id: 'command:stop', requestId: 'no-command' });
   assert(directContext.output.some(item => item.requestId === 'no-command' && /不能执行命令/.test(item.error)));
   const revealSnapshot = fixture(), revealGate = deferred();
   revealSnapshot.panel.reveal = async () => revealGate.promise;
-  const originalAttachment = { kind: 'selection', text: 'before reveal', name: 'code.js', sourcePath: 'C:/project/code.js', scope: 'selection', startLine: 2, endLine: 3, isDirty: true, snapshotAt: '2026-10-12T00:00:00.000Z' };
+  const originalAttachment = { kind: 'selection', text: 'before reveal', name: 'code.js', sourcePath: projectPath('code.js'), scope: 'selection', startLine: 2, endLine: 3, isDirty: true, snapshotAt: '2026-10-12T00:00:00.000Z' };
   const revealing = revealSnapshot.panel.attach([originalAttachment]);
   originalAttachment.text = 'changed after addition'; revealGate.resolve(); await revealing;
   const mounted = revealSnapshot.output.find(item => item.type === 'attach');
-  assert.equal(mounted.items[0].text, 'before reveal'); assert.equal(mounted.items[0].sourcePath, 'C:/project/code.js');
-  assert.equal(mounted.items[0].startLine, 2); assert.equal(mounted.cwd, 'C:/project'); assert.equal(mounted.sessionId, 'original');
+  assert.equal(mounted.items[0].text, 'before reveal'); assert.equal(mounted.items[0].sourcePath, projectPath('code.js'));
+  assert.equal(mounted.items[0].startLine, 2); assert.equal(mounted.cwd, PROJECT); assert.equal(mounted.sessionId, 'original');
   for (const cause of ['cwd', 'session', 'view', 'trust']) {
     const revealRace = fixture(), revealWait = deferred();
     revealRace.panel.reveal = async () => revealWait.promise;
     const adding = revealRace.panel.attach([{ kind: 'content', text: 'original', name: 'code.js' }]);
-    if (cause === 'cwd') revealRace.panel.workdir = () => 'C:/project/other';
+    if (cause === 'cwd') revealRace.panel.workdir = () => projectPath('other');
     else if (cause === 'session') revealRace.session.sessionId = 'other';
     else if (cause === 'view') revealRace.panel.view = { ...revealRace.panel.view };
     else vscode.workspace.isTrusted = false;
@@ -555,7 +560,7 @@ function fixture() {
   const originalOpen = vscode.workspace.openTextDocument;
   vscode.workspace.openTextDocument = async () => { diskReads++; return { getText: () => 'late disk body' }; };
   try {
-    await oldLink.panel.acceptMessage({ text: 'legacy', requestId: 'legacy-link', attachments: [{ kind: 'file', uri: 'file:///C:/project/code.js', name: 'code.js' }] });
+    await oldLink.panel.acceptMessage({ text: 'legacy', requestId: 'legacy-link', attachments: [{ kind: 'file', uri: pathToFileURL(projectPath('code.js')).href, name: 'code.js' }] });
     assert.equal(diskReads, 0); assert.equal(oldLink.calls.length, 0);
     assert(oldLink.output.some(item => item.type === 'sendResult' && item.phase === 'rejected' && /重新添加/.test(item.error)));
   } finally { vscode.workspace.openTextDocument = originalOpen; }
@@ -567,12 +572,12 @@ function fixture() {
       received = identity; providedLog = log; assert(identity.current());
       return { items: [{ id: 'test:execution', kind: 'content', scope: 'test', source: 'test', name: 'test result', text: 'native exit 1; terminal output unavailable' }], ...(action === 'prepareTest' ? { text: 'Prepare a repair and re-run tests after sending.' } : {}) };
     } };
-    await evidence.panel.onWebviewMessage({ type: 'workflowAction', action, turnId: 'turn', testId: 'execution', requestId: action, cwd: 'C:/project', sessionId: 'original', logText: 'user supplied' });
+    await evidence.panel.onWebviewMessage({ type: 'workflowAction', action, turnId: 'turn', testId: 'execution', requestId: action, cwd: PROJECT, sessionId: 'original', logText: 'user supplied' });
     assert.equal(received.turnId, 'turn'); assert.equal(received.testId, 'execution'); assert.equal(received.requestId, action);
     if (action === 'logTest') assert.equal(providedLog, 'user supplied');
     const reply = evidence.output.find(item => item.type === 'workflowResult');
     assert.equal(reply.action, action); assert.equal(reply.requestId, action); assert.equal(reply.turnId, 'turn'); assert.equal(reply.testId, 'execution');
-    assert.equal(reply.cwd, 'C:/project'); assert.equal(reply.sessionId, 'original'); assert.equal(reply.items[0].scope, 'test');
+    assert.equal(reply.cwd, PROJECT); assert.equal(reply.sessionId, 'original'); assert.equal(reply.items[0].scope, 'test');
     assert(!evidence.output.some(item => item.type === 'attach' || item.type === 'user' || item.type === 'sendResult'));
     assert.equal(evidence.calls.length, 0); assert.equal(evidence.panel.queue.items.length, 0); assert.equal(evidence.panel.queue.active, undefined);
   }
@@ -583,9 +588,9 @@ function fixture() {
         current = identity.current; await evidenceGate.promise;
         return { items: [{ kind: 'content', name: 'result', text: 'old evidence' }], text: 'old repair draft' };
       } };
-      const pending = lateEvidence.panel.onWebviewMessage({ type: 'workflowAction', action, turnId: 'turn', testId: 'execution', requestId: `${action}-${cause}`, cwd: 'C:/project', sessionId: 'original' });
+      const pending = lateEvidence.panel.onWebviewMessage({ type: 'workflowAction', action, turnId: 'turn', testId: 'execution', requestId: `${action}-${cause}`, cwd: PROJECT, sessionId: 'original' });
       await tick();
-      if (cause === 'cwd') lateEvidence.panel.workdir = () => 'C:/project/other';
+      if (cause === 'cwd') lateEvidence.panel.workdir = () => projectPath('other');
       else if (cause === 'session-object') lateEvidence.panel.session = { ...lateEvidence.session };
       else if (cause === 'session-id') lateEvidence.session.sessionId = 'other';
       else if (cause === 'view') lateEvidence.panel.view = { ...lateEvidence.panel.view };
@@ -603,18 +608,18 @@ function fixture() {
   }
   const invalidEvidence = fixture(); let inspected = 0;
   invalidEvidence.panel.tests = { preview: async () => { inspected++; throw new Error('该执行已被覆盖，请查看保留的执行。'); } };
-  await invalidEvidence.panel.onWebviewMessage({ type: 'workflowAction', action: 'previewTest', requestId: 'expired', turnId: 'turn', testId: 'old', cwd: 'C:/project', sessionId: 'original' });
+  await invalidEvidence.panel.onWebviewMessage({ type: 'workflowAction', action: 'previewTest', requestId: 'expired', turnId: 'turn', testId: 'old', cwd: PROJECT, sessionId: 'original' });
   assert.equal(inspected, 1); assert(invalidEvidence.output.some(item => item.type === 'workflowResult' && item.requestId === 'expired' && /覆盖/.test(item.error)));
   await invalidEvidence.panel.onWebviewMessage({ type: 'workflowAction', action: 'previewTest', turnId: 'turn', testId: 'old' });
   assert.equal(inspected, 1); assert(invalidEvidence.output.some(item => item.type === 'workflowResult' && /标识缺失/.test(item.error)));
-  for (const stale of [{ cwd: 'C:/project/old' }, { sessionId: 'departed' }]) {
+  for (const stale of [{ cwd: projectPath('old') }, { sessionId: 'departed' }]) {
     await invalidEvidence.panel.onWebviewMessage({ type: 'workflowAction', action: 'previewTest', requestId: 'wrong-scope', ...stale });
     assert.equal(inspected, 1);
   }
 
   const staleCommand = fixture(); let commandsRun = 0;
   staleCommand.panel.executeComposerCommand = async () => { commandsRun++; };
-  for (const stale of [{ cwd: 'C:/project/old' }, { sessionId: 'departed' }]) {
+  for (const stale of [{ cwd: projectPath('old') }, { sessionId: 'departed' }]) {
     await staleCommand.panel.onWebviewMessage({ type: 'composerCommand', id: 'command:model', requestId: 'old-command', ...stale });
   }
   assert.equal(commandsRun, 0);
@@ -623,14 +628,14 @@ function fixture() {
   try {
     const modelRace = fixture(); modelRace.session.configOptions = [{ id: 'model', options: [{ value: 'new-model' }] }];
     modelRace.panel.setModel = async () => { commandsRun++; };
-    const choosingModel = modelRace.panel.onWebviewMessage({ type: 'composerCommand', id: 'command:model', requestId: 'model-race', cwd: 'C:/project', sessionId: 'original' });
+    const choosingModel = modelRace.panel.onWebviewMessage({ type: 'composerCommand', id: 'command:model', requestId: 'model-race', cwd: PROJECT, sessionId: 'original' });
     await tick(); modelRace.panel.queueEpoch++; modelGate.resolve(); await choosingModel;
     assert.equal(commandsRun, 0); assert(!modelRace.output.some(item => item.type === 'composerSelected'));
     const currentCommand = fixture(); currentCommand.session.configOptions = [{ id: 'model', currentValue: 'new-model', options: [{ value: 'new-model' }] }];
     currentCommand.panel.setModel = async value => { assert.equal(value, 'new-model'); commandsRun++; };
-    await currentCommand.panel.onWebviewMessage({ type: 'composerCommand', id: 'command:model', requestId: 'current-command', cwd: 'C:/project', sessionId: 'original' });
+    await currentCommand.panel.onWebviewMessage({ type: 'composerCommand', id: 'command:model', requestId: 'current-command', cwd: PROJECT, sessionId: 'original' });
     assert.equal(commandsRun, 1);
-    assert(currentCommand.output.some(item => item.type === 'composerSelected' && item.command && item.cwd === 'C:/project' && item.sessionId === 'original'));
+    assert(currentCommand.output.some(item => item.type === 'composerSelected' && item.command && item.cwd === PROJECT && item.sessionId === 'original'));
     const activeCommand = fixture(); activeCommand.panel.queue.active = { id: 'preparing' };
     await activeCommand.panel.onWebviewMessage({ type: 'composerCommand', id: 'command:model', requestId: 'active-command' });
     assert(activeCommand.output.some(item => item.type === 'composerSelected' && /当前任务/.test(item.error)));
