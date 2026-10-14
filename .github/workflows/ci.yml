@@ -47,6 +47,16 @@ jobs:
       - name: 兼容维护契约
         run: pnpm compat:contracts
 
+      - name: 准备 macOS 无头浏览器
+        if: runner.os == 'macOS'
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          npm exec --yes --package=@puppeteer/browsers@3.2.4 -- browsers install chrome-headless-shell@stable --path "$RUNNER_TEMP/dsh-panel-browser" --format '{{path}}' > "$RUNNER_TEMP/dsh-panel-browser.txt"
+          browser_path="$(tail -n 1 "$RUNNER_TEMP/dsh-panel-browser.txt")"
+          test -x "$browser_path"
+          printf 'DSH_PANEL_CHROME=%s\n' "$browser_path" >> "$GITHUB_ENV"
+
       - name: 浏览器界面验收
         timeout-minutes: 5
         run: pnpm ui
