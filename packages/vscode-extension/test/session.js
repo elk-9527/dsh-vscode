@@ -13,8 +13,10 @@
  */
 
 const path = require('node:path');
+const net = require('node:net');
 const { EventEmitter } = require('node:events');
 const { DshSession } = require(path.join(__dirname, '..', 'src', 'dsh', 'session.js'));
+const { DoorClient } = require('../src/door/client');
 
 let passed = 0;
 const failures = [];
@@ -76,6 +78,40 @@ function modelOption(currentValue) {
 
 const A = '["opencode-go","deepseek-v4.1-flash"]';
 const B = '["opencode-go","deepseek-v4.1"]';
+
+/** 用内存 socket 驱动真实客户端的逐行帧解析器。 */
+async function withMemoryDoor(run) {
+  const socket = new EventEmitter();
+  const requests = [];
+  socket.writable = true;
+  socket.setNoDelay = () => {};
+  const receive = (...frames) => socket.emit('data', Buffer.from(frames.map(frame => JSON.stringify(frame)).join('\n') + '\n'));
+  socket.write = (line) => {
+    const frame = JSON.parse(line);
+    requests.push(frame);
+    if (frame.method === 'initialize') queueMicrotask(() => receive({ jsonrpc: '2.0', id: frame.id, result: { protocolVersion: 1 } }));
+    return true;
+  };
+  socket.destroy = () => { socket.writable = false; socket.emit('close'); };
+  const connect = net.connect;
+  const client = new DoorClient({ host: '127.0.0.1', port: 1, log: () => {} });
+  try {
+    net.connect = () => { queueMicrotask(() => socket.emit('connect')); return socket; };
+    const connected = client.connect();
+    net.connect = connect;
+    await connected;
+    await run({ client, requests, receive });
+  } finally {
+    net.connect = connect;
+    client.close();
+  }
+}
+
+const configFrame = (sessionId, configOptions) => ({
+  jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: { sessionUpdate: 'config_option_update', configOptions } },
+});
+const configState = (...values) => [{ ...modelOption(values[0]), options: values.map(value => ({ value, name: value })) }];
+const configValues = options => options[0]?.options.map(option => option.value) || [];
 
 async function main() {
   console.log('DSH Panel · 会话层边界（假客户端）');
@@ -426,6 +462,145 @@ async function main() {
       && session.configOptions === beforeDispose && disposedConfigs === 0);
     session.dispose();
   }
+
+  section('9. 同一数据块的回复与配置通知按帧顺序生效');
+  await withMemoryDoor(async ({ client, requests, receive }) => {
+    const session = new DshSession({ client });
+    const configs = [];
+    const chatEvents = [];
+    session.on('config', payload => configs.push(configValues(payload.configOptions)));
+    for (const name of ['assistant', 'text', 'thinking', 'tool', 'done', 'busy']) session.on(name, () => chatEvents.push(name));
+    const pending = session.start({ cwd: path.resolve(__dirname, 'fixtures', 'session-config') });
+    receive(
+      configFrame('new-session', configState(B)),
+      { jsonrpc: '2.0', id: requests.at(-1).id, result: { sessionId: 'new-session', configOptions: configState(A) } },
+      configFrame('other-session', configState(B)),
+      configFrame('new-session', configState(A, B)),
+      configFrame('new-session', {}),
+      configFrame('new-session', configState(B)),
+      configFrame('new-session', null),
+    );
+    await pending;
+    check('真实解析器同块建立会话后保留最后有效目录', JSON.stringify(configValues(session.configOptions)) === JSON.stringify([B]));
+    check('建立回复与随后有效通知按实际帧顺序广播', JSON.stringify(configs) === JSON.stringify([[A], [A, B], [B]]));
+    check('同块其他会话及非数组负载不产生额外配置事件', configs.length === 3);
+    check('同块配置交接不创建聊天回合或助手消息', chatEvents.length === 0 && session.messages.size === 0
+      && !session.busy && session.currentAbort === null);
+    session.dispose();
+  });
+  for (const target of ['s-1', 'history-session']) {
+    await withMemoryDoor(async ({ client, requests, receive }) => {
+      const session = new DshSession({ client });
+      const started = session.start({ cwd: path.resolve(__dirname, 'fixtures', 'session-config') });
+      receive({ jsonrpc: '2.0', id: requests.at(-1).id, result: { sessionId: 's-1', configOptions: configState(A) } });
+      await started;
+      session.messages.set('old', { id: 'old', role: 'assistant', text: 'old', thinking: '', tools: [] });
+      session.tools.set('old', {}); session.usage = { used: 1, size: 10 };
+      const configs = [];
+      session.on('config', payload => configs.push(configValues(payload.configOptions)));
+      const pending = session.resume(target, path.resolve(__dirname, 'fixtures', 'session-config'));
+      receive(
+        configFrame(target, configState(B)),
+        { jsonrpc: '2.0', id: requests.at(-1).id, result: { configOptions: configState(A) } },
+        configFrame('other-session', configState(B)),
+        configFrame(target, configState(A, B)),
+      );
+      await pending;
+      const expected = target === 's-1' ? [[B], [A], [A, B]] : [[A], [A, B]];
+      check(`恢复${target === 's-1' ? '同一' : '不同'}会话保留同块后续目录`, session.sessionId === target
+        && JSON.stringify(configValues(session.configOptions)) === JSON.stringify([A, B]));
+      check(`恢复${target === 's-1' ? '同一' : '不同'}会话遵循回复前后帧顺序`, JSON.stringify(configs) === JSON.stringify(expected));
+      check('恢复配置交接仍清除旧转录、工具和用量', session.messages.size === 0 && session.tools.size === 0 && session.usage === null);
+      session.dispose();
+    });
+  }
+  for (const replyFirst of [false, true]) {
+    await withMemoryDoor(async ({ client, requests, receive }) => {
+      const session = new DshSession({ client });
+      const started = session.start({ cwd: path.resolve(__dirname, 'fixtures', 'session-config') });
+      receive({ jsonrpc: '2.0', id: requests.at(-1).id, result: { sessionId: 's-1', configOptions: configState(A, B) } });
+      await started;
+      const configs = [];
+      session.on('config', payload => configs.push(payload.configOptions[0].currentValue));
+      const pending = session.setModel(B);
+      const reply = { jsonrpc: '2.0', id: requests.at(-1).id, result: { configOptions: configState(B) } };
+      const notification = configFrame('s-1', configState(A));
+      receive(...(replyFirst ? [reply, notification] : [notification, reply]));
+      await pending;
+      const expected = replyFirst ? [B, A] : [A, B];
+      check(`${replyFirst ? '回复后' : '回复前'}设置通知保持最新帧的权威值`, session.configOptions[0].currentValue === expected.at(-1));
+      check('设置回复与通知的 config 事件不被 Promise 续体重排', JSON.stringify(configs) === JSON.stringify(expected));
+      session.dispose();
+    });
+  }
+  for (const restore of [false, true]) {
+    await withMemoryDoor(async ({ client, requests, receive }) => {
+      const session = new DshSession({ client });
+      if (restore) {
+        const started = session.start({ cwd: path.resolve(__dirname, 'fixtures', 'session-config') });
+        receive({ jsonrpc: '2.0', id: requests.at(-1).id, result: { sessionId: 's-1', configOptions: configState(A) } });
+        await started;
+      }
+      const before = session.configOptions;
+      const beforeId = session.sessionId;
+      const pending = restore
+        ? session.resume('history-session', path.resolve(__dirname, 'fixtures', 'session-config'))
+        : session.start({ cwd: path.resolve(__dirname, 'fixtures', 'session-config') });
+      session.dispose();
+      let error;
+      const completed = pending.catch(caught => { error = caught; });
+      receive(
+        { jsonrpc: '2.0', id: requests.at(-1).id, result: { sessionId: 'new-session', configOptions: configState(B) } },
+        configFrame(restore ? 'history-session' : 'new-session', configState(A, B)),
+      );
+      await completed;
+      check(`销毁后的${restore ? '恢复' : '建立'}回复与同块通知不覆写配置`, session.configOptions === before && session.sessionId === beforeId);
+      check('已销毁会话的异步建立请求明确失败', /已销毁/.test(error?.message));
+    });
+  }
+
+  await withMemoryDoor(async ({ client, requests, receive }) => {
+    const session = new DshSession({ client });
+    const started = session.start({ cwd: path.resolve(__dirname, 'fixtures', 'session-config') });
+    receive({ jsonrpc: '2.0', id: requests.at(-1).id, result: { sessionId: 's-1', configOptions: configState(A, B) } });
+    await started;
+    const configs = [];
+    session.on('config', payload => configs.push(payload));
+    let error;
+    const setting = session.setModel(B).catch(caught => { error = caught; });
+    const settingId = requests.at(-1).id;
+    const restoring = session.resume('history-session', path.resolve(__dirname, 'fixtures', 'session-config'));
+    receive(
+      { jsonrpc: '2.0', id: requests.at(-1).id, result: { configOptions: configState(A) } },
+      { jsonrpc: '2.0', id: settingId, result: { configOptions: configState(B) } },
+      configFrame('s-1', configState(B)),
+    );
+    await Promise.all([setting, restoring]);
+    check('旧会话的设置回复不能覆盖已恢复会话', session.sessionId === 'history-session'
+      && session.configOptions[0].currentValue === A && configs.length === 1);
+    check('旧会话设置回读明确报告会话已更换', /会话已更换/.test(error?.message));
+    session.dispose();
+  });
+  await withMemoryDoor(async ({ client, requests, receive }) => {
+    const session = new DshSession({ client });
+    const started = session.start({ cwd: path.resolve(__dirname, 'fixtures', 'session-config') });
+    receive({ jsonrpc: '2.0', id: requests.at(-1).id, result: { sessionId: 's-1', configOptions: configState(A, B) } });
+    await started;
+    const before = session.configOptions;
+    let error;
+    const setting = session.setModel(B).catch(caught => { error = caught; });
+    session.dispose();
+    let configs = 0;
+    session.on('config', () => { configs += 1; });
+    receive(
+      { jsonrpc: '2.0', id: requests.at(-1).id, result: { configOptions: configState(B) } },
+      configFrame('s-1', configState(B)),
+    );
+    await setting;
+    check('销毁后的设置回复与同块通知不覆盖或广播配置', session.configOptions === before && configs === 0);
+    check('已销毁会话的设置回读明确失败', /已销毁/.test(error?.message));
+    session.dispose();
+  });
 
   console.log('\n════════════════════════════════════════════════════════');
   if (failures.length === 0) {

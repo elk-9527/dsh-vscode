@@ -204,6 +204,7 @@ class DoorClient extends EventEmitter {
    * @param {object} [options]
    * @param {AbortSignal} [options.signal] 中止时发送 `$/cancel_request`；
    *   注意**不**使该 promise 进入 rejected 状态 —— 内核会返回正常的 `stopReason: cancelled`。
+   * @param {(result: any) => void} [options.onResult] 在下一帧之前同步消费成功回复；异常仅拒绝本请求。
    * @returns {Promise<any>}
    */
   request(
@@ -214,6 +215,7 @@ class DoorClient extends EventEmitter {
       timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
       abortTimeoutMs = CANCEL_GRACE_MS,
       timeoutPhase = 'ACP 请求',
+      onResult,
     } = {},
   ) {
     const id = this.#nextId++;
@@ -243,6 +245,7 @@ class DoorClient extends EventEmitter {
       const entry = {
         resolve,
         reject,
+        onResult,
         cleanup: () => {
           clearTimeout(timeoutTimer);
           clearTimeout(abortTimer);
@@ -314,13 +317,14 @@ class DoorClient extends EventEmitter {
    *   （`agent-preset/locked`，实测），因此面板中更换预设的语义是「下一段新对话使用哪一个」。
    * @returns {Promise<object>} 内核的回复（`sessionId`、`configOptions`），
    *   该插件还会在 `_meta['dsh-door']` 中附加可用预设清单与实际使用的那一项。
+   * @param {(result: object) => void} [onResult] 成功回复的同步消费者，不写入协议参数。
    */
-  newSession(cwd, { preset } = {}) {
+  newSession(cwd, { preset } = {}, onResult) {
     const params = { cwd, mcpServers: [] };
     if (typeof preset === 'string' && preset) {
       params._meta = { [PRESET_META_KEY]: { preset } };
     }
-    return this.request('session/new', params, { timeoutMs: SESSION_REQUEST_TIMEOUT_MS });
+    return this.request('session/new', params, { timeoutMs: SESSION_REQUEST_TIMEOUT_MS, onResult });
   }
 
   /**
@@ -335,13 +339,14 @@ class DoorClient extends EventEmitter {
    *   该插件会按此处指定的预设（或它自身记录的预设）补挂。
    * @returns {Promise<object>} 内核的回复；该插件同样会在 `_meta['dsh-door']`
    *   中附加可用预设清单与当前使用的那一项。
+   * @param {(result: object) => void} [onResult] 成功回复的同步消费者，不写入协议参数。
    */
-  resumeSession(sessionId, cwd, { preset } = {}) {
+  resumeSession(sessionId, cwd, { preset } = {}, onResult) {
     const params = { sessionId, cwd, mcpServers: [] };
     if (typeof preset === 'string' && preset) {
       params._meta = { [PRESET_META_KEY]: { preset } };
     }
-    return this.request('session/resume', params, { timeoutMs: SESSION_REQUEST_TIMEOUT_MS });
+    return this.request('session/resume', params, { timeoutMs: SESSION_REQUEST_TIMEOUT_MS, onResult });
   }
 
   /**
@@ -448,9 +453,9 @@ class DoorClient extends EventEmitter {
     );
   }
 
-  /** 按会话修改内核配置项（例如模型）。 */
-  setConfigOption(sessionId, configId, value) {
-    return this.request('session/set_config_option', { sessionId, configId, value });
+  /** 按会话修改内核配置项（例如模型）；onResult 在后续帧之前同步消费回读。 */
+  setConfigOption(sessionId, configId, value, onResult) {
+    return this.request('session/set_config_option', { sessionId, configId, value }, { onResult });
   }
 
   // ── 内部 ────────────────────────────────────────────────────────
@@ -510,7 +515,12 @@ class DoorClient extends EventEmitter {
           ),
         );
       } else {
-        entry.resolve(message.result);
+        try {
+          entry.onResult?.(message.result);
+          entry.resolve(message.result);
+        } catch (error) {
+          entry.reject(error);
+        }
       }
       return;
     }

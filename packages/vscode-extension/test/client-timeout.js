@@ -230,6 +230,43 @@ async function main() {
     } finally { client.close(); }
   });
 
+  section('8. 结果观察按传输顺序同步完成且不破坏请求隔离');
+  await withServer((socket, frame) => {
+    if (frame.method === 'initialize') { reply(socket, frame.id, { protocolVersion: 1 }); return; }
+    if (frame.method === 'test/ordered-result') {
+      socket.write([
+        { jsonrpc: '2.0', id: frame.id, result: { value: 'reply' } },
+        { jsonrpc: '2.0', method: 'session/update', params: {
+          sessionId: 'fixture', update: { sessionUpdate: 'config_option_update', configOptions: [] },
+        } },
+      ].map(value => JSON.stringify(value)).join('\n') + '\n');
+    } else if (frame.method === 'test/rpc-error') {
+      socket.write(JSON.stringify({ jsonrpc: '2.0', id: frame.id, error: { code: -32602, message: 'fixture error' } }) + '\n');
+    } else reply(socket, frame.id, { ok: true });
+  }, async port => {
+    const client = new DoorClient({ host: '127.0.0.1', port });
+    try {
+      await client.connect();
+      const order = [];
+      let received;
+      const notification = new Promise(resolve => { received = resolve; });
+      client.once('update', () => { order.push('notification'); received(); });
+      const result = await client.request('test/ordered-result', {}, { onResult: () => order.push('reply') });
+      await notification;
+      check('结果观察先于后续配置通知而不延迟通知', JSON.stringify(order) === JSON.stringify(['reply', 'notification']), JSON.stringify(order));
+      check('同步结果观察保持原始 Promise 回复', result.value === 'reply');
+      let observerError;
+      try {
+        await client.request('test/observer-fails', {}, { onResult: () => { throw new Error('fixture observer rejected'); } });
+      } catch (error) { observerError = error; }
+      check('结果消费者错误仅拒绝对应请求', observerError?.message === 'fixture observer rejected', observerError?.message);
+      check('结果消费者失败后连接和后续请求仍可用', client.isConnected && (await client.request('test/after-observer', {})).ok);
+      let observed = 0;
+      const rpcError = await client.request('test/rpc-error', {}, { onResult: () => { observed += 1; } }).catch(error => error);
+      check('内核错误回复不调用成功结果观察', rpcError.code === -32602 && observed === 0);
+    } finally { client.close(); }
+  });
+
   console.log(`\n${'═'.repeat(56)}`);
   if (failures.length === 0) console.log(`✅ 全部通过：${passed} 项检查`);
   else {

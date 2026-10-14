@@ -86,31 +86,38 @@ class DshSession extends EventEmitter {
    */
   async start({ cwd, provider, model, preset }) {
     if (this.busy) throw new Error('请等当前回合结束后再更换会话');
-    const result = await this.client.newSession(cwd, { preset });
-    if (!result || !result.sessionId) {
-      throw new Error(`session/new 未返回 sessionId：${JSON.stringify(result)}`);
-    }
-    this.resetState();
-    this.sessionId = result.sessionId;
-    this.cwd = cwd;
-    this.configOptions = Array.isArray(result.configOptions) ? result.configOptions : [];
-    this.emit('session', { sessionId: this.sessionId });
-    this.emit('config', { configOptions: this.configOptions });
+    let consumed = false;
+    // 先登记回复，再接收同一数据块中的后续通知；await 续体不重复初始化。
+    const consume = (result) => {
+      if (this.#disposed) throw new Error('会话已销毁');
+      if (!result || !result.sessionId) {
+        throw new Error(`session/new 未返回 sessionId：${JSON.stringify(result)}`);
+      }
+      consumed = true;
+      this.resetState();
+      this.sessionId = result.sessionId;
+      this.cwd = cwd;
+      this.configOptions = Array.isArray(result.configOptions) ? result.configOptions : [];
+      this.emit('session', { sessionId: this.sessionId });
+      this.emit('config', { configOptions: this.configOptions });
 
-    // 该插件会在回复中附加「可用预设清单与本次使用的预设」（ACP 的 _meta 扩展点）。
-    // 内核本身不提供该信息 —— 预设不是 ACP 的概念，而是由该插件替内核接出的。
-    const doorMeta = readDoorMeta(result);
-    if (doorMeta) {
-      this.doorMeta = doorMeta;
-      this.emit('presets', doorMeta);
-    } else {
-      this.doorMeta = undefined;
-    }
+      // 该插件会在回复中附加「可用预设清单与本次使用的预设」（ACP 的 _meta 扩展点）。
+      // 内核本身不提供该信息 —— 预设不是 ACP 的概念，而是由该插件替内核接出的。
+      const doorMeta = readDoorMeta(result);
+      if (doorMeta) {
+        this.doorMeta = doorMeta;
+        this.emit('presets', doorMeta);
+      } else {
+        this.doorMeta = undefined;
+      }
 
-    this.log(
-      'info',
-      `已建会话 ${this.sessionId}（cwd=${cwd}${doorMeta?.current ? `，预设=${doorMeta.current}` : ''}）`,
-    );
+      this.log(
+        'info',
+        `已建会话 ${this.sessionId}（cwd=${cwd}${doorMeta?.current ? `，预设=${doorMeta.current}` : ''}）`,
+      );
+    };
+    const result = await this.client.newSession(cwd, { preset }, consume);
+    if (!consumed) consume(result);
 
     if (provider && model) {
       await this._applyModel(provider, model);
@@ -130,21 +137,27 @@ class DshSession extends EventEmitter {
    */
   async resume(sessionId, cwd, { preset } = {}) {
     if (this.busy) throw new Error('请等当前回合结束后再更换会话');
-    const result = await this.client.resumeSession(sessionId, cwd, { preset });
-    this.resetState();
-    this.sessionId = sessionId;
-    this.cwd = cwd;
-    this.configOptions = Array.isArray(result && result.configOptions) ? result.configOptions : [];
-    // 该插件在 resume 的回复中同样会附加预设清单，处理方式与 session/new 一致，
-    // 以避免重连后面板上的「模式」下拉框为空。
-    const doorMeta = readDoorMeta(result);
-    if (doorMeta) {
-      this.doorMeta = doorMeta;
-      this.emit('presets', doorMeta);
-    }
-    this.emit('session', { sessionId });
-    this.emit('config', { configOptions: this.configOptions });
-    this.log('info', `已恢复会话 ${sessionId}`);
+    let consumed = false;
+    const consume = (result) => {
+      if (this.#disposed) throw new Error('会话已销毁');
+      consumed = true;
+      this.resetState();
+      this.sessionId = sessionId;
+      this.cwd = cwd;
+      this.configOptions = Array.isArray(result && result.configOptions) ? result.configOptions : [];
+      // 该插件在 resume 的回复中同样会附加预设清单，处理方式与 session/new 一致，
+      // 以避免重连后面板上的「模式」下拉框为空。
+      const doorMeta = readDoorMeta(result);
+      if (doorMeta) {
+        this.doorMeta = doorMeta;
+        this.emit('presets', doorMeta);
+      }
+      this.emit('session', { sessionId });
+      this.emit('config', { configOptions: this.configOptions });
+      this.log('info', `已恢复会话 ${sessionId}`);
+    };
+    const result = await this.client.resumeSession(sessionId, cwd, { preset }, consume);
+    if (!consumed) consume(result);
     return sessionId;
   }
 
@@ -223,22 +236,30 @@ class DshSession extends EventEmitter {
     if (this.busy) throw new Error('请等当前回合结束后再调整模型配置');
     const option = this.configOptions.find(item => item?.id === id);
     if (!option || !flattenChoices(option).some(choice => choice.value === value)) throw new Error('该配置值不在内核提供的清单中');
-    const reply = await this.client.setConfigOption(this.sessionId, id, value);
+    const sessionId = this.sessionId;
+    let consumed = false;
     // 内核（dsh-acp 的 setSessionConfigOption）明确返回
     // `{configOptions: [...]}`，这是权威值 —— 内核可能将请求归一化为其他值，
     // 也可能同时修改其他项。没有权威回读时保留最后确认值，明确报告无法确认。
-    const options = reply && Array.isArray(reply.configOptions) ? reply.configOptions : null;
-    if (options) {
-      this.configOptions = options;
-      const current = this.configOptions.find(option => option?.id === id)?.currentValue;
-      if (current && current !== value) {
-        this.log('warn', `${id} 请求值为 ${value}，内核确定为 ${current}（以内核为准）`);
+    const consume = (reply) => {
+      if (this.#disposed) throw new Error('会话已销毁');
+      if (this.sessionId !== sessionId) throw new Error('会话已更换，无法确认原会话配置');
+      consumed = true;
+      const options = reply && Array.isArray(reply.configOptions) ? reply.configOptions : null;
+      if (options) {
+        this.configOptions = options;
+        const current = this.configOptions.find(option => option?.id === id)?.currentValue;
+        if (current && current !== value) {
+          this.log('warn', `${id} 请求值为 ${value}，内核确定为 ${current}（以内核为准）`);
+        }
+      } else {
+        this.emit('config', { configOptions: this.configOptions });
+        throw new Error('内核未返回设置回读，无法确认已生效；仍显示最后确认值。');
       }
-    } else {
       this.emit('config', { configOptions: this.configOptions });
-      throw new Error('内核未返回设置回读，无法确认已生效；仍显示最后确认值。');
-    }
-    this.emit('config', { configOptions: this.configOptions });
+    };
+    const reply = await this.client.setConfigOption(sessionId, id, value, consume);
+    if (!consumed) consume(reply);
     this.log('info', `会话配置 ${id} 已更新`);
   }
 
