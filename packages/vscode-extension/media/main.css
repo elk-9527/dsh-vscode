@@ -291,6 +291,7 @@ body {
 .access-btn {
   flex: 1 1 auto;
   min-width: 0;
+  min-height: 20px;
   color: var(--vscode-dropdown-foreground);
   background: var(--vscode-dropdown-background);
   border: 1px solid var(--vscode-dropdown-border, transparent);

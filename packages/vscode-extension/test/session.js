@@ -304,6 +304,129 @@ async function main() {
     session.dispose();
   }
 
+  section('8. 异步模型目录更新');
+  {
+    const delayedModel = '["delayed-provider","available-model"]';
+    const initial = [{ ...modelOption(A), options: [{ value: A, name: '默认模型' }] }];
+    const refreshed = [{
+      ...modelOption(A),
+      options: [
+        { group: 'default', options: [{ value: A, name: '默认模型' }] },
+        { group: 'delayed-provider', options: [{ value: delayedModel, name: '延迟就绪的模型' }] },
+      ],
+    }, {
+      id: 'reasoning_effort', currentValue: 'high', options: [{ value: 'high', name: 'High' }],
+    }];
+    const client = fakeClient({
+      newSessionReply: { sessionId: 's-1', configOptions: initial },
+      setConfigReply: (_sessionId, _configId, value) => ({
+        configOptions: [{ ...refreshed[0], currentValue: value }, refreshed[1]],
+      }),
+    });
+    const session = new DshSession({ client });
+    await session.start({ cwd: path.resolve(__dirname, 'fixtures', 'session-config') });
+    check('冷启动首次目录只含已就绪的默认模型', session.configOptions[0].options.length === 1);
+    const configs = [];
+    const chatEvents = [];
+    session.on('config', (payload) => configs.push(payload));
+    for (const name of ['user', 'assistant', 'text', 'thinking', 'tool', 'done', 'busy', 'usage', 'commands']) {
+      session.on(name, () => chatEvents.push(name));
+    }
+    // 提供器在建会话后的下一轮事件循环才发布完整目录。
+    await new Promise((resolve) => setImmediate(() => {
+      client.emit('update', 's-1', { sessionUpdate: 'config_option_update', configOptions: refreshed });
+      resolve();
+    }));
+    check('延迟就绪后原会话收到完整模型和推理配置',
+      JSON.stringify(session.configOptions) === JSON.stringify(refreshed));
+    check('完整目录通过 config 事件传给界面一次', configs.length === 1
+      && JSON.stringify(configs[0].configOptions) === JSON.stringify(refreshed));
+    check('空闲目录更新不创建助手消息或改变回合状态', chatEvents.length === 0
+      && session.messages.size === 0 && session.tools.size === 0 && session.usage === null
+      && session.busy === false && session.currentAbort === null);
+    check('目录更新无需新建会话、调用模型或主动切换配置',
+      client.calls.newSession.length === 1 && client.calls.prompt.length === 0 && client.calls.setConfigOption.length === 0);
+    let selectionError;
+    try { await session.setModel(delayedModel); } catch (error) { selectionError = error; }
+    check('原会话可以选择延迟出现的模型', !selectionError
+      && client.calls.setConfigOption.length === 1
+      && client.calls.setConfigOption[0].sessionId === 's-1'
+      && client.calls.setConfigOption[0].value === delayedModel,
+      selectionError && selectionError.message);
+    session.dispose();
+  }
+  {
+    let finishPrompt;
+    const pendingReply = new Promise((resolve) => { finishPrompt = resolve; });
+    const client = fakeClient({
+      newSessionReply: { sessionId: 's-1', configOptions: [modelOption(A)] },
+      promptReply: () => pendingReply,
+    });
+    const session = new DshSession({ client });
+    await session.start({ cwd: path.resolve(__dirname, 'fixtures', 'session-config') });
+    const pendingTurn = session.send('read fixture');
+    const controller = session.currentAbort;
+    const entry = [...session.messages.values()][0];
+    const before = JSON.stringify(entry);
+    const configs = [];
+    const chatEvents = [];
+    session.on('config', (payload) => configs.push(payload));
+    for (const name of ['assistant', 'text', 'thinking', 'tool', 'done', 'busy', 'usage']) {
+      session.on(name, () => chatEvents.push(name));
+    }
+    const refreshed = [modelOption(B)];
+    client.emit('update', 's-1', {
+      sessionUpdate: 'config_option_update', configOptions: refreshed,
+      content: { type: 'text', text: 'configuration metadata' },
+    });
+    check('执行回合时同样接收权威配置并广播', configs.length === 1
+      && JSON.stringify(configs[0].configOptions) === JSON.stringify(refreshed)
+      && session.configOptions[0].currentValue === B);
+    check('配置通知不追加助手文本或发送聊天事件', chatEvents.length === 0
+      && session.messages.size === 1 && JSON.stringify(entry) === before);
+    check('配置通知保持正在执行的回合和中断控制器', session.busy
+      && session.currentAbort === controller && !controller.signal.aborted);
+    finishPrompt({ stopReason: 'end_turn' });
+    await pendingTurn;
+    check('目录更新后原回合仍正常完成一次', entry.status === 'done'
+      && !session.busy && session.currentAbort === null
+      && JSON.stringify(chatEvents) === JSON.stringify(['done', 'busy']));
+    session.dispose();
+  }
+  {
+    const initial = [modelOption(A)];
+    const client = fakeClient({ newSessionReply: { sessionId: 's-1', configOptions: initial } });
+    const session = new DshSession({ client });
+    const beforeStart = session.configOptions;
+    client.emit('update', null, { sessionUpdate: 'config_option_update', configOptions: [modelOption(B)] });
+    check('未建立会话时不接受目录通知', session.configOptions === beforeStart);
+    await session.start({ cwd: path.resolve(__dirname, 'fixtures', 'session-config') });
+    const configs = [];
+    session.on('config', (payload) => configs.push(payload));
+    client.emit('update', 's-other', { sessionUpdate: 'config_option_update', configOptions: [modelOption(B)] });
+    check('其他会话目录不能覆盖或广播当前配置', session.configOptions === initial && configs.length === 0);
+    for (const configOptions of [undefined, null, {}, { 0: modelOption(B), length: 1 }, 'invalid', 42]) {
+      client.emit('update', 's-1', { sessionUpdate: 'config_option_update', configOptions });
+    }
+    check('非数组目录负载保留当前配置且不广播', session.configOptions === initial && configs.length === 0);
+    client.emit('update', 's-1', { sessionUpdate: 'config_option_update', configOptions: [] });
+    check('合法空目录清除过期配置并广播', session.configOptions.length === 0
+      && configs.length === 1 && configs[0].configOptions.length === 0);
+    const beforeDispose = session.configOptions;
+    let disposedConfigs = 0;
+    // EventEmitter 已取得的监听器快照可能在移除订阅后继续调用。
+    client.prependOnceListener('update', () => {
+      session.dispose();
+      session.on('config', () => { disposedConfigs += 1; });
+    });
+    client.emit('update', 's-1', { sessionUpdate: 'config_option_update', configOptions: [modelOption(B)] });
+    check('分发途中销毁会话也不会写入配置或广播', session.configOptions === beforeDispose && disposedConfigs === 0);
+    client.emit('update', 's-1', { sessionUpdate: 'config_option_update', configOptions: [modelOption(B)] });
+    check('销毁后解除订阅且后续通知无效', client.listenerCount('update') === 0
+      && session.configOptions === beforeDispose && disposedConfigs === 0);
+    session.dispose();
+  }
+
   console.log('\n════════════════════════════════════════════════════════');
   if (failures.length === 0) {
     console.log(`✅ 全部通过：${passed} 项检查`);

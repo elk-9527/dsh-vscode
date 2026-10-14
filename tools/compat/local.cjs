@@ -110,7 +110,14 @@ async function local(options) {
     const cwd = path.join(folder, 'workspace'); fs.mkdirSync(cwd);
     session = new DshSession({ client }); await session.start({ cwd, preset: 'standard' });
     const flat = (items) => (items || []).flatMap((item) => item.options ? flat(item.options) : [item]);
-    const catalog = flat(session.configOptions.find((item) => item.id === 'model')?.options).map((item) => item.value).sort();
+    const readCatalog = () => flat(session.configOptions.find((item) => item.id === 'model')?.options).map((item) => item.value).sort();
+    const initialCatalog = readCatalog();
+    if (options.mode === 'self') {
+      const desktop = report.checks.find((item) => item.name === 'desktop-attach');
+      assert(desktop, '需要先保存 Desktop 接入快照');
+      await waitFor(async () => require('node:util').isDeepStrictEqual(readCatalog(), desktop.evidence.catalog), 60000);
+    }
+    const catalog = readCatalog();
     const permissions = await client.permissionGet(session.sessionId);
     const snapshot = { model: status.model, catalog, permissions: permissions.options.map((item) => item.value).sort(), runtime: status.runtime };
     const name = options.mode === 'attach' ? 'desktop-attach' : options.mode === 'probe' ? 'kernel-self-start' : 'desktop-closed-self-start';
@@ -123,6 +130,8 @@ async function local(options) {
         assert.deepEqual(snapshot.catalog, desktop.evidence.catalog, '完整模型目录没有继承');
         assert.deepEqual(snapshot.permissions, desktop.evidence.permissions, '权限清单没有继承');
         check(report, 'configuration-inheritance', { modelCount: catalog.length, permissionValues: snapshot.permissions });
+        check(report, 'model-catalog-ready', { initialModelCount: initialCatalog.length, finalModelCount: catalog.length,
+          updatedAfterStartup: !require('node:util').isDeepStrictEqual(initialCatalog, catalog) });
       }
       const marker = `COMPAT_LOCAL_${crypto.randomBytes(4).toString('hex')}`;
       const sample = path.join(cwd, 'compat-real-model.txt'); fs.writeFileSync(sample, marker);

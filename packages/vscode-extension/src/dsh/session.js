@@ -30,6 +30,7 @@ let nextId = 1;
 class DshSession extends EventEmitter {
   /** @type {AbortController|null} 当前回合的中断控制器。 */
   #current = null;
+  #disposed = false;
 
   /**
    * @param {object} options
@@ -42,7 +43,7 @@ class DshSession extends EventEmitter {
     this.log = log || (() => {});
     /** @type {string|null} */
     this.sessionId = null;
-    /** @type {any[]} session/new 返回的配置项（模型清单位于此处）。 */
+    /** @type {any[]} 内核确认的会话配置项（模型清单位于此处）。 */
     this.configOptions = [];
     /**
      * 该插件附加的预设信息：`{presets, current, requested, fallback}`。
@@ -248,6 +249,7 @@ class DshSession extends EventEmitter {
   }
 
   dispose() {
+    this.#disposed = true;
     this.client.off('update', this._onUpdate);
     this.client.off('close', this._onClose);
     this.removeAllListeners();
@@ -277,8 +279,16 @@ class DshSession extends EventEmitter {
   }
 
   _handleUpdate(sessionId, update) {
-    if (!update || sessionId !== this.sessionId) return;
+    if (this.#disposed || !this.sessionId || !update || sessionId !== this.sessionId) return;
     const kind = update.sessionUpdate;
+
+    // 提供器可在建会话后就绪；配置通知不依赖聊天回合。
+    if (kind === 'config_option_update') {
+      if (!Array.isArray(update.configOptions)) return;
+      this.configOptions = update.configOptions;
+      this.emit('config', { configOptions: this.configOptions });
+      return;
+    }
 
     if (kind === 'agent_message_chunk' || kind === 'user_message_chunk') {
       const delta = textOf(update.content);
