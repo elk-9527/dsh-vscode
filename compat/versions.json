@@ -16,8 +16,8 @@
       "door": "0.5.1",
       "panel": "0.15.0",
       "acp": "0.1.5-rc.3",
-      "testedAt": "2026-10-13T17:16:42.109Z",
-      "fingerprint": "250c5e987aa686f3075efd5852d55fccba122ed396f8038462f7c03ef5ceff44"
+      "testedAt": "2026-10-14T04:10:09.797Z",
+      "fingerprint": "dc84d5c58922ba064bcd6c1ea33683bd3782f3ccc41c42ae5ea5e497b5c78e33"
     },
     {
       "dsh": "0.2.0-rc.1",
@@ -29,8 +29,8 @@
       "door": "0.5.1",
       "panel": "0.15.0",
       "acp": "0.2.0-rc.1",
-      "testedAt": "2026-10-13T17:16:57.557Z",
-      "fingerprint": "250c5e987aa686f3075efd5852d55fccba122ed396f8038462f7c03ef5ceff44"
+      "testedAt": "2026-10-14T04:10:27.630Z",
+      "fingerprint": "dc84d5c58922ba064bcd6c1ea33683bd3782f3ccc41c42ae5ea5e497b5c78e33"
     },
     {
       "dsh": "0.2.0-rc.2",
@@ -42,8 +42,8 @@
       "door": "0.5.1",
       "panel": "0.15.0",
       "acp": "0.2.0-rc.2",
-      "testedAt": "2026-10-13T17:17:13.360Z",
-      "fingerprint": "250c5e987aa686f3075efd5852d55fccba122ed396f8038462f7c03ef5ceff44"
+      "testedAt": "2026-10-14T04:10:44.086Z",
+      "fingerprint": "dc84d5c58922ba064bcd6c1ea33683bd3782f3ccc41c42ae5ea5e497b5c78e33"
     },
     {
       "dsh": "0.2.0-rc.2",
@@ -55,8 +55,8 @@
       "door": "0.5.1",
       "panel": "0.15.0",
       "acp": "0.2.0-rc.2",
-      "testedAt": "2026-10-13T17:17:50.315Z",
-      "fingerprint": "250c5e987aa686f3075efd5852d55fccba122ed396f8038462f7c03ef5ceff44"
+      "testedAt": "2026-10-14T04:11:20.098Z",
+      "fingerprint": "dc84d5c58922ba064bcd6c1ea33683bd3782f3ccc41c42ae5ea5e497b5c78e33"
     },
     {
       "dsh": "0.2.1-alpha.1",
@@ -68,8 +68,8 @@
         "compat/evidence/public-dsh-0.2.1-alpha.1-npm-door-0.5.1-panel-0.15.0.json"
       ],
       "acp": "0.2.1-alpha.1",
-      "testedAt": "2026-10-13T17:17:34.350Z",
-      "fingerprint": "250c5e987aa686f3075efd5852d55fccba122ed396f8038462f7c03ef5ceff44"
+      "testedAt": "2026-10-14T04:11:03.955Z",
+      "fingerprint": "dc84d5c58922ba064bcd6c1ea33683bd3782f3ccc41c42ae5ea5e497b5c78e33"
     }
   ]
 }

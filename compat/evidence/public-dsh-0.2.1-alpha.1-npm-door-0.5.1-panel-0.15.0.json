@@ -4,7 +4,7 @@
   "platform": "win32",
   "source": {
     "commit": "e0f4725012f35c2db896872a0e3d17e74ba485eb",
-    "fingerprint": "250c5e987aa686f3075efd5852d55fccba122ed396f8038462f7c03ef5ceff44"
+    "fingerprint": "dc84d5c58922ba064bcd6c1ea33683bd3782f3ccc41c42ae5ea5e497b5c78e33"
   },
   "packages": {
     "panel": "0.15.0",

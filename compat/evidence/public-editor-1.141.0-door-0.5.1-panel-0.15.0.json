@@ -6,13 +6,13 @@
   "defaultLaunch": true,
   "source": {
     "commit": "e0f4725012f35c2db896872a0e3d17e74ba485eb",
-    "fingerprint": "250c5e987aa686f3075efd5852d55fccba122ed396f8038462f7c03ef5ceff44"
+    "fingerprint": "dc84d5c58922ba064bcd6c1ea33683bd3782f3ccc41c42ae5ea5e497b5c78e33"
   },
   "packages": {
     "panel": "0.15.0",
     "door": "0.5.1"
   },
-  "vsixSha256": "faea19af8e81e0e10909a44baf4e9d942b191ba55da073c2ff2da2534a5ba714",
+  "vsixSha256": "99ede6c9f0bd4e5780936d3fc81c79657afe78bfc1c59773446ff9eaead0215e",
   "checks": [
     {
       "name": "extension activation",

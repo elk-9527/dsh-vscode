@@ -16,13 +16,14 @@ async function run() {
   let kernel,client,bridge,session,port;
   try {
     const header = '/** Add two finite numeric inputs. */\n';
-    fs.writeFileSync(path.join(cwd,'sample.js'),header+'export function sum(a, b) { return b + a; }\n');
+    // 新导出和测试在基线之后加入，成功修复仍保留待审查差异。
+    fs.writeFileSync(path.join(cwd,'sample.js'),'export {};\n');
     fs.writeFileSync(path.join(cwd,'package.json'),JSON.stringify({private:true,type:'module',scripts:{test:'node --test sum.test.js'}})+'\n');
-    fs.writeFileSync(path.join(cwd,'sum.test.js'),"import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { sum } from './sample.js';\ntest('adds numeric inputs', () => { assert.equal(sum(2, 3), 5); assert.equal(sum(-4, 7), 3); assert.equal(sum(0, 1), 1); });\n");
     fs.mkdirSync(path.join(cwd,'.vscode'));
     fs.writeFileSync(path.join(cwd,'.vscode/tasks.json'),JSON.stringify({version:'2.0.0',tasks:[{label:'fixture regression',type:'process',command:'node',args:['--test','sum.test.js'],group:'test'}]})+'\n');
     for (const args of [['init','-q'],['add','.'],['-c','user.name=Bridge test','-c','user.email=bridge@example.invalid','commit','-qm','baseline']]) locate.runDshSync({command:'git',args:['-C',cwd,...args]});
     fs.writeFileSync(path.join(cwd,'sample.js'),header+'export function sum(a, b) { return a - b; }\n');
+    fs.writeFileSync(path.join(cwd,'sum.test.js'),"import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { sum } from './sample.js';\ntest('adds numeric inputs', () => { assert.equal(sum(2, 3), 5); assert.equal(sum(-4, 7), 3); assert.equal(sum(0, 1), 1); });\n");
     const before = await repositorySnapshot(cwd);
     const runtime = resolveRuntime({dsh:'0.2.0-rc.2'}), profile='bridge-real';
     const directory = path.join(process.env.DSH_HOME || path.join(os.homedir(),'.dsh'),'profiles',profile);
