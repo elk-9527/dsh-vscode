@@ -25,7 +25,7 @@ const { findChrome, missingChromeMessage } = require('./chrome.cjs');
 
 const CHROME = findChrome();
 const WORK = process.env.DSH_PANEL_UI_WORK ? path.resolve(process.env.DSH_PANEL_UI_WORK) : path.join(ROOT, 'build', 'uitest');
-const PROFILE = path.join(WORK, 'chrome-profile');
+const CHROME_TIMEOUT_MS = 45000;
 const TEST_SCENARIOS = {
   ...SCENARIOS,
   usability() { return SCENARIOS.composer(); },
@@ -1835,7 +1835,7 @@ function assertionsScript(scene) {
 </script>`;
 }
 
-function runChrome(scene) {
+function runChrome(scene, profile) {
   const html = buildHtml('dark');
   const steps = TEST_SCENARIOS[scene]().steps;
   // 错误捕获器需置于**最前面**：此后任何一段内联脚本（包括断言脚本）
@@ -1854,8 +1854,10 @@ function runChrome(scene) {
 
   const dom = path.join(WORK, `${scene}.dom.html`);
   const url = pathToFileURL(page).href;
+  const platformArgs = process.platform === 'darwin' ? ['--use-mock-keychain', '--password-store=basic'] : [];
   fs.writeFileSync(dom, execFileSync(CHROME, ['--headless=new', '--disable-gpu', '--hide-scrollbars', '--no-first-run', '--no-default-browser-check',
-    '--force-device-scale-factor=1', '--window-size=420,900', '--virtual-time-budget=9000', `--user-data-dir=${PROFILE}`, '--dump-dom', url], { maxBuffer: 16 * 1024 * 1024 }));
+    ...platformArgs, '--force-device-scale-factor=1', '--window-size=420,900', '--virtual-time-budget=9000', `--user-data-dir=${profile}`, '--dump-dom', url],
+  { maxBuffer: 16 * 1024 * 1024, timeout: CHROME_TIMEOUT_MS, killSignal: 'SIGKILL', windowsHide: true }));
 
   const dumped = fs.readFileSync(dom, 'utf8');
   const match = /<pre id="__results">([\s\S]*?)<\/pre>/.exec(dumped);
@@ -1878,6 +1880,7 @@ function main() {
     process.exit(2);
   }
   fs.mkdirSync(WORK, { recursive: true });
+  const profile = fs.mkdtempSync(path.join(WORK, 'chrome-profile-'));
   fs.copyFileSync(path.join(ROOT, 'media', 'main.css'), path.join(WORK, 'main.css'));
   fs.copyFileSync(path.join(ROOT, 'media', 'main.js'), path.join(WORK, 'main.js'));
   fs.copyFileSync(path.join(ROOT, 'media', 'markdown.js'), path.join(WORK, 'markdown.js'));
@@ -1893,14 +1896,15 @@ function main() {
     console.log(`\n── 场景：${scene} ${'─'.repeat(Math.max(0, 40 - scene.length))}`);
     let outcome;
     try {
-      outcome = runChrome(scene);
+      outcome = runChrome(scene, profile);
     } catch (error) {
-      outcome = { error: error.message };
+      outcome = { error: error.message, fatal: error.code === 'ETIMEDOUT' };
     }
     if (outcome.error) {
       failed += 1;
       failures.push(`${scene}: ${outcome.error}`);
       console.log(`  ❌ ${outcome.error}`);
+      if (outcome.fatal) break;
       continue;
     }
     for (const item of outcome.results) {

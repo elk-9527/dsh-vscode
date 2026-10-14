@@ -48,6 +48,7 @@ jobs:
         run: pnpm compat:contracts
 
       - name: 浏览器界面验收
+        timeout-minutes: 5
         run: pnpm ui
 
       - name: 检查编码与换行
