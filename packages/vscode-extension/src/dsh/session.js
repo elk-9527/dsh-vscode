@@ -31,6 +31,7 @@ class DshSession extends EventEmitter {
   /** @type {AbortController|null} 当前回合的中断控制器。 */
   #current = null;
   #disposed = false;
+  #opening = null;
 
   /**
    * @param {object} options
@@ -75,6 +76,14 @@ class DshSession extends EventEmitter {
     return this.#current;
   }
 
+  async #openSession(open) {
+    if (this.#disposed) throw new Error('会话已销毁');
+    if (this.#opening) throw new Error('正在建立会话，请稍后重试');
+    const controller = new AbortController(); this.#opening = controller;
+    try { return await open(controller.signal); }
+    finally { if (this.#opening === controller) this.#opening = null; }
+  }
+
   /**
    * 建立一个新的会话。
    *
@@ -116,7 +125,7 @@ class DshSession extends EventEmitter {
         `已建会话 ${this.sessionId}（cwd=${cwd}${doorMeta?.current ? `，预设=${doorMeta.current}` : ''}）`,
       );
     };
-    const result = await this.client.newSession(cwd, { preset }, consume);
+    const result = await this.#openSession(signal => this.client.newSession(cwd, { preset, signal }, consume));
     if (!consumed) consume(result);
 
     if (provider && model) {
@@ -156,7 +165,7 @@ class DshSession extends EventEmitter {
       this.emit('config', { configOptions: this.configOptions });
       this.log('info', `已恢复会话 ${sessionId}`);
     };
-    const result = await this.client.resumeSession(sessionId, cwd, { preset }, consume);
+    const result = await this.#openSession(signal => this.client.resumeSession(sessionId, cwd, { preset, signal }, consume));
     if (!consumed) consume(result);
     return sessionId;
   }
@@ -271,6 +280,7 @@ class DshSession extends EventEmitter {
 
   dispose() {
     this.#disposed = true;
+    this.#opening?.abort();
     this.client.off('update', this._onUpdate);
     this.client.off('close', this._onClose);
     this.removeAllListeners();

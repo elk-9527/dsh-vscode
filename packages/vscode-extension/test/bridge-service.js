@@ -15,6 +15,12 @@ class FakeClient extends EventEmitter {
 }
 (async () => {
   const denied = () => { throw Object.assign(new Error(), { code: 'EPERM' }); };
+  let queries = 0;
+  await ensureProcessAlive(123, { platform: 'win32', kill: () => {}, query: async () => { queries++; return false; } });
+  assert.equal(queries, 0, 'Successful existence probes do not launch a shell');
+  await assert.rejects(ensureProcessAlive(123, { platform: 'win32', kill: () => { throw Object.assign(new Error(), { code: 'ESRCH' }); }, query: async () => { queries++; return true; } }));
+  assert.equal(queries, 0, 'Missing processes cannot be accepted by a fallback query');
+  await assert.rejects(ensureProcessAlive(123, { platform: 'win32', kill: denied, query: async () => { throw new Error('query timeout'); } }));
   await ensureProcessAlive(123, { platform: 'win32', kill: denied, query: async pid => pid === 123 });
   await assert.rejects(ensureProcessAlive(123, { platform: 'win32', kill: denied, query: async () => false }));
   await assert.rejects(ensureProcessAlive(123, { platform: 'linux', kill: denied, query: async () => true }));

@@ -318,13 +318,48 @@ class DoorClient extends EventEmitter {
    * @returns {Promise<object>} 内核的回复（`sessionId`、`configOptions`），
    *   该插件还会在 `_meta['dsh-door']` 中附加可用预设清单与实际使用的那一项。
    * @param {(result: object) => void} [onResult] 成功回复的同步消费者，不写入协议参数。
+   * @param {AbortSignal} [options.signal] 取消建立或等待模型注册。
+   * @param {number} [options.modelReadyTimeoutMs] 建会话和模型注册共用的期限，最多三十秒。
    */
-  newSession(cwd, { preset } = {}, onResult) {
+  newSession(cwd, { preset, signal, modelReadyTimeoutMs } = {}, onResult) {
     const params = { cwd, mcpServers: [] };
     if (typeof preset === 'string' && preset) {
       params._meta = { [PRESET_META_KEY]: { preset } };
     }
-    return this.request('session/new', params, { timeoutMs: SESSION_REQUEST_TIMEOUT_MS, onResult });
+    return this.#sessionRequest('session/new', params, { signal, modelReadyTimeoutMs, onResult });
+  }
+
+  /** A listening ACP endpoint can precede asynchronous provider registration. */
+  async #sessionRequest(method, params, { signal, modelReadyTimeoutMs, onResult }) {
+    const budget = Number.isFinite(modelReadyTimeoutMs)
+      ? Math.max(1, Math.min(SESSION_REQUEST_TIMEOUT_MS, modelReadyTimeoutMs)) : SESSION_REQUEST_TIMEOUT_MS;
+    const deadline = Date.now() + budget, socket = this.#socket;
+    let lastError;
+    while (true) {
+      if (signal?.aborted) throw new DoorRequestError(-32800, `请求已取消：${method}`);
+      if (!this.isConnected || this.#socket !== socket) throw lastError || new Error('连接已中断');
+      const remaining = deadline - Date.now();
+      if (remaining <= 0 && lastError) throw lastError;
+      let accepted = false;
+      try {
+        return await this.request(method, params, { signal, timeoutMs: Math.max(1, remaining),
+          onResult: result => { accepted = true; if (signal?.aborted) throw new DoorRequestError(-32800, `请求已取消：${method}`); onResult?.(result); } });
+      } catch (error) {
+        const details = error.data?.details;
+        if (accepted || error.code !== -32603 || typeof details !== 'string' ||
+            !/^(?:no adapter registered for provider "[^"\r\n]+"|pi-ai provider "[^"\r\n]+" has no configured model "[^"\r\n]+")$/.test(details)) throw error;
+        lastError = error;
+        const delay = Math.min(250, deadline - Date.now());
+        if (delay <= 0 || !this.isConnected || this.#socket !== socket) throw error;
+        await new Promise((resolve, reject) => {
+          const cleanup = () => signal?.removeEventListener('abort', abort);
+          const abort = () => { clearTimeout(timer); cleanup(); reject(new DoorRequestError(-32800, `请求已取消：${method}`)); };
+          const timer = setTimeout(() => { cleanup(); resolve(); }, delay);
+          signal?.addEventListener('abort', abort, { once: true });
+          if (signal?.aborted) abort();
+        });
+      }
+    }
   }
 
   /**
@@ -340,13 +375,15 @@ class DoorClient extends EventEmitter {
    * @returns {Promise<object>} 内核的回复；该插件同样会在 `_meta['dsh-door']`
    *   中附加可用预设清单与当前使用的那一项。
    * @param {(result: object) => void} [onResult] 成功回复的同步消费者，不写入协议参数。
+   * @param {AbortSignal} [options.signal] 取消恢复或等待模型注册。
+   * @param {number} [options.modelReadyTimeoutMs] 恢复会话和模型注册共用的期限，最多三十秒。
    */
-  resumeSession(sessionId, cwd, { preset } = {}, onResult) {
+  resumeSession(sessionId, cwd, { preset, signal, modelReadyTimeoutMs } = {}, onResult) {
     const params = { sessionId, cwd, mcpServers: [] };
     if (typeof preset === 'string' && preset) {
       params._meta = { [PRESET_META_KEY]: { preset } };
     }
-    return this.request('session/resume', params, { timeoutMs: SESSION_REQUEST_TIMEOUT_MS, onResult });
+    return this.#sessionRequest('session/resume', params, { signal, modelReadyTimeoutMs, onResult });
   }
 
   /**

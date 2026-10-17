@@ -546,16 +546,17 @@ async function main() {
       const pending = restore
         ? session.resume('history-session', path.resolve(__dirname, 'fixtures', 'session-config'))
         : session.start({ cwd: path.resolve(__dirname, 'fixtures', 'session-config') });
+      const openingId = requests.at(-1).id;
       session.dispose();
       let error;
       const completed = pending.catch(caught => { error = caught; });
       receive(
-        { jsonrpc: '2.0', id: requests.at(-1).id, result: { sessionId: 'new-session', configOptions: configState(B) } },
+        { jsonrpc: '2.0', id: openingId, result: { sessionId: 'new-session', configOptions: configState(B) } },
         configFrame(restore ? 'history-session' : 'new-session', configState(A, B)),
       );
       await completed;
       check(`销毁后的${restore ? '恢复' : '建立'}回复与同块通知不覆写配置`, session.configOptions === before && session.sessionId === beforeId);
-      check('已销毁会话的异步建立请求明确失败', /已销毁/.test(error?.message));
+      check('已销毁会话的异步建立请求明确取消', error?.code === -32800);
     });
   }
 
@@ -612,7 +613,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
+let completed = false;
+process.once('beforeExit', () => { if (!completed) { console.error('会话套件尚有未完成检查'); process.exitCode = 1; } });
+main().then(() => { completed = true; }).catch((error) => {
   console.error('测试自身发生异常：', error);
   process.exit(1);
 });
