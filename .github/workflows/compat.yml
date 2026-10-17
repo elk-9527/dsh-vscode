@@ -18,6 +18,7 @@ permissions:
 jobs:
   discover:
     runs-on: windows-latest
+    timeout-minutes: 10
     outputs:
       matrix: ${{ steps.versions.outputs.matrix }}
       vsix_sha256: ${{ steps.panel.outputs.sha256 }}
@@ -40,7 +41,7 @@ jobs:
           }
           "matrix=$matrix" >> $env:GITHUB_OUTPUT
       - name: 构建供编辑器共同验收的安装包
-        run: node packages/vscode-extension/tools/build-vsix.js
+        run: node packages/vscode-extension/tools/publish.js
       - id: panel
         shell: pwsh
         run: |

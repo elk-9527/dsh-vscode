@@ -3,8 +3,8 @@
   "status": "passed",
   "platform": "win32",
   "source": {
-    "commit": "e0f4725012f35c2db896872a0e3d17e74ba485eb",
-    "fingerprint": "dc84d5c58922ba064bcd6c1ea33683bd3782f3ccc41c42ae5ea5e497b5c78e33"
+    "commit": "98ff4b8bbb7959399510b9551c373aab2e0ab515",
+    "fingerprint": "bc7c0a58759b14bfb3dfef7b3c52b8f54e9f66d550743336f9e25bd5f1e33bd4"
   },
   "packages": {
     "panel": "0.15.0",
@@ -101,7 +101,7 @@
   "artifacts": [
     {
       "kind": "tgz",
-      "sha256": "546716824e2d6deea986a3f9f6f5e02d2d8b6d3b49c9a36134e583ade88ca6b9"
+      "sha256": "d403324e9969431b89de7d717bfd63b7cc4044fdaf703185bb7d92dad1aaa61d"
     }
   ]
 }

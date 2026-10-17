@@ -16,8 +16,8 @@
       "door": "0.5.1",
       "panel": "0.15.0",
       "acp": "0.1.5-rc.3",
-      "testedAt": "2026-10-14T04:10:09.797Z",
-      "fingerprint": "dc84d5c58922ba064bcd6c1ea33683bd3782f3ccc41c42ae5ea5e497b5c78e33"
+      "testedAt": "2026-10-17T03:55:34.498Z",
+      "fingerprint": "bc7c0a58759b14bfb3dfef7b3c52b8f54e9f66d550743336f9e25bd5f1e33bd4"
     },
     {
       "dsh": "0.2.0-rc.1",
@@ -29,8 +29,8 @@
       "door": "0.5.1",
       "panel": "0.15.0",
       "acp": "0.2.0-rc.1",
-      "testedAt": "2026-10-14T04:10:27.630Z",
-      "fingerprint": "dc84d5c58922ba064bcd6c1ea33683bd3782f3ccc41c42ae5ea5e497b5c78e33"
+      "testedAt": "2026-10-17T03:55:46.548Z",
+      "fingerprint": "bc7c0a58759b14bfb3dfef7b3c52b8f54e9f66d550743336f9e25bd5f1e33bd4"
     },
     {
       "dsh": "0.2.0-rc.2",
@@ -42,8 +42,8 @@
       "door": "0.5.1",
       "panel": "0.15.0",
       "acp": "0.2.0-rc.2",
-      "testedAt": "2026-10-14T04:10:44.086Z",
-      "fingerprint": "dc84d5c58922ba064bcd6c1ea33683bd3782f3ccc41c42ae5ea5e497b5c78e33"
+      "testedAt": "2026-10-17T03:56:23.774Z",
+      "fingerprint": "bc7c0a58759b14bfb3dfef7b3c52b8f54e9f66d550743336f9e25bd5f1e33bd4"
     },
     {
       "dsh": "0.2.0-rc.2",
@@ -55,8 +55,8 @@
       "door": "0.5.1",
       "panel": "0.15.0",
       "acp": "0.2.0-rc.2",
-      "testedAt": "2026-10-14T04:11:20.098Z",
-      "fingerprint": "dc84d5c58922ba064bcd6c1ea33683bd3782f3ccc41c42ae5ea5e497b5c78e33"
+      "testedAt": "2026-10-17T03:56:05.999Z",
+      "fingerprint": "bc7c0a58759b14bfb3dfef7b3c52b8f54e9f66d550743336f9e25bd5f1e33bd4"
     },
     {
       "dsh": "0.2.1-alpha.1",
@@ -68,8 +68,8 @@
         "compat/evidence/public-dsh-0.2.1-alpha.1-npm-door-0.5.1-panel-0.15.0.json"
       ],
       "acp": "0.2.1-alpha.1",
-      "testedAt": "2026-10-14T04:11:03.955Z",
-      "fingerprint": "dc84d5c58922ba064bcd6c1ea33683bd3782f3ccc41c42ae5ea5e497b5c78e33"
+      "testedAt": "2026-10-17T03:56:23.865Z",
+      "fingerprint": "bc7c0a58759b14bfb3dfef7b3c52b8f54e9f66d550743336f9e25bd5f1e33bd4"
     }
   ]
 }

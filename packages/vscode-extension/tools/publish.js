@@ -82,7 +82,7 @@ if (problems.length) {
 }
 
 function vsce(extra) {
-  const argv = ['--yes', '@vscode/vsce', ...extra];
+  const argv = ['--yes', '@vscode/vsce@4.0.0', ...extra];
   const r = spawnSync('npx', process.platform === 'win32' ? argv.map(quoteArg) : argv, {
     cwd: ROOT,
     stdio: 'inherit',
@@ -94,7 +94,7 @@ function vsce(extra) {
 
 /** `vsce ls` 输出的文件清单（市场包最终包含哪些文件）。 */
 function vsceFiles() {
-  const r = spawnSync('npx', ['--yes', '@vscode/vsce', 'ls', '--no-dependencies'], {
+  const r = spawnSync('npx', ['--yes', '@vscode/vsce@4.0.0', 'ls', '--no-dependencies'], {
     cwd: ROOT,
     encoding: 'utf8',
     shell: process.platform === 'win32',
