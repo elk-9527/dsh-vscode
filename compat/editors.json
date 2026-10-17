@@ -3,5 +3,12 @@
   "platform": "win32",
   "minimum": "1.141.0",
   "status": "passed",
-  "evidence": "compat/evidence/public-editor-1.141.0-door-0.5.1-panel-0.15.0.json"
+  "evidence": "compat/evidence/public-editor-1.141.0-door-0.5.1-panel-0.15.0.json",
+  "supported": [
+    {
+      "editor": "1.142.0",
+      "status": "passed",
+      "evidence": "compat/evidence/public-editor-1.142.0-door-0.5.1-panel-0.15.0.json"
+    }
+  ]
 }

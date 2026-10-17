@@ -51,6 +51,16 @@ assert(validateReport({ ...report, stages: [...report.stages, { name: 'tools', s
 assert(validateReport({ ...report, runtime: { version: '0.2.0-rc.1' } }, current, state).length);
 const matrix = json(path.join(ROOT, 'compat/versions.json'));
 const editorMatrix = json(path.join(ROOT, 'compat/editors.json'));
+if (editorMatrix.supported?.length) {
+  const { validateEditorEvidence } = require('./release-check.cjs');
+  const evidence = json(path.join(ROOT, editorMatrix.supported[0].evidence));
+  const state = { fingerprint: evidence.source.fingerprint };
+  assert.deepEqual(validateEditorEvidence(evidence, evidence.vsixSha256, current, state), []);
+  assert(validateEditorEvidence(evidence, '0'.repeat(64), current, state).length);
+  assert(validateEditorEvidence({ ...evidence, defaultLaunch: false }, evidence.vsixSha256, current, state).length);
+  assert(validateEditorEvidence({ ...evidence, checks: evidence.checks.slice(1) }, evidence.vsixSha256, current, state).length);
+  assert(validateEditorEvidence(evidence, evidence.vsixSha256, current, { fingerprint: 'changed' }).length);
+}
 assert.equal(editorMatrix.minimum, json(path.join(ROOT, 'packages/vscode-extension/package.json')).engines.vscode.replace(/^\^/, ''));
 assert.equal(json(path.join(ROOT, editorMatrix.evidence)).editor, editorMatrix.minimum);
 for (const entry of matrix.versions) {

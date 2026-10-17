@@ -5,14 +5,14 @@
   "editor": "1.141.0",
   "defaultLaunch": true,
   "source": {
-    "commit": "e0f4725012f35c2db896872a0e3d17e74ba485eb",
-    "fingerprint": "dc84d5c58922ba064bcd6c1ea33683bd3782f3ccc41c42ae5ea5e497b5c78e33"
+    "commit": "2f6e03c19f1a95558fc0f1b9e3186206b73793e8",
+    "fingerprint": "bc7c0a58759b14bfb3dfef7b3c52b8f54e9f66d550743336f9e25bd5f1e33bd4"
   },
   "packages": {
     "panel": "0.15.0",
     "door": "0.5.1"
   },
-  "vsixSha256": "99ede6c9f0bd4e5780936d3fc81c79657afe78bfc1c59773446ff9eaead0215e",
+  "vsixSha256": "79ce98e28b6cb974e1e30b5f2bef971cb1f4389dd63eec437ae76ea8909b6073",
   "checks": [
     {
       "name": "extension activation",

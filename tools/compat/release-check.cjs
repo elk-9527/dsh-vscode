@@ -18,6 +18,15 @@ function validateReport(report, current = versions(), state = sourceState()) {
   }
   return issues;
 }
+function validateEditorEvidence(evidence, archive, current = versions(), state = sourceState()) {
+  const issues = [];
+  const range = json(path.join(ROOT, 'packages/vscode-extension/package.json')).engines.vscode;
+  if (evidence.status !== 'passed' || !evidence.defaultLaunch || !semver.satisfies(evidence.editor || '', range)) issues.push('编辑器版本、状态或默认启动证据无效');
+  if (evidence.source?.fingerprint !== state.fingerprint || evidence.packages?.panel !== current.panel || evidence.packages?.door !== current.door) issues.push('编辑器证据对应的产品已变化');
+  if (!/^[a-f0-9]{64}$/.test(evidence.vsixSha256 || '') || evidence.vsixSha256 !== archive) issues.push('编辑器未验收同一份最终 VSIX');
+  for (const name of require('./editor-evidence.cjs').CHECKS) if (!evidence.checks?.some(check => check.name === name && check.status === 'passed')) issues.push(`编辑器检查 ${name} 缺失`);
+  return issues;
+}
 function releaseCheck(options) {
   const current = versions();
   const issues = [];
@@ -32,6 +41,13 @@ function releaseCheck(options) {
   if (editorMatrix.status !== 'passed' || editorMatrix.minimum !== editorMinimum || editorEvidence.editor !== editorMinimum || editorEvidence.status !== 'passed' || !editorEvidence.defaultLaunch) issues.push('最低编辑器缺少默认启动的通过证据');
   if (editorEvidence.source?.fingerprint !== sourceState().fingerprint || editorEvidence.packages?.panel !== current.panel || editorEvidence.packages?.door !== current.door) issues.push('最低编辑器证据对应的产品已变化');
   for (const name of require('./editor-evidence.cjs').CHECKS) if (!editorEvidence.checks?.some(check => check.name === name && check.status === 'passed')) issues.push(`最低编辑器检查 ${name} 缺失`);
+  if (!Array.isArray(editorMatrix.supported) || !editorMatrix.supported.length) issues.push('缺少另一个支持编辑器对最终安装包的验收');
+  for (const entry of editorMatrix.supported || []) {
+    if (entry.status !== 'passed' || !entry.evidence) { issues.push('支持编辑器缺少通过证据'); continue; }
+    const evidence = json(path.join(ROOT, entry.evidence));
+    if (evidence.editor !== entry.editor || evidence.editor === editorMinimum) issues.push('支持编辑器矩阵与证据版本不一致');
+    issues.push(...validateEditorEvidence(evidence, editorEvidence.vsixSha256).map(issue => `${entry.editor}: ${issue}`));
+  }
   for (const entry of matrix.versions) {
     if (entry.status !== 'passed' || !entry.evidence?.length) { issues.push(`${entry.dsh}/${entry.distribution} 没有通过证据`); continue; }
     const evidence = json(path.resolve(ROOT, entry.evidence[0]));
@@ -83,4 +99,4 @@ if (require.main === module) {
   try { process.exitCode = releaseCheck(argsOf()).status === 'passed' ? 0 : 1; }
   catch (error) { console.error(error.message); process.exitCode = 1; }
 }
-module.exports = { validateReport, releaseCheck, REQUIRED, LOCAL };
+module.exports = { validateReport, validateEditorEvidence, releaseCheck, REQUIRED, LOCAL };
