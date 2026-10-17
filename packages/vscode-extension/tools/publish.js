@@ -30,6 +30,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { quoteArg } = require('../src/door/locate');
+const { CONTENT, IMAGES, checkArchiveReadme } = require('./package-links.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const args = process.argv.slice(2);
@@ -82,7 +83,9 @@ if (problems.length) {
 }
 
 function vsce(extra) {
-  const argv = ['--yes', '@vscode/vsce@4.0.0', ...extra];
+  const links = ['package', 'publish'].includes(extra[0])
+    ? ['--githubBranch', 'main', '--baseContentUrl', CONTENT, '--baseImagesUrl', IMAGES] : [];
+  const argv = ['--yes', '@vscode/vsce@4.0.0', ...extra, ...links];
   const r = spawnSync('npx', process.platform === 'win32' ? argv.map(quoteArg) : argv, {
     cwd: ROOT,
     stdio: 'inherit',
@@ -137,6 +140,7 @@ if (!go) {
   const out = path.join(ROOT, 'build', `${pkg.name}-${pkg.version}.vsix`);
   fs.mkdirSync(path.dirname(out), { recursive: true });
   if (!vsce(['package', '--no-dependencies', '--out', out])) process.exit(1);
+  checkArchiveReadme(out);
   console.log(`\n  产物：${out}`);
   console.log('  包内文件（应当只有 src/ media/ README/LICENSE/CHANGELOG/package.json/icon）：');
   if (!vsce(['ls', '--no-dependencies'])) process.exit(1);

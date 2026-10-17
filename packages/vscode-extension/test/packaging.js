@@ -5,6 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { shipFiles } = require('../tools/ship-list');
 const { contentTypesXml } = require('../tools/build-vsix');
+const { CONTENT, invalidSourceLinks } = require('../tools/package-links.cjs');
 const root = path.resolve(__dirname, '..');
 
 function publication({ mismatch = false, failedList = false, privateContent = false } = {}) {
@@ -23,6 +24,7 @@ function publication({ mismatch = false, failedList = false, privateContent = fa
           return { status: 0, stdout: '' };
         } };
         if (name === './ship-list') return require('../tools/ship-list');
+        if (name === './package-links.cjs') return require('../tools/package-links.cjs');
         return require(name);
       },
     });
@@ -34,6 +36,14 @@ assert.equal(publication({ mismatch: true }).published, false, 'Real publication
 assert.equal(publication({ failedList: true }).published, false, 'A failed file inventory must block publication');
 assert.equal(publication({ privateContent: true }).published, false, 'Public content check must run before publication');
 const valid = publication(); assert.equal(valid.published, true); assert.equal(valid.exitCode, 0);
+const publish = valid.calls.find(args => args.includes('publish'));
+assert(publish.includes('--githubBranch') && publish.includes('main') && publish.includes(CONTENT));
+assert.deepEqual(invalidSourceLinks(`[API](${CONTENT}API.md)`), []);
+for (const link of [
+  'https://github.com/elk-9527/dsh-vscode/blob/HEAD/API.md',
+  'https://github.com/elk-9527/dsh-vscode/blob/main/API.md',
+  'https://github.com/elk-9527/dsh-vscode/tree/f67309db5e0c791b0a99a836915d13367889cf45/packages/dsh-door',
+]) assert.equal(invalidSourceLinks(`[source](${link})`).length, 1);
 assert(!/Extension="\./.test(contentTypesXml()), 'Content type extensions must omit the leading dot');
 const packedWithoutEditor = require('node:child_process').spawnSync(process.execPath,
   [path.resolve(root, '../../tools/bridge/test-live.cjs'), '--packed-vsix'],

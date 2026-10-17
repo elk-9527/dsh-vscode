@@ -11,6 +11,8 @@ out/
 /.workbuddy/
 /AGENTS.md
 /local-notes/
+/tools/bridge/round2-baseline.cjs
+/tools/bridge/round2-matrix.cjs
 /%SystemDrive%/
 packages/vscode-extension/build*/
 packages/vscode-extension/shots/
