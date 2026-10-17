@@ -3,9 +3,8 @@
 /**
  * 测试用的 ACP 接入点插件（dsh-acp-door）保障：未运行时自行启动后台 DSH，已运行时直接使用。
  *
- * 设立该模块的原因：面板层测试与端到端测试都要求 47821 上存在一个已开放接入点的 DSH，
- * 此前需要手动启动内核，运行结束后可能仍有残留。现在由测试自行启动并负责回收，
- * 因此「一条命令完成全部流程」成立，也不会留下孤儿进程。
+ * 面板层与端到端测试需要可用的 ACP 接入点。测试按需启动专用内核，
+ * 并仅回收自身启动的进程，支持一次命令完成测试及清理。
  */
 
 const fs = require('node:fs');
@@ -67,11 +66,10 @@ function ensureTestProfile({ command, log = () => {} } = {}) {
 }
 
 /**
- * 找到这台机器上真实可执行的 DSH 命令。
+ * 解析测试环境中可执行的 DSH 命令。
  *
- * 测试原先直接使用 `dsh`，但 VS Code/非交互终端常常看不到用户 npm 的 PATH；
- * 面板生产代码早已支持默认安装目录，测试帮助器却没有复用，结果根目录 `npm test`
- * 会在每个真 DSH 套件中白等两分钟。此处逐项执行只读的 `--version`，成功者缓存。
+ * 非交互环境的 PATH 可能不含 DSH。复用生产候选解析，逐项执行只读的
+ * --version 探测，并缓存首个成功的命令，避免将命令缺失误判为启动超时。
  */
 function resolveTestDshCommand({ command, log = () => {} } = {}) {
   if (command) return command;
@@ -123,10 +121,15 @@ function doorFiles() {
     const full = path.join(DOOR_SRC, entry);
     if (!fs.existsSync(full)) continue;
     if (fs.statSync(full).isDirectory()) {
-      for (const name of fs.readdirSync(full)) {
-        const child = path.join(full, name);
-        if (fs.statSync(child).isFile()) out.push(path.join(entry, name));
-      }
+      const walk = (directory, relative) => {
+        for (const name of fs.readdirSync(directory)) {
+          const child = path.join(directory, name);
+          const rel = path.join(relative, name);
+          if (fs.statSync(child).isDirectory()) walk(child, rel);
+          else out.push(rel);
+        }
+      };
+      walk(full, entry);
     } else {
       out.push(entry);
     }
@@ -137,9 +140,8 @@ function doorFiles() {
 /**
  * 核对已安装的该插件是否与源码一致；不一致时列出不同的文件。
  *
- * 需要检查该内容的原因：`file:` 依赖是拷贝（而非符号链接），且 pnpm 会命中
- * 缓存 —— 修改源码后可能不会重新安装（实测：修改了该插件，测试仍在测试旧代码，
- * 全部通过，却未验证任何内容）。这种静默测试错误对象的情况是测试中最严重的一类。
+ * file: 依赖的拷贝和包管理器缓存可能保留旧内容，因此必须逐字节核对
+ * 实际安装文件，不能仅依据包版本或安装命令成功判断测试对象。
  *
  * @returns {string[]} 不一致的文件名（空数组 = 一致）。
  */
@@ -162,25 +164,20 @@ function doorDrift() {
 /**
  * 确保测试档中安装的该插件与源码一致（不一致时重新安装一次）。
  *
- * 采用 remove + add 而不直接拷贝：这是用户实际会执行的安装路径，安装结果才
- * 与生产环境一致。需要先执行 remove 的原因是 pnpm 的缓存与硬链接会使「add」变为
- * 空操作（实测：内容已变化，仍报告 added 0）。
- *
- * 实测还发现仅依靠 remove + add 并不充分：修改 `package.json` 的版本号之后，
- * remove + add 装回的仍可能是旧版本（pnpm 复用缓存）。因此最后设置一道后备措施：
- * 若仍不一致，则按文件直接同步。
- *
- * ⚠️ 该函数仅操作测试档（dshdoor），其他档一律不修改。
- * 经验（实际出现）：早期实现使用 `profile` 参数安装，却按写死的 dshdoor 路径比对，
- * 因此在以 `DSH_PANEL_PROFILE=desktop` 运行测试时，把用户生产档的依赖从
- * `file:…tgz` 改为源码目录 —— 改变了形态，且无法比对结果。当前行为：
- *   - 目标档不是测试档 → 只检查、只报告，不修改，并明确说明应如何安装。
+ * 优先执行 remove + add 验证安装路径；若缓存仍保留旧文件，则直接同步后
+ * 再逐字节核对。所有安装、拷贝和比对均只针对固定 TEST_PROFILE（dshdoor）。
+ * 其他配置集的只读比对由 inspectDoor 提供，不接受它们作为自动同步目标。
  *
  * @returns {{synced: boolean, drift: string[], copied: string[], skipped?: boolean}}
  */
 function syncDoor({ log = () => {}, command } = {}) {
   command = resolveTestDshCommand({ command, log });
   ensureTestProfile({ command, log });
+  if (process.env.DSH_PANEL_TEST_PROVIDER_PACKAGE) {
+    require('../../../../tools/bridge/test-profile.cjs').prepareTestProvider({
+      profile: TEST_PROFILE, packageName: process.env.DSH_PANEL_TEST_PROVIDER_PACKAGE, command, log,
+    });
+  }
   const drift = doorDrift();
   if (drift.length === 0) {
     log('info', '该插件与源码一致，无需重新安装');
@@ -190,7 +187,7 @@ function syncDoor({ log = () => {}, command } = {}) {
   try {
     runDshSync({ command, args: ['plugin', '--profile', TEST_PROFILE, 'remove', 'dsh-acp-door'] });
   } catch {
-    // 此前未安装 —— 不影响后续，继续执行 add。
+    // 未安装时仍可继续执行 add。
   }
   try {
     runDshSync({
@@ -198,16 +195,14 @@ function syncDoor({ log = () => {}, command } = {}) {
       args: ['plugin', '--profile', TEST_PROFILE, 'add', `file:${DOOR_SRC.replace(/\\/g, '/')}`],
     });
   } catch (error) {
-    // pnpm 可能被自身安全策略阻止（实测：变更依赖超过确认阈值时报告
-    // SAFE_DELETE_BULK_CONFIRM_REQUIRED，非交互环境下不存在「确认」步骤）。
-    // 依赖已安装在档中（版本未变），按文件同步 lib 即可 —— 继续执行后备流程。
+    // 安装失败后仍尝试直接同步；最终内容比对决定该测试配置是否准备成功。
     log('info', `pnpm 装不上（${String(error && error.message ? error.message : error).split('\n')[0].slice(0, 120)}），按文件直接同步`);
   }
 
   let left = doorDrift();
   if (left.length === 0) return { synced: true, drift, copied: [] };
 
-  // 后备：pnpm 缓存不更新（实测修改版本号之后即为此情况），直接按文件同步。
+  // 缓存保留旧内容时按文件同步，并重新核对。
   log('info', `pnpm 装回来的还是旧的（${left.join('、')}），按文件直接同步过去`);
   const copied = [];
   for (const rel of doorFiles()) {
@@ -275,7 +270,7 @@ async function ensureDoor({ host = HOST, port = PORT, profile = PROFILE, log = (
     command,
     profile,
     log,
-    extraArgs,
+    extraArgs: [...(profile === TEST_PROFILE ? testPatchArgs() : []), ...extraArgs],
     // 同时传入需要使用的端口：该插件优先读取环境变量（DSH_ACP_DOOR_PORT），
     // 因此指定端口即生效，无需再生成一份 --patch。
     // 不传入时该插件按档中配置执行（默认 47821）—— 这正是 47821 这个默认值可用、
@@ -308,7 +303,26 @@ async function ensureDoor({ host = HOST, port = PORT, profile = PROFILE, log = (
   };
 }
 
+function testPatchArgs() {
+  const file = process.env.DSH_PANEL_TEST_PATCH;
+  if (!file) return [];
+  if (!path.isAbsolute(file) || !fs.statSync(file).isFile()) throw new Error('测试覆盖文件需要有效的绝对路径。');
+  return ['--patch', file];
+}
+
+/** Each model-facing test gets a fresh directory containing generated files only. */
+function createTestWorkspace(label) {
+  if (!/^[a-z0-9-]+$/.test(label)) throw new Error('Invalid test workspace label.');
+  const base = process.env.DSH_PANEL_TEST_WORK ? path.resolve(process.env.DSH_PANEL_TEST_WORK) : path.resolve(__dirname, '../../build/fixtures');
+  fs.mkdirSync(base, { recursive: true });
+  const directory = fs.mkdtempSync(path.join(base, `${label}-`));
+  fs.writeFileSync(path.join(directory, 'README.md'), 'Generated DSH integration test fixture.\n');
+  return directory;
+}
+
 module.exports = {
+  createTestWorkspace,
+  testPatchArgs,
   ensureDoor,
   doorIsUp,
   syncDoor,

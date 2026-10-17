@@ -21,7 +21,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 /** 相对扩展根目录：文件写完整文件名，目录写目录名。 */
-const SHIP = ['package.json', 'README.md', 'LICENSE', 'CHANGELOG.md', 'src', 'media'];
+const SHIP = ['package.json', 'README.md', 'API.md', 'LICENSE', 'CHANGELOG.md', 'src', 'media'];
 
 /**
  * 将 SHIP 展开为具体文件（相对路径，正斜杠），按字典序排列。

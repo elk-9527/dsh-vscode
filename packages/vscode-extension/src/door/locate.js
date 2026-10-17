@@ -3,7 +3,7 @@
 /**
  * 定位 ACP 接入点插件（`dsh-acp-door`）；未找到时在后台启动一个 DSH。
  *
- * 这是用户批准的后备路径：桌面端正在运行时直接连接它（同一个内核）；未运行时启动一个
+ * 桌面端正在运行时直接连接同一个内核；未运行时启动一个
  * 后台 DSH —— 该进程与桌面端**共用同一份 `$DSH_HOME`**，因此记忆、会话记录与
  * 配置文件均为同一份，不产生第二份数据。
  *
@@ -80,26 +80,10 @@ function redactSensitiveOutput(value) {
 }
 
 /**
- * 后备启动时依次尝试的命令清单。
- *
- * ── 提供多个候选的原因 ─────────────────────────────────────────────
- * 设置项 `dshCommand` 的默认值为直接给出的命令 `dsh`，而本机的 `dsh` 通常不在 VS Code
- * 进程可见的 PATH 中（实测：用户面板中报告「后台 DSH 刚启动就退出了
- * （命令：「dsh」）」）。仅尝试一个候选时，失败即终止 —— 这使得用户被迫
- * 「先启动桌面端才能使用面板」，而该条件不应成为必要条件。
- *
- * 因此此处给出若干候选：
- *   1. 设置项中填写的命令（由用户明确指定，始终最优先）；
- *   2. `<主目录>/.dsh/profiles/node_modules/@deepseek-ai/dsh/lib/bin.js`
- *      通过 `node` 运行 —— 这是 DSH 自动安装目录中的入口（存在时才加入），
- *      实测即为测试配方中验证过的启动命令。
- *
- * 纯函数：测试可直接传入参数，除文件系统之外不依赖任何外部状态。
- *
+ * 后备启动候选按指定命令、可用桌面端运行时和 DSH 安装目录依次查找并去重。
+ * 仅添加磁盘上存在的安装入口，避免依赖 VS Code 的 PATH。
  * @param {object} options
- * @param {string} options.dshCommand 设置项 dshPanel.dshCommand。
- * @param {string} options.homedir 用户主目录。
- * @returns {string[]} 去重后的候选清单（可能为空）。
+ * @returns {string[]} 候选启动命令。
  */
 function dshCommandCandidates({ dshCommand, homedir, desktopExecutables = [], extensionDir } = {}) {
   const list = [];
@@ -115,8 +99,11 @@ function dshCommandCandidates({ dshCommand, homedir, desktopExecutables = [], ex
     'lib',
     'bin.js',
   );
-  if (bin && fs.existsSync(bin)) list.push(`node ${bin}`);
+  if (bin && fs.existsSync(bin)) list.push(`node ${quoteArg(bin)}`);
   for (const executable of desktopExecutables) {
+    // rc.2 的官方命令可直接按完整路径运行，无需注册 PATH 或修改用户环境。
+    const bundledCli = path.join(path.dirname(executable), 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd');
+    if (process.platform === 'win32' && existsAsFile(bundledCli)) list.push(quoteArg(bundledCli));
     const desktopCommand = desktopDshCommand(executable, { extensionDir });
     if (desktopCommand) list.push(desktopCommand);
   }
@@ -183,6 +170,7 @@ function runningDesktopExecutables({ env = process.env, platform = process.platf
   for (const root of [env.LOCALAPPDATA, env.ProgramFiles, env['ProgramFiles(x86)']]) {
     if (root) push(path.join(root, 'DeepSeek Harness', 'DeepSeek Harness.exe'));
   }
+  if (env.LOCALAPPDATA) push(path.join(env.LOCALAPPDATA, 'Programs', 'DeepSeek Harness', 'DeepSeek Harness.exe'));
 
   try {
     const powershell = env.SystemRoot
@@ -195,7 +183,9 @@ function runningDesktopExecutables({ env = process.env, platform = process.platf
         '-NoProfile',
         '-NonInteractive',
         '-Command',
-        "Get-Process -Name 'DeepSeek Harness' -ErrorAction SilentlyContinue | ForEach-Object { $_.Path }",
+        "Get-Process -Name 'DeepSeek Harness' -ErrorAction SilentlyContinue | ForEach-Object { $_.Path }; " +
+        "Get-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' -ErrorAction SilentlyContinue | " +
+        "Where-Object { $_.DisplayName -like 'DeepSeek Harness*' -and $_.InstallLocation } | ForEach-Object { Join-Path $_.InstallLocation 'DeepSeek Harness.exe' }",
       ],
       // A cold PowerShell start can exceed 2.5 seconds on Windows.  Missing this
       // result is costly (the panel falls back to a non-existent PATH command),
@@ -226,16 +216,8 @@ function runningDesktopExecutables({ env = process.env, platform = process.platf
 const SAFE_PROFILE = /^[A-Za-z0-9._-]+$/;
 
 /**
- * 按 **cmd.exe 的引号规则**为一段文本添加引号（仅在需要时添加）。
- *
- * 该函数内部**不**进行反斜杠转义的原因：cmd.exe 不识别 `\"`。以前这里写的是
- * `text.replace(/"/g, '\\"')`，随后整条命令行又被 Node 的 argv 规则转义一次
- * （Node 会将内嵌的 `"` 变成 `\"`），cmd 实际收到的是 `\"C:\Program Files\…` ——
- * 该程序将 `\` 视为普通字符，引号配对错误，从而报告「不是内部或外部命令」。
- * 当前有两项保证：① 此处仅按 cmd 的规则添加引号；② 调用 spawn 时传入
- * `windowsVerbatimArguments: true`，由 Node **原样**传递，不再修改。
- * 实测（`node build/repro-locate.cjs`）：修复前，带空格的路径在「不加引号」
- * 与「加引号」两种写法下均无法启动；修复后两种写法均可启动。
+ * 按 cmd.exe 规则引用参数，不做 Node argv 的反斜杠转义。
+ * 调用 spawn 时配合 windowsVerbatimArguments，防止引号被二次转义。
  */
 function quoteArg(value) {
   const text = String(value === undefined || value === null ? '' : value);
@@ -263,20 +245,8 @@ function existsAsFile(candidate) {
 }
 
 /**
- * 将被空格分隔的片段**重新合并**为「磁盘上确实存在的那一段」。
- *
- * 需要该处理的原因：`splitCommand` 仅按空白拆分，面对
- * `C:\…\DSH Desktop\…\dsh.cmd --profile desktop` 这种「路径里有空格」的写法，
- * 会将程序名拆成两段。但仅依据「整串是否为文件」并不充分 —— 用户也可能在含空格的
- * 路径之后继续写参数（本机实际场景：dsh 安装在 `…\DSH Desktop\…` 下面）。
- * 因此此处执行一次贪心回接，**仅在拼接结果确实存在于磁盘上时才合并**：
- *
- *   `node C:\x y\bin.js`   → ['node', 'C:\x y\bin.js']   （脚本路径被合并）
- *   `C:\x y\dsh.cmd --v`   → ['C:\x y\dsh.cmd', '--v']   （程序名被合并）
- *   `dsh --profile a b`    → 原样（不存在任何真实存在的前缀，不进行合并）
- *
- * 该处理只**减少拆分**，不**增加合并**：合并依据是磁盘上存在该文件，而非推测。
- *
+ * 贪心合并被空格分开的路径；只有拼接结果是磁盘上的文件时才合并。
+ * 程序路径和脚本路径均可包含空格，普通参数保持原来的拆分。
  * @param {string[]} parts
  * @returns {string[]}
  */
@@ -304,24 +274,10 @@ function rejoinExisting(parts) {
 }
 
 /**
- * 将设置项中的命令解析为「程序 + 其自带的参数」。
- *
- * 规则（按优先级）：
- *   1. **整串本身即为一个存在的文件** → 该串就是程序，不携带任何参数
- *      （Windows 上 dsh 的真实路径中包含空格：`…\DSH Desktop\…\dsh.cmd`）；
- *   2. 整串以 `"…"` 整体加引号 → 去除引号后按第 1 条处理；
- *   3. 否则按空白拆分，再将「被拆开但磁盘上确实存在的那一段」合并回去
- *      （见 {@link rejoinExisting}）。
- *
- * 不能仅按空白拆分的原因：`dshPanel.dshCommand` 的说明与面板自身的报错文案
- * 均提示用户「将完整路径填入设置项」，用户据此填写的是**未加引号的路径**；
- * 仅按空白拆分会把该路径拆成两段 —— 实测 cmd 的原话为
- * `'C:\Users\…\Roaming\DSH' is not recognized as an internal or external command`
- * （面板会将其转换为中文表述后展示给用户，见 `src/dsh/errors.js`）。
- * 用户不应为了填写一个路径而必须先了解引号规则。
- *
+ * 解析程序与自带参数。整串是现存文件时优先采用；否则去除外层引号，
+ * 按空白拆分，再通过 rejoinExisting 合并现存文件路径。
  * @param {string} command
- * @returns {string[]} 程序 + 自带参数；空数组表示命令是空的。
+ * @returns {string[]} 程序与参数；空数组表示命令为空。
  */
 function resolveCommand(command) {
   const text = String(command === undefined || command === null ? '' : command).trim();
@@ -336,12 +292,8 @@ function resolveCommand(command) {
 /**
  * 将设置项中的 `dshCommand` 拆分为「程序 + 其自带的参数」。
  *
- * 需要拆分的原因：`dshCommand` 允许写成**带参数的完整命令**，最典型的形式为
- * `node D:\...\@deepseek-ai\dsh\lib\bin.js` —— 本机 `dsh` 不在 PATH 上时
- * 需要采用该写法。若将整串当作一个程序名并加引号传给 cmd.exe，cmd 会查找一个
- * 名称中包含空格的程序，直接以退出码 1 失败（实测：
- * `"...\node.exe ...\bin.js" --version` 报「不是内部或外部命令」）。
- * 因此先按空白拆分，再逐段添加引号。
+ * `dshCommand` 允许带参数，例如 `node …/@deepseek-ai/dsh/lib/bin.js`。
+ * 不能把整串当成一个程序名传给 cmd.exe；应分别解析并引用程序和各个参数。
  *
  * 支持使用双引号或单引号将含空格的整段括起（例如
  * `"C:\Program Files\DSH\dsh.cmd"`）。
@@ -386,27 +338,23 @@ function commandLine(command, args = []) {
   return [...parts, ...args].map(quoteArg).join(' ');
 }
 
-function spawnBackgroundDsh({ command, profile, log, extraArgs = [], port }) {
+function spawnBackgroundDsh({ command, profile, log, extraArgs = [], port, ownedIdleMs }) {
   if (!SAFE_PROFILE.test(String(profile))) {
     throw new Error(`配置名不合法：${profile}（只允许字母、数字、点、下划线、连字符）`);
   }
 
   /*
-   * 接入点监听的端口：**由启动内核的一方（面板）决定**，不依赖档中的配置。
-   *
-   * 2026-09-19：端口原先仅写在档的配置中，面板只能假设它与设置项一致；
-   * 不一致时表现为「内核已启动，但接入点未监听在面板等待的端口上」，用户将在
-   * 「正在启动…」状态下等待两分钟。此外，面板自行启动的内核会占用桌面端使用的
-   * 47821 端口。现在将端口写入环境变量，由该插件读取（优先级最高，
-   * 见 packages/dsh-door/lib/port.js 的 resolveDoorPort）。
-   * 档中安装的是较低版本的该插件、不识别该变量时也不会失败：扩展会同时监视
-   * 两个端口，任一端口上的接入点可用即采用（见 view.js 的 waitForFallbackDoor）。
+    * 面板通过环境变量指定自启内核的接入点端口，避免配置不同步与端口争用。
+    * 旧插件不识别该变量时，同时监测配置端口（见 view.js 的 waitForFallbackDoor）。
    */
   const doorPort = Number(port);
   const env =
     Number.isInteger(doorPort) && doorPort >= 0 && doorPort <= 65535
       ? { ...process.env, DSH_ACP_DOOR_PORT: String(doorPort) }
-      : process.env;
+      : { ...process.env };
+  if (Number.isFinite(ownedIdleMs) && ownedIdleMs >= 1000) {
+    env.DSH_BRIDGE_OWNED_IDLE_MS = String(Math.round(ownedIdleMs));
+  }
 
   // `--host 127.0.0.1` 为后备加固：确保其网页界面仅绑定回环地址。
   // `--port 0` 表示由系统任意分配网页端口 —— 本扩展使用接入点，不使用该界面。
@@ -469,21 +417,8 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [], port }) {
         })();
 
   /*
-   * 收集内核的 stderr —— **内核退出的真实原因记录在此**。
-   *
-   * 2026-09-19 发现的问题：此处原先为 `stdio: 'ignore'`，内核的输出被全部丢弃。
-   * 因此用户看到的是面板**推测**的原因（"多半是 dsh 不在 PATH 里"），
-   * 而内核实际明确输出了 `error: profile "desktop" is managed exclusively
-   * by the Electron application` —— 与 PATH 无关，用户按该提示
-   * 修改 dshCommand 只会偏离原因。当前保留末尾 2000 字，足以容纳一段错误信息及其上下文。
-   *
-   * 同日第二次发现的问题：**仅保留而不输出**等同于未保留。用户随后报告
-   * read ECONNRESET"，查阅 VS Code 的面板日志时只能看到
-   * `后台 DSH 退出了（code=1）` —— 内核的退出原因没有任何记录（该段
-   * stderr 仅保存在内存中，随进程结束而丢失）。因此当前两路输出均
-   * **转发到面板日志**（输出 → DSH Panel，VS Code 会将其写入文件），
-   * 故障现场可直接查阅。同时进行限量：单个内核最多记录 120 行 / 12KB，
-   * 避免某个插件输出过多导致日志超出上限。
+    * 保存 stderr 末尾 2000 字供启动失败分类，并限量转发两路输出到面板日志。
+    * 单个内核最多转发 120 行 / 12KB，避免插件输出无限增长。
    */
   const OUTPUT_LINE_CAP = 120;
   const OUTPUT_CHAR_CAP = 12 * 1024;
@@ -648,14 +583,7 @@ function runDshSync({ command, args = [], timeoutMs = 120000 }) {
 }
 
 /**
- * 内核刚退出时，先读取其自身输出，再决定向用户提供何种建议。
- *
- * 需要该步骤的原因（2026-09-19 的经验）：内核退出原因有多种，而面板原先
- * 一律推测为"dsh 不在 PATH 里"。最典型的一次是 `--profile desktop`：
- * DSH 回的是 `profile "desktop" is managed exclusively by the Electron
- * application` —— **该档无法通过命令行启动**，用户按面板的建议修改
- * dshCommand 无效果。因此：可识别的原因如实说明，无法识别时才回退到推测，
- * 并将原文完整附于其后，不作删减。
+ * 按内核输出区分配置集独占、命令缺失等启动失败，给出对应建议。
  *
  * @returns {{kind: string, reason: string, advice: string}} kind 为 'unknown' 时
  *   reason/advice 可能为空，由调用方提供后备。
@@ -666,6 +594,13 @@ function runDshSync({ command, args = [], timeoutMs = 120000 }) {
  */
 function explainKernelFailure({ profile, stderr }) {
   const text = String(stderr || '');
+  if (/incompatible with dsh|installation rejected:[\s\S]*peerDependencies/i.test(text)) {
+    return {
+      kind: 'plugin-incompatible',
+      reason: '连接组件与当前版本不兼容',
+      advice: '更新连接组件并重启后，再重新连接。',
+    };
+  }
   if (/managed exclusively by the Electron application/i.test(text)) {
     return {
       kind: 'app-managed-profile',
@@ -739,7 +674,7 @@ function panelProfileCandidates({
       const list0 = Array.isArray(bundles) ? bundles.map(String) : [];
       const hasDoor = list0.some((name) => /dsh-acp-door/.test(name));
       const hasWebApp = list0.some((name) => /@deepseek-ai\/dsh-web-app/.test(name));
-      // 插件数量较多的档通常能力更强（用户的档即属此类），因此按 bundles 数量降序排列。
+      // 按 bundles 数量降序选择候选配置集，再以名称稳定排序。
       if (hasDoor && hasWebApp) capable.push({ name: entry.name, weight: list0.length });
     } catch {
       // 无法读取或不是 profile 的目录直接跳过，不影响其他候选。

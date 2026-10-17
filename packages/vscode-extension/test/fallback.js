@@ -21,7 +21,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const Module = require('node:module');
 
-const SCRATCH = path.resolve(__dirname, '..', '..', '..', 'spike', 'scratch');
+const SCRATCH = require('./helpers/door').createTestWorkspace('fallback');
 
 /** 测试使用哪个端口：默认与面板默认值一致，可用 DSH_PANEL_TEST_PORT 指定一个空闲端口。 */
 const PORT = Number(process.env.DSH_PANEL_TEST_PORT || 47821);
@@ -29,8 +29,8 @@ const PORT = Number(process.env.DSH_PANEL_TEST_PORT || 47821);
 /**
  * 把该插件固定到 PORT 上的那个 `--patch` 文件。
  *
- * 仅在更换端口时需要：该插件所在行的 config 是整段替换的（实测：
- * 只写 port 时 host/provider/model/preset 会一并消失），因此此处把
+ * 仅在更换端口时需要：该插件所在行的 config 是整段替换的，
+ * 只写 port 时会清除其他字段，因此此处把
  * 每个字段都完整写出。PORT 为 47821 时返回 null —— 档中本已配置该端口，无需补充。
  */
 function writeDoorPortPatch() {
@@ -64,7 +64,7 @@ const configValues = {
   // 生产默认值是 desktop（用户自身的档）。测试中刻意改用 dshdoor：
   // 以测试身份启动用户的真实配置会写入该用户的档与记忆 —— 测试不应具有该权限。
   fallbackProfile: 'dshdoor',
-  dshCommand: 'dsh',
+  dshCommand: process.env.DSH_PANEL_DSH || 'dsh',
   provider: '',
   model: '',
   // 前几节验证的是"收尾必须彻底"，因此此处统一为"面板关闭即回收"（旧行为）。
@@ -111,6 +111,8 @@ require.cache['vscode-mock'] = {
 };
 
 const { DshPanelView } = require('../src/panel/view');
+// Real-process tests must never fall back to a daily configuration set.
+DshPanelView.prototype.profilesFor = () => ['dshdoor'];
 const { probePort } = require('../src/door/locate');
 const {
   desktopExecutablesForTest,
@@ -120,7 +122,14 @@ const {
 
 let passed = 0;
 let failed = 0;
+let modelSkipped = false;
 const failures = [];
+const testPanels = new Set();
+function createPanel(options) {
+  const panel = new DshPanelView(options);
+  testPanels.add(panel);
+  return panel;
+}
 
 function check(name, condition, detail) {
   if (condition) {
@@ -161,13 +170,25 @@ function makeFakeView() {
 function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + totalMs;
-    const tick = () => {
-      if (predicate()) return resolve(true);
+    const tick = async () => {
+      try { if (await predicate()) return resolve(true); }
+      catch (error) { return reject(error); }
       if (Date.now() > deadline) return reject(new Error('等待超时'));
       setTimeout(tick, intervalMs);
     };
     tick();
   });
+}
+
+let sendSequence = 0;
+async function sendMessage(panel, view, text) {
+  const requestId = `fallback-${++sendSequence}`;
+  const start = view.messages.length;
+  await panel.onWebviewMessage({ type: 'send', requestId, text });
+  const result = () => view.messages.slice(start).map(item => item.message).find(message => message.requestId === requestId &&
+    (message.type === 'sendCompleted' || message.type === 'sendResult' && message.phase === 'rejected'));
+  await waitFor(() => Boolean(result()));
+  return result();
 }
 
 (async () => {
@@ -200,12 +221,12 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
   console.log(`  ✅ ${PORT} 是空的，可以测自启内核这条路了${PATCH ? `（该插件固定在 ${PORT}，patch：${PATCH}）` : ''}`);
 
   section('1. 打开面板 → 应该自己把内核拉起来');
-  const panel = new DshPanelView({
+  const panel = createPanel({
     extensionUri: { fsPath: path.resolve(__dirname, '..') },
     log,
     desktopExecutables,
     // 更换端口时，把该插件也指向该端口（生产路径不传此参数）。
-    spawnArgs: PATCH ? ['--patch', PATCH] : [],
+    spawnArgs: [...require('./helpers/door').testPatchArgs(), ...(PATCH ? ['--patch', PATCH] : [])],
   });
   const view = makeFakeView();
   panel.resolveWebviewView(view);
@@ -229,9 +250,7 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
     JSON.stringify(statuses.map((s) => s.detail)),
   );
   check('启动过程不向对话流插入说明卡片', notices.length === 0, JSON.stringify(notices));
-  // 用户曾对这条路径上的文案提出意见（原话：认为"没有现成的内核，正在启动一个
-  // （档：vscode-panel）。第一次会慢一点…"过长）。自启动路径最容易产生长句，
-  // 因此在此固定一条约束：自身生成的文案要短，引用行可略长。
+  // 启动提示采用短句；引用的内核诊断允许较长的行。
   check(
     '自启这条路上的提示也都短（第一行 ≤32 字，引用行 ≤80 字，最多三行）',
     notices.every((text) => {
@@ -248,19 +267,18 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
   check('拿到了会话', Boolean(panel.session && panel.session.sessionId), String(panel.session && panel.session.sessionId));
   check('确实是由本扩展拉起的（记着那个后台进程）', Boolean(panel.background), 'panel.background 是空的');
   console.log(`     从零到可用耗时 ${(took / 1000).toFixed(1)}s`);
+  if (!panel.client || !panel.session?.sessionId) throw new Error('自启内核未建立会话，无法继续模型与复用验收。');
 
   section('2. 自己拉起来的连接也能干活');
   const before = view.messages.length;
-  await panel.onWebviewMessage({
-    type: 'send',
-    text: '用一句话回答：你现在连的是哪个模型？不要用工具。',
-  });
+  await sendMessage(panel, view, '用一句话回答：你现在连的是哪个模型？不要用工具。');
   const after = view.messages.slice(before).map((item) => item.message);
   const modelUnavailable = after.some(
     (item) => item.type === 'error' && isMissingModelCredentials(item.message),
   );
   if (modelUnavailable) {
-    console.log('  ⏭  本机没有当前模型的凭据；保留启动/连接断言，跳过正文断言。');
+    modelSkipped = true;
+    console.log('  ⏭  测试环境没有当前模型的凭据；保留启动/连接断言，跳过正文断言。');
   } else {
     check('收到正文', after.some((item) => item.type === 'text' && item.delta), JSON.stringify(after.map((i) => i.type)));
     check('没有错误', !after.some((item) => item.type === 'error'), JSON.stringify(after.filter((i) => i.type === 'error')));
@@ -269,11 +287,10 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
 
   section('3. 自己拉起来的那个内核要能复用，不能每连一次就多起一个');
   {
-    // 目标中写明"内核由插件按需启动并可复用"。复用有两种情形：
+    // 后台内核应按需启动并复用。复用有两种情形：
     //   ① 桌面端已启动 → 直接连接该内核（vscode-check 的接入模式那 11 项验证的就是这条）；
     //   ② 自行启动的内核仍在运行 → 断线重连时继续使用它，不再启动新的内核。
-    // 情形 ② 此前没有测试覆盖，而它最容易出现的缺陷是「重连时再次 spawn」——
-    // 该类缺陷在界面上无法观察（功能仍可用），只会在进程列表中不断累积。
+    // 断线重连须复用存活内核，避免连接仍可用但每次重连都累积新进程。
     const pidBefore = panel.background && panel.background.child && panel.background.child.pid;
     const backgroundBefore = panel.background;
 
@@ -284,20 +301,23 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
     check('断线不会把自启的那个内核收掉（留着复用）', Boolean(panel.background), 'background 没了');
 
     const resumeIndex = view.messages.length;
-    await panel.onWebviewMessage({ type: 'send', text: '断线重连之后，回一句话确认你还活着。' });
+    if (modelUnavailable) await panel.ensureConnection();
+    else await sendMessage(panel, view, '断线重连之后，回一句话确认你还活着。');
     const resumeMessages = view.messages.slice(resumeIndex).map((item) => item.message);
 
     const pidAfter = panel.background && panel.background.child && panel.background.child.pid;
     check('重连时复用了同一个内核（没有另起一个）',
       pidBefore === pidAfter && panel.background === backgroundBefore,
       `pid ${pidBefore} → ${pidAfter}`);
-    check('重连后仍可正常工作', resumeMessages.some((item) => item.type === 'done'),
+    if (!modelUnavailable) check('重连后仍可正常工作', resumeMessages.some((item) => item.type === 'done'),
       JSON.stringify(resumeMessages.map((i) => i.type)));
-    const resumeModelUnavailable = resumeMessages.some(
+    else check('缺少凭据时仅确认重连建立会话', Boolean(panel.session?.sessionId));
+    const resumeModelUnavailable = modelUnavailable || resumeMessages.some(
       (item) => item.type === 'error' && isMissingModelCredentials(item.message),
     );
     if (resumeModelUnavailable) {
-      console.log('  ⏭  重连已成功；因本机缺少模型凭据，跳过回复内容断言。');
+      modelSkipped = true;
+      console.log('  ⏭  重连已成功；因测试环境缺少模型凭据，跳过回复内容断言。');
     } else {
       check('重连过程没有报错', !resumeMessages.some((item) => item.type === 'error'),
         JSON.stringify(resumeMessages.filter((i) => i.type === 'error').map((i) => i.message)));
@@ -333,121 +353,11 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
     check('进程树上没有残留的 dsh 进程', !stillThere, `pid ${childPid} 还在`);
   }
 
-  section('5. 设置里那个档起不来时，要自己换一个（2026-09-19 用户就是这么挂的）');
-  {
-    /*
-     * 用户当日报告：面板提示「没能启动 DSH 内核」，档为 desktop。
-     * 实际原因是内核返回 `profile "desktop" is managed exclusively by the Electron
-     * application` —— 该档无法通过命令行启动（桌面端独占），而它恰好是当时的默认值。
-     * 结果是：桌面端未启动时面板必然无法启动，而面板自行启动恰恰是此时最需要的。
-     *
-     * 本节使用真实的 desktop 档运行一遍（该档立即退出、不改变任何状态），验证：
-     *   ① 设置中的档排在首位（尊重用户配置）；
-     *   ② 扫描出的备选档中存在可用档；
-     *   ③ 确实切换过去、连接成功并建立会话；
-     *   ④ 全程未向对话流输出错误（因为最终成功）。
-     */
-    const { panelProfileCandidates } = require('../src/door/locate');
-    const realProfiles = panelProfileCandidates({ configured: 'desktop', homedir: os.homedir() });
-    console.log(`     这台机器上的候选档：${realProfiles.join(' → ')}`);
-    check('候选档：设置里的 desktop 排第一（用户明确指定了就尊重他）',
-      realProfiles[0] === 'desktop', realProfiles.join(' | '));
-    const spare = realProfiles.filter((name) => name !== 'desktop');
-    check('候选档：扫出了别的能自己启动的档（否则没有退路）',
-      spare.length > 0, realProfiles.join(' | '));
-
-    if (spare.length > 0) {
-      const savedProfile = configValues.fallbackProfile;
-      const savedCommand = configValues.dshCommand;
-      /*
-       * 强制其走「普通命令行」路径：`dshCommand` 指向 bin.js，不使用 PATH 上的
-       * `dsh`。采用该方式的依据（2026-09-19 查明）：
-       *
-       * PATH 上的 `dsh` 是桌面端自身的垫片（DSH Desktop.exe 带
-       * ELECTRON_RUN_AS_NODE 运行 desktop-cli.js），该垫片能够启动 desktop 档。
-       * 但该垫片位于 `…\host-commands\desktop\generations\<哈希>\bin\` 这类
-       * 一次性目录中 —— 桌面端每次换代都会更换路径。因此启动较早的 VS Code
-       * 进程，其 PATH 可能仍指向已被删除的那一代：`dsh` 无法找到，而 `node bin.js`
-       * 又会拒绝 desktop 档（"managed exclusively by the Electron application"）。
-       * 两条路径同时失败，即为用户当日观察到的现象。
-       */
-      const realBin = path.join(
-        os.homedir(), '.dsh', 'profiles', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js',
-      );
-      const haveBin = fs.existsSync(realBin);
-      configValues.fallbackProfile = 'desktop';
-      if (haveBin) configValues.dshCommand = `node ${realBin}`;
-      const panel2 = new DshPanelView({
-        extensionUri: { fsPath: path.resolve(__dirname, '..') },
-        log,
-        desktopExecutables,
-        spawnArgs: PATCH ? ['--patch', PATCH] : [],
-      });
-      const view2 = makeFakeView();
-      panel2.resolveWebviewView(view2);
-
-      // 记录实际使用的档（spawnFallback 的返回值中包含该信息）。
-      let chosen = null;
-      const realSpawnFallback = panel2.spawnFallback.bind(panel2);
-      panel2.spawnFallback = async (cfg) => {
-        chosen = await realSpawnFallback(cfg);
-        return chosen;
-      };
-
-      const logFrom = logLines.length;
-      const startedAt = Date.now();
-      await panel2.onWebviewMessage({ type: 'ready' });
-      const took = Date.now() - startedAt;
-      console.log(`     从零到可用耗时 ${(took / 1000).toFixed(1)}s（这里含一次注定失败的 desktop 尝试）`);
-      const mine = logLines.slice(logFrom);
-      const attempts = mine.filter((line) => /尝试启动/.test(line)).map((line) => line.replace(/^\[info\] /, ''));
-      console.log(`     试过的路：${attempts.join(' ｜ ')}`);
-      const said = mine.filter((line) => /内核退出原因/.test(line)).map((line) => line.replace(/^\[warn\] /, ''));
-      if (said.length) console.log(`     内核自己说的：${said.join(' ｜ ')}`);
-
-      check('换档之后连上了', chosen && chosen.ok === true, JSON.stringify(chosen));
-      check('没有死在 desktop 上（普通命令行起不来那个档）',
-        Boolean(chosen && chosen.profile && chosen.profile !== 'desktop'),
-        `用了 ${chosen && chosen.profile} —— 如果哪天普通命令行也能起 desktop 了，这条断言就该改`);
-      if (haveBin) {
-        check('内核拒绝 desktop 档的原话被读到了（不再靠猜）',
-          said.some((line) => /managed exclusively/i.test(line)) ||
-            attempts.filter((line) => /配置集：desktop/.test(line)).length === 0,
-          JSON.stringify(said));
-        check('先尝试 desktop 配置集，失败后换用其它配置集',
-          attempts.some((line) => /配置集：desktop/.test(line)) &&
-            attempts.some((line) => !/配置集：desktop/.test(line)),
-          attempts.join(' | '));
-      }
-      check('拿到会话了', Boolean(panel2.session && panel2.session.sessionId),
-        String(panel2.session && panel2.session.sessionId));
-
-      const messages2 = view2.messages.map((item) => item.message);
-      check('成功了就不该往对话流里甩错误',
-        !messages2.some((item) => item.type === 'error'),
-        JSON.stringify(messages2.filter((i) => i.type === 'error').map((i) => i.message)));
-      const topDetail = messages2.filter((i) => i.type === 'status').map((i) => String(i.detail || ''));
-      check('顶栏始终是短状态', topDetail.every((text) => text.length <= 24 && !/\n/.test(text)),
-        JSON.stringify(topDetail));
-
-      const child2 = panel2.background && panel2.background.child;
-      const pid2 = child2 && child2.pid;
-      panel2.dispose();
-      let freed2 = false;
-      try {
-        await waitFor(async () => !(await probePort('127.0.0.1', PORT, 400)), { totalMs: 30000, intervalMs: 600 });
-        freed2 = true;
-      } catch {
-        freed2 = false;
-      }
-      check('换档拉起的那个内核也被收干净了', freed2, `pid ${pid2} 的端口 30s 内没释放`);
-      configValues.fallbackProfile = savedProfile;
-      configValues.dshCommand = savedCommand;
-    }
-  }
+  section('5. 日常配置集的后备切换不在专用配置测试中执行');
+  console.log('  ⏭  未运行日常配置集切换；配置候选与失败后备由离线套件覆盖。');
 
   /*
-   * §6 视图销毁不等于内核死亡（2026-09-19 "聊两句就断" 的结构性修复）。
+   * §6 视图销毁不等于内核死亡：空闲期内允许重开视图复用内核。
    *
    * 使用真实进程验证：启动一个内核 → 销毁面板视图 → 断言内核仍在运行
    * （旧代码在此处执行 killTree，用户观察到的现象是"断线"）→ 再建立面板 →
@@ -463,13 +373,8 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
       fallbackProfile: configValues.fallbackProfile,
       dshCommand: configValues.dshCommand,
     };
-    // 自启动的内核运行在 PORT（§5 末尾刚释放），attach 目标指向一个空闲端口，
-    // 强制其走"自行启动"路径。
-    //
-    // ⚠️ attach 目标不得使用 PORT + 1：面板默认的自启动端口正是 47831，
-    // 而用户使用 VS Code 面板时该端口上存在正在使用的内核 —— 此时会
-    // "连接到其他内核"，使 A/B 两段（销毁不终止内核、重新打开复用同一个）失去意义
-    // （实测已出现）。应选择较远的、未被使用的端口。
+    // PORT 由前面的清理检查释放；连接目标使用另一个空闲端口，强制进入自启路径。
+    // 避开默认自启端口，防止已有内核掩盖视图销毁后复用同一进程的断言。
     configValues.autoStart = true;
     configValues.port = PORT + 4;
     configValues.selfStartPort = PORT;
@@ -482,11 +387,11 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
       if (fs.existsSync(realBin)) configValues.dshCommand = `node ${realBin}`;
     }
 
-    const panelA = new DshPanelView({
+    const panelA = createPanel({
       extensionUri: { fsPath: path.resolve(__dirname, '..') },
       log,
       desktopExecutables,
-      spawnArgs: PATCH ? ['--patch', PATCH] : [],
+      spawnArgs: [...require('./helpers/door').testPatchArgs(), ...(PATCH ? ['--patch', PATCH] : [])],
     });
     panelA.resolveWebviewView(makeFakeView());
     await panelA.onWebviewMessage({ type: 'ready' });
@@ -507,11 +412,11 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
 
     // 用户再次打开面板 —— 应继续使用同一个内核，而不是启动新的内核。
     const logFromB = logLines.length;
-    const panelB = new DshPanelView({
+    const panelB = createPanel({
       extensionUri: { fsPath: path.resolve(__dirname, '..') },
       log,
       desktopExecutables,
-      spawnArgs: PATCH ? ['--patch', PATCH] : [],
+      spawnArgs: [...require('./helpers/door').testPatchArgs(), ...(PATCH ? ['--patch', PATCH] : [])],
     });
     panelB.resolveWebviewView(makeFakeView());
     await panelB.onWebviewMessage({ type: 'ready' });
@@ -529,7 +434,7 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
     check('B：日志说清了"接着用"，没有重新启动内核',
       linesB.some((line) => /接上去|接着用/.test(line)) && !linesB.some((line) => /试着启动/.test(line)),
       JSON.stringify(linesB));
-    check('B：原先那个"5 分钟后收掉"的计时被取消了（日志里有原话）',
+    check('B：重连取消了空闲回收计时',
       linesB.some((line) => /计时取消|又用上/.test(line)), JSON.stringify(linesB));
 
     panelB.dispose();
@@ -545,13 +450,17 @@ function waitFor(predicate, { totalMs = 200000, intervalMs = 500 } = {}) {
   }
 
   console.log(`\n${'═'.repeat(56)}`);
-  if (failed === 0) console.log(`✅ 全部通过：${passed} 项检查`);
+  if (failed === 0) console.log(`${modelSkipped ? '⏭  模型回合未验收；' : '✅ 全部通过：'}${passed} 项检查通过`);
   else {
     console.log(`❌ 通过 ${passed} 项，失败 ${failed} 项：`);
     for (const item of failures) console.log(`   - ${item}`);
   }
-  process.exit(failed === 0 ? 0 : 1);
+  process.exit(failed ? 1 : modelSkipped ? 2 : 0);
 })().catch((error) => {
+  for (const panel of testPanels) {
+    panel.dispose();
+    panel.kernels.disposeAll('测试异常收尾');
+  }
   console.error('💥 测试发生异常：', error.stack || error.message);
   process.exit(1);
 });

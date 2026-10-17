@@ -10,13 +10,13 @@
  * ── 文件格式（v3，实测逆向所得，非官方文档）─────────────────────
  * `session.v3.jsonl.zstd` 为**多帧 zstd 拼接**：每帧包含一批 JSONL 事件，
  * 帧以魔数 `28 B5 2F FD` 开头。Node 的一次性 `zstdDecompressSync` 只解压第一帧，
- * 必须按魔数切帧后逐帧解压（实测 3944 帧无失败）。关键事件：
+ * 必须按魔数切帧后逐帧解压。关键事件：
  *
  *   {type:'session', id, createdAt, cwd, agentPreset}          首帧首行（会话头）
  *   {type:'session/title', data:{title, source:{kind}}}        内核生成的标题
  *   {type:'user/message', data:{content:[{type:'text',text}], source:{kind:'user'|'plugin', ...}}}
  *   {type:'assistant/message', data:{turn, step, message:{content:[{type:'reasoning'|'text'|'tool-call',...}]}}}
- *       —— 每 step 恰好一条，content 是该步的**完整**内容（实测确认，非增量）
+ *       —— 每 step 恰好一条，content 是该步的完整内容（非增量）
  *   {type:'tool/call', data:{callId, name, arguments:"<JSON 字符串>"}}
  *   {type:'tool/result', data:{message:{source:{callId}, content:[{type:'tool-result', content:[...]}]}}}
  *   {type:'turn/start', data:{turn}} / {type:'turn/end', ...}
@@ -28,6 +28,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import zlib from 'node:zlib';
+import asyncHistory from './sessions-async.cjs';
+import historyQuery from './history-query.cjs';
+const { historyOptions, historyPage, pageMetadata } = historyQuery;
 
 /** 会话主文件的固定名称。 */
 export const SESSION_FILE = 'session.v3.jsonl.zstd';
@@ -38,8 +41,9 @@ const ZSTD_MAGIC = [0x28, 0xb5, 0x2f, 0xfd];
 /** 列表默认返回的最大条数（按修改时间从新到旧截断）。 */
 export const DEFAULT_LIST_LIMIT = 100;
 
-/** 单个会话文件超过该字节数时跳过内容解读，仅返回名片信息（防御措施，实测最大约 7MB）。 */
+/** 单个会话文件超过该字节数时跳过内容解读，仅返回名片信息（防御措施）。 */
 const MAX_DECODE_BYTES = 64 * 1024 * 1024;
+export const { listSessionsAsync, getSessionAsync } = asyncHistory.createAsyncHistory({ summarizeSession, sessionTranscript, historyOptions, historyPage, pageMetadata, SESSION_FILE });
 
 /**
  * `$DSH_HOME` 对应的会话目录。
@@ -206,7 +210,8 @@ export function summarizeSession(events, meta = {}) {
  * @param {number} [options.limit]
  * @returns {{sessions: object[], skipped: number, error?: string}}
  */
-export function listSessions(root, { limit = DEFAULT_LIST_LIMIT } = {}) {
+export function listSessions(root, params = {}) {
+  const options = historyOptions(params);
   const found = [];
   let groups = 0;
   let dirs;
@@ -239,7 +244,8 @@ export function listSessions(root, { limit = DEFAULT_LIST_LIMIT } = {}) {
     }
   }
   found.sort((a, b) => b.mtime - a.mtime);
-  const taken = found.slice(0, Math.max(1, limit));
+  const filtering = Boolean(options.query || options.cwd);
+  const taken = filtering ? found : found.slice(options.offset, options.offset + options.limit);
   const sessions = [];
   for (const item of taken) {
     const { events, error } = decodeSessionFile(item.file);
@@ -252,7 +258,7 @@ export function listSessions(root, { limit = DEFAULT_LIST_LIMIT } = {}) {
     sessions.push(card);
   }
   void groups;
-  return { sessions, skipped: Math.max(0, found.length - taken.length) };
+  return filtering ? historyPage(sessions, options) : pageMetadata(sessions, found.length, options);
 }
 
 /**

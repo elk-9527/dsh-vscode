@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const suites = [
+  ['Bridge 运行与鉴权', 'bridge.js'],
   ['帧解析与中继', 'frames.js'],
   ['历史会话读取', 'sessions.js'],
   ['端口与监听边界', 'port.js'],

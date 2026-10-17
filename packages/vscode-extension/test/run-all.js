@@ -22,8 +22,30 @@ const ROOT = path.resolve(__dirname, '..');
 const args = process.argv.slice(2);
 const withUi = args.includes('--ui') || args.includes('--all');
 const withDsh = args.includes('--all');
+const strict = args.includes('--strict');
 
 const suites = [
+  { name: '文件句柄身份与链接切换边界', file: 'test/file-state.js', always: true },
+  { name: '完整报告持久化与多窗口存储边界', file: 'test/report-store.js', always: true },
+  { name: '审查独立验证与多次执行记录', file: 'test/review-verification.js', always: true },
+  { name: '消息排队、历史隔离与模式生效边界', file: 'test/panel-usability.js', always: true },
+  { name: '本轮改动与真实测试任务边界', file: 'test/workflow.js', always: true },
+  { name: '输入框文件、选区与技能快捷引用', file: 'test/composer-context.js', always: true },
+  { name: '连接竞态、权限传递与恢复记录边界', file: 'test/audit-boundaries.js', always: true },
+  { name: '安装包与正式发布的内容校验', file: 'test/packaging.js', always: true },
+  { name: '模型配置、草稿恢复、审查预算与历史缓存', file: 'test/upgrade-controls.js', always: true },
+  { name: '文件引用、历史查询导出与审查修复', file: 'test/feature-updates.js', always: true },
+  { name: 'Provider SDK 与技能写入恢复', file: '../dsh-bridge-sdk/test/contracts.js', always: true },
+  { name: '公共会话 API 与取消边界', file: 'test/public-api.js', always: true },
+  { name: '原生 Chat 与面板联动', file: 'test/native-chat.js', always: true },
+  { name: '技能草稿预览与确认', file: 'test/skill-management.js', always: true },
+  { name: 'Bridge 运行与鉴权', file: '../dsh-door/test/bridge.js', always: true },
+  { name: '共享连接与审查投影', file: 'test/bridge-service.js', always: true },
+  { name: '配置诊断与精确版本安装', file: 'test/bridge-profiles.js', always: true },
+  { name: '运行记录恢复与清理', file: 'test/bridge-operations.js', always: true },
+  { name: '原生命令与重试边界', file: 'test/bridge-views.js', always: true },
+  { name: '内置与文件技能正文读取', file: '../../tools/bridge/test-skill-provider.cjs', always: true },
+  { name: '编辑器账号目录与进程隔离', file: 'test/editor-isolation.js', always: true },
   { name: '静态契约', file: 'test/static.js', always: true },
   { name: '该插件的帧解析（纯函数）', file: '../dsh-door/test/frames.js', always: true },
   { name: '该插件的会话读取（纯函数）', file: '../dsh-door/test/sessions.js', always: true },
@@ -111,11 +133,13 @@ for (const item of results) {
 }
 const bad = results.filter((item) => item.code !== 0 && item.code !== 2);
 const skipped = results.filter((item) => item.code === 2);
-if (bad.length === 0) {
+if (bad.length === 0 && skipped.length === 0) {
   console.log(
     `\n✅ 全部套件通过（共 ${results.length} 个${skipped.length ? `，其中 ${skipped.length} 个跳过` : ''}）`,
   );
+} else if (bad.length === 0) {
+  console.log(`\n${strict ? '❌ 严格验收未完成' : '⏭ 验收未完成'}：${results.length - skipped.length} 个套件通过，${skipped.length} 个因环境条件跳过`);
 } else {
   console.log(`\n❌ ${bad.length} 个套件失败`);
 }
-process.exit(bad.length === 0 ? 0 : 1);
+process.exit(bad.length === 0 && (!strict || skipped.length === 0) ? 0 : 1);

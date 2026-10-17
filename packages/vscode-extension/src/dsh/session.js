@@ -30,6 +30,8 @@ let nextId = 1;
 class DshSession extends EventEmitter {
   /** @type {AbortController|null} 当前回合的中断控制器。 */
   #current = null;
+  #disposed = false;
+  #opening = null;
 
   /**
    * @param {object} options
@@ -42,7 +44,7 @@ class DshSession extends EventEmitter {
     this.log = log || (() => {});
     /** @type {string|null} */
     this.sessionId = null;
-    /** @type {any[]} session/new 返回的配置项（模型清单位于此处）。 */
+    /** @type {any[]} 内核确认的会话配置项（模型清单位于此处）。 */
     this.configOptions = [];
     /**
      * 该插件附加的预设信息：`{presets, current, requested, fallback}`。
@@ -74,6 +76,14 @@ class DshSession extends EventEmitter {
     return this.#current;
   }
 
+  async #openSession(open) {
+    if (this.#disposed) throw new Error('会话已销毁');
+    if (this.#opening) throw new Error('正在建立会话，请稍后重试');
+    const controller = new AbortController(); this.#opening = controller;
+    try { return await open(controller.signal); }
+    finally { if (this.#opening === controller) this.#opening = null; }
+  }
+
   /**
    * 建立一个新的会话。
    *
@@ -84,29 +94,39 @@ class DshSession extends EventEmitter {
    * @returns {Promise<string>} sessionId
    */
   async start({ cwd, provider, model, preset }) {
-    const result = await this.client.newSession(cwd, { preset });
-    if (!result || !result.sessionId) {
-      throw new Error(`session/new 未返回 sessionId：${JSON.stringify(result)}`);
-    }
-    this.sessionId = result.sessionId;
-    this.configOptions = Array.isArray(result.configOptions) ? result.configOptions : [];
-    this.emit('session', { sessionId: this.sessionId });
-    this.emit('config', { configOptions: this.configOptions });
+    if (this.busy) throw new Error('请等当前回合结束后再更换会话');
+    let consumed = false;
+    // 先登记回复，再接收同一数据块中的后续通知；await 续体不重复初始化。
+    const consume = (result) => {
+      if (this.#disposed) throw new Error('会话已销毁');
+      if (!result || !result.sessionId) {
+        throw new Error(`session/new 未返回 sessionId：${JSON.stringify(result)}`);
+      }
+      consumed = true;
+      this.resetState();
+      this.sessionId = result.sessionId;
+      this.cwd = cwd;
+      this.configOptions = Array.isArray(result.configOptions) ? result.configOptions : [];
+      this.emit('session', { sessionId: this.sessionId });
+      this.emit('config', { configOptions: this.configOptions });
 
-    // 该插件会在回复中附加「可用预设清单与本次使用的预设」（ACP 的 _meta 扩展点）。
-    // 内核本身不提供该信息 —— 预设不是 ACP 的概念，而是由该插件替内核接出的。
-    const doorMeta = readDoorMeta(result);
-    if (doorMeta) {
-      this.doorMeta = doorMeta;
-      this.emit('presets', doorMeta);
-    } else {
-      this.doorMeta = undefined;
-    }
+      // 该插件会在回复中附加「可用预设清单与本次使用的预设」（ACP 的 _meta 扩展点）。
+      // 内核本身不提供该信息 —— 预设不是 ACP 的概念，而是由该插件替内核接出的。
+      const doorMeta = readDoorMeta(result);
+      if (doorMeta) {
+        this.doorMeta = doorMeta;
+        this.emit('presets', doorMeta);
+      } else {
+        this.doorMeta = undefined;
+      }
 
-    this.log(
-      'info',
-      `已建会话 ${this.sessionId}（cwd=${cwd}${doorMeta?.current ? `，预设=${doorMeta.current}` : ''}）`,
-    );
+      this.log(
+        'info',
+        `已建会话 ${this.sessionId}（cwd=${cwd}${doorMeta?.current ? `，预设=${doorMeta.current}` : ''}）`,
+      );
+    };
+    const result = await this.#openSession(signal => this.client.newSession(cwd, { preset, signal }, consume));
+    if (!consumed) consume(result);
 
     if (provider && model) {
       await this._applyModel(provider, model);
@@ -125,19 +145,28 @@ class DshSession extends EventEmitter {
    *   指定（或自身记录的）值补挂 —— 不补充时，恢复后的会话不具备工具。
    */
   async resume(sessionId, cwd, { preset } = {}) {
-    const result = await this.client.resumeSession(sessionId, cwd, { preset });
-    this.sessionId = sessionId;
-    this.configOptions = Array.isArray(result && result.configOptions) ? result.configOptions : [];
-    // 该插件在 resume 的回复中同样会附加预设清单，处理方式与 session/new 一致，
-    // 以避免重连后面板上的「模式」下拉框为空。
-    const doorMeta = readDoorMeta(result);
-    if (doorMeta) {
-      this.doorMeta = doorMeta;
-      this.emit('presets', doorMeta);
-    }
-    this.emit('session', { sessionId });
-    this.emit('config', { configOptions: this.configOptions });
-    this.log('info', `已恢复会话 ${sessionId}`);
+    if (this.busy) throw new Error('请等当前回合结束后再更换会话');
+    let consumed = false;
+    const consume = (result) => {
+      if (this.#disposed) throw new Error('会话已销毁');
+      consumed = true;
+      this.resetState();
+      this.sessionId = sessionId;
+      this.cwd = cwd;
+      this.configOptions = Array.isArray(result && result.configOptions) ? result.configOptions : [];
+      // 该插件在 resume 的回复中同样会附加预设清单，处理方式与 session/new 一致，
+      // 以避免重连后面板上的「模式」下拉框为空。
+      const doorMeta = readDoorMeta(result);
+      if (doorMeta) {
+        this.doorMeta = doorMeta;
+        this.emit('presets', doorMeta);
+      }
+      this.emit('session', { sessionId });
+      this.emit('config', { configOptions: this.configOptions });
+      this.log('info', `已恢复会话 ${sessionId}`);
+    };
+    const result = await this.#openSession(signal => this.client.resumeSession(sessionId, cwd, { preset, signal }, consume));
+    if (!consumed) consume(result);
     return sessionId;
   }
 
@@ -208,27 +237,39 @@ class DshSession extends EventEmitter {
    * @param {string} value `configOptions` 中的 value 原样回传（该值为 JSON 字符串）。
    */
   async setModel(value) {
+    return this.setOption('model', value);
+  }
+
+  async setOption(id, value) {
     if (!this.sessionId) throw new Error('还没有会话');
-    const reply = await this.client.setConfigOption(this.sessionId, 'model', value);
+    if (this.busy) throw new Error('请等当前回合结束后再调整模型配置');
+    const option = this.configOptions.find(item => item?.id === id);
+    if (!option || !flattenChoices(option).some(choice => choice.value === value)) throw new Error('该配置值不在内核提供的清单中');
+    const sessionId = this.sessionId;
+    let consumed = false;
     // 内核（dsh-acp 的 setSessionConfigOption）明确返回
     // `{configOptions: [...]}`，这是权威值 —— 内核可能将请求归一化为其他值，
-    // 也可能同时修改其他项。此处原先的实现是将本地副本改为请求的值，
-    // 相当于在内核未采纳时向用户展示错误状态（已发生过：注释中写明"不要自行推测"，
-    // 而代码实际在推测）。当前以内核回复为准，仅在旧版内核不返回该字段时才退回本地修改。
-    const options = reply && Array.isArray(reply.configOptions) ? reply.configOptions : null;
-    if (options) {
-      this.configOptions = options;
-      const current = modelCurrentValue(this.configOptions);
-      if (current && current !== value) {
-        this.log('warn', `请求的模型为 ${value}，内核确定为 ${current}（以内核为准）`);
+    // 也可能同时修改其他项。没有权威回读时保留最后确认值，明确报告无法确认。
+    const consume = (reply) => {
+      if (this.#disposed) throw new Error('会话已销毁');
+      if (this.sessionId !== sessionId) throw new Error('会话已更换，无法确认原会话配置');
+      consumed = true;
+      const options = reply && Array.isArray(reply.configOptions) ? reply.configOptions : null;
+      if (options) {
+        this.configOptions = options;
+        const current = this.configOptions.find(option => option?.id === id)?.currentValue;
+        if (current && current !== value) {
+          this.log('warn', `${id} 请求值为 ${value}，内核确定为 ${current}（以内核为准）`);
+        }
+      } else {
+        this.emit('config', { configOptions: this.configOptions });
+        throw new Error('内核未返回设置回读，无法确认已生效；仍显示最后确认值。');
       }
-    } else {
-      this.configOptions = this.configOptions.map((option) =>
-        option && option.id === 'model' ? { ...option, currentValue: value } : option,
-      );
-    }
-    this.emit('config', { configOptions: this.configOptions });
-    this.log('info', `模型已切换为 ${modelCurrentValue(this.configOptions) || value}`);
+      this.emit('config', { configOptions: this.configOptions });
+    };
+    const reply = await this.client.setConfigOption(sessionId, id, value, consume);
+    if (!consumed) consume(reply);
+    this.log('info', `会话配置 ${id} 已更新`);
   }
 
   /** 内核请求权限时，代替用户作答。 */
@@ -238,9 +279,16 @@ class DshSession extends EventEmitter {
   }
 
   dispose() {
+    this.#disposed = true;
+    this.#opening?.abort();
     this.client.off('update', this._onUpdate);
     this.client.off('close', this._onClose);
     this.removeAllListeners();
+  }
+
+  resetState() {
+    this.messages.clear(); this.tools.clear(); this.usage = null;
+    this.availableCommands = []; this.doorMeta = undefined;
   }
 
   // ── 内部 ────────────────────────────────────────────────────────
@@ -262,8 +310,16 @@ class DshSession extends EventEmitter {
   }
 
   _handleUpdate(sessionId, update) {
-    if (!update || sessionId !== this.sessionId) return;
+    if (this.#disposed || !this.sessionId || !update || sessionId !== this.sessionId) return;
     const kind = update.sessionUpdate;
+
+    // 提供器可在建会话后就绪；配置通知不依赖聊天回合。
+    if (kind === 'config_option_update') {
+      if (!Array.isArray(update.configOptions)) return;
+      this.configOptions = update.configOptions;
+      this.emit('config', { configOptions: this.configOptions });
+      return;
+    }
 
     if (kind === 'agent_message_chunk' || kind === 'user_message_chunk') {
       const delta = textOf(update.content);

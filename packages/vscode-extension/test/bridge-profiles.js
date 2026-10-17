@@ -1,0 +1,56 @@
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+const { inspectProfile, compareProfiles, installationPlan, profileReport } = require('../src/diagnostics/profiles');
+const { installRegistry, runAsync } = require('../src/diagnostics/install');
+const { capabilityState } = require('../src/bridge/availability');
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-profile-diagnostics-'));
+const options = { env: { DSH_HOME: root } }, target = 'custom-panel';
+const directory = name => path.join(root, 'profiles', name);
+const write = (profile, dependencies, bundles = Object.keys(dependencies)) => {
+  fs.mkdirSync(directory(profile), { recursive: true });
+  fs.writeFileSync(path.join(directory(profile), 'package.json'), JSON.stringify({ dsh: { profile: { bundles } }, dependencies, token: 'TOP_SECRET_MODEL_KEY' }));
+};
+const installed = (profile, name, version) => { const dir = path.join(directory(profile), 'node_modules', ...name.split('/')); fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name, version })); };
+(async () => {
+  const dependencies = { '@test/review': '^1.2.0', '@test/local': 'file:missing-0.1.0-ide.1.tgz', '@test/git': 'git+https://user:SECRET_PASSWORD@example.test/plugin.git#abc', '@test/alias': 'npm:another@1.0.0' };
+  write('desktop', dependencies); for (const name of Object.keys(dependencies)) installed('desktop', name, name === '@test/local' ? '0.1.0-ide.1' : '1.2.3');
+  write(target, { '@test/review': '1.0.0', '@test/extra': '1.0.0' }, ['@deepseek-ai/dsh-web-app', '@test/review', '@test/extra']); installed(target, '@test/review', '1.0.0');
+  fs.writeFileSync(path.join(directory(target), 'cordis.patch.yml'), 'token: PRIVATE_PATCH_SECRET');
+  const source = inspectProfile('desktop', options), dest = inspectProfile(target, options);
+  assert(source.exists && dest.hasWebApp); assert.equal(source.packages.find(x => x.name === '@test/local').sourceExists, false);
+  assert(compareProfiles(source, dest).some(x => x.state === 'target-only'));
+  const plan = installationPlan(source, dest); assert.deepEqual(plan.filter(x => x.executable).map(x => x.name), ['@test/review']);
+  assert.equal(installationPlan(source, source).filter(x => x.executable).length, 0);
+  const report = profileReport({ source, target: dest, connection: { connected: true, version: '0.2.0', supported: true }, catalog: { capabilities: [{ id: 'test.review', availability: { state: 'available' } }] } });
+  assert(report.includes('当前运行配置集：尚未确认')); assert(report.includes(target)); assert(!/SECRET|PASSWORD|git\+https|token:/.test(report)); assert(report.includes('清单引用'));
+  assert.throws(() => inspectProfile('../desktop', options));
+  const state = args => capabilityState({ connected: true, supported: true, ...args }).state;
+  assert.equal(state({ connected: false }), 'disconnected'); assert.equal(state({ supported: false }), 'unsupported');
+  assert.equal(state({ capability: undefined, installed: false, profileKnown: false }), 'unknown');
+  assert.equal(state({ capability: undefined, installed: false, profileKnown: true }), 'missing');
+  assert.equal(state({ capability: undefined, installed: true, profileKnown: true }), 'unregistered');
+  assert.equal(state({ capability: { id: 'arbitrary.write', riskTier: 'workspace-write', availability: { state: 'available' } }, trusted: false }), 'restricted');
+  assert.equal(state({ authorized: false }), 'unauthorized');
+  assert(!JSON.stringify(capabilityState({ connected: true, supported: true, capability: { availability: { reason: 'SECRET_PASSWORD' } } })).includes('SECRET'));
+  let calls = 0;
+  const item = plan.find(x => x.name === '@test/review');
+  const result = await installRegistry({ item, command: 'fake-dsh', storage: path.join(root, 'storage'), options, run: async ({ args }) => {
+    calls++; assert.deepEqual(args, ['plugin', '--profile', target, 'add', '@test/review@1.2.3']);
+    assert(fs.existsSync(path.join(root, 'storage', 'install-backups')));
+    installed(target, '@test/review', '1.2.3');
+  } });
+  assert.equal(calls, 1); assert.equal(result.installed.version, '1.2.3');
+  assert(fs.existsSync(path.join(result.backup, 'old-package/package.json'))); assert.equal(fs.readFileSync(path.join(result.backup, 'cordis.patch.yml'), 'utf8'), 'token: PRIVATE_PATCH_SECRET');
+  await assert.rejects(installRegistry({ item: { ...item, target: 'desktop' }, command: 'fake', storage: root, options }), /无效/);
+  await assert.rejects(installRegistry({ item: plan.find(x => x.source === 'local'), command: 'fake', storage: root, options }), /来源或目标/);
+  installed(target, '@test/review', '1.0.0');
+  await assert.rejects(installRegistry({ item, command: 'fake', storage: root, options, run: async () => {} }), error => error.code === -32050 && error.message.includes('回读未通过') && fs.existsSync(path.join(error.backup, 'result.json')));
+  write('desktop', { '@test/review': 'file:local.tgz' });
+  await assert.rejects(installRegistry({ item, command: 'fake', storage: root, options }), /来源或目标/);
+  // 通过真实进程验证包含空格的命令路径，异步调用不能仅验证字符串拼接。
+  const spaced = path.join(root, 'command with spaces'); fs.mkdirSync(spaced);
+  const executable = path.join(spaced, path.basename(process.execPath)); fs.copyFileSync(process.execPath, executable);
+  await runAsync({ command: `"${executable}"`, args: ['--version'], timeoutMs: 10000 });
+  console.log('Profile identity, redaction, source restrictions, backups, revalidation and real command quoting passed');
+})().catch(error => { console.error(error); process.exitCode = 1; });

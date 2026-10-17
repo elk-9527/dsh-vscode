@@ -1,0 +1,154 @@
+name: DSH 版本兼容
+
+on:
+  pull_request:
+    paths:
+      - 'packages/**'
+      - 'tools/**'
+      - 'compat/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/**'
+  schedule:
+    - cron: '20 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.versions.outputs.matrix }}
+      vsix_sha256: ${{ steps.panel.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - id: versions
+        name: 查询官方精确版本
+        shell: pwsh
+        run: |
+          if ('${{ github.event_name }}' -eq 'pull_request') {
+            $matrix = '{"dsh":["0.1.5-rc.2","0.2.0-rc.2","0.2.1-alpha.1"]}'
+          } else {
+            $matrix = node tools/compat/test.cjs --discover --matrix
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          "matrix=$matrix" >> $env:GITHUB_OUTPUT
+      - name: 构建供编辑器共同验收的安装包
+        run: node packages/vscode-extension/tools/publish.js
+      - id: panel
+        shell: pwsh
+        run: |
+          $file = Get-ChildItem -LiteralPath packages/vscode-extension/build -Filter '*.vsix'
+          if (@($file).Count -ne 1) { throw 'Expected exactly one panel archive' }
+          "sha256=$((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+      - uses: actions/upload-artifact@v4
+        with:
+          name: panel-native-candidate
+          path: packages/vscode-extension/build/*.vsix
+          if-no-files-found: error
+
+  kernel:
+    needs: discover
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        dsh: ${{ fromJson(needs.discover.outputs.matrix).dsh }}
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: 隔离真实内核与本机模型服务
+        run: node tools/compat/test.cjs --dsh ${{ matrix.dsh }} --install
+      - name: 导出公开验证结果
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem -LiteralPath build/compat -Filter report.json -Recurse | ForEach-Object {
+            node tools/compat/public-evidence.cjs $_.FullName (Join-Path $_.DirectoryName 'public-validation.json')
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compat-${{ matrix.os }}-${{ matrix.dsh }}
+          path: |
+            build/compat/**/public-validation.json
+
+  minimum-editor:
+    needs: discover
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        editor: [minimum, stable]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: panel-native-candidate
+          path: packages/vscode-extension/build
+      - name: 核对共同安装包摘要
+        shell: pwsh
+        run: |
+          $file = Get-ChildItem -LiteralPath packages/vscode-extension/build -Filter '*.vsix'
+          if (@($file).Count -ne 1 -or (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne '${{ needs.discover.outputs.vsix_sha256 }}') { throw 'Panel archive digest mismatch' }
+      - name: 准备精确内核和最低编辑器
+        shell: pwsh
+        run: |
+          npm install --prefix build/editor-runtime --no-audit --no-fund @deepseek-ai/dsh@0.2.1-alpha.1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $minimumVersion = ((Get-Content -LiteralPath packages/vscode-extension/package.json -Raw | ConvertFrom-Json).engines.vscode).TrimStart('^')
+          $version = if ('${{ matrix.editor }}' -eq 'minimum') { $minimumVersion } else { 'latest' }
+          Invoke-WebRequest "https://update.code.visualstudio.com/$version/win32-x64-archive/stable" -OutFile build/vscode-minimum.zip
+          Expand-Archive -LiteralPath build/vscode-minimum.zip -DestinationPath build/vscode-editor
+      - run: node tools/bridge/build-pilots.cjs
+      - name: 默认启动下验收完整原生流程
+        shell: pwsh
+        run: |
+          $env:DSH_PANEL_DSH = 'node "' + (Join-Path $PWD 'build/editor-runtime/node_modules/@deepseek-ai/dsh/lib/bin.js') + '"'
+          $env:DSH_PANEL_CODE = Join-Path $PWD 'build/vscode-editor/Code.exe'
+          ./tools/bridge/check-minimum.ps1 -DshVersion 0.2.1-alpha.1 -UsePackedVsix
+      - name: 导出最低编辑器公开验证结果
+        shell: pwsh
+        run: |
+          $report = Get-ChildItem -LiteralPath build/compat -Filter bridge-report.json -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if ('${{ matrix.editor }}' -eq 'minimum') {
+            node tools/compat/editor-evidence.cjs $report.FullName build/public-editor-validation.json
+          } else {
+            node tools/compat/editor-evidence.cjs $report.FullName build/public-editor-validation.json --supported
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: 导出原生阶段状态
+        if: always()
+        shell: pwsh
+        run: |
+          $report = Get-ChildItem -LiteralPath build/compat -Filter bridge-report.json -Recurse -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if ($report) {
+            node tools/compat/public-evidence.cjs $report.FullName build/public-editor-stages.json
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: editor-${{ matrix.editor }}
+          path: |
+            build/public-editor-validation.json
+            build/public-editor-stages.json

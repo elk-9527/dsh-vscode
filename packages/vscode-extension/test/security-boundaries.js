@@ -84,8 +84,8 @@ const manifest = require(path.resolve(__dirname, '..', 'package.json'));
 const settings = manifest.contributes.configuration.properties;
 check(
   '全部面板设置均限定为用户级',
-  Object.values(settings).every((setting) => setting.scope === 'machine'),
-  Object.entries(settings).filter(([, setting]) => setting.scope !== 'machine').map(([key]) => key).join(', '),
+  Object.values(settings).every((setting) => ['machine', 'application'].includes(setting.scope)),
+  Object.entries(settings).filter(([, setting]) => !['machine', 'application'].includes(setting.scope)).map(([key]) => key).join(', '),
 );
 check(
   '连接地址设置只允许本机回环写法',

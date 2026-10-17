@@ -13,7 +13,7 @@
  *   [Content_Types].xml       zip 里每种文件扩展名的 MIME 声明
  *   extension/**              扩展本体（package.json 必须在 extension/ 根下）
  *
- * 用法：node tools/build-vsix.mjs
+ * 用法：node tools/build-vsix.js
  */
 
 const fs = require('node:fs');
@@ -46,6 +46,7 @@ function copyInto(from, to) {
 const CONTENT_TYPES = {
   '.json': 'application/json',
   '.js': 'application/javascript',
+  '.ts': 'text/plain',
   '.mjs': 'application/javascript',
   '.css': 'text/css',
   '.svg': 'image/svg+xml',
@@ -60,7 +61,7 @@ const CONTENT_TYPES = {
 
 function contentTypesXml() {
   const defaults = Object.entries(CONTENT_TYPES)
-    .map(([ext, type]) => `  <Default Extension="${ext}" ContentType="${type}"/>`)
+    .map(([ext, type]) => `  <Default Extension="${ext.slice(1)}" ContentType="${type}"/>`)
     .join('\n');
   return `<?xml version="1.0" encoding="utf-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -76,6 +77,8 @@ function escapeXml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 }
+
+function powershellLiteral(value) { return "'" + String(value).replace(/'/g, "''") + "'"; }
 
 function manifestXml(manifest) {
   const categories = Array.isArray(manifest.categories) ? manifest.categories.join(',') : 'Other';
@@ -111,17 +114,9 @@ function manifestXml(manifest) {
 function main() {
   const manifest = readManifest();
 
-  // 1) 清空并重建暂存目录
-  //    沙箱会拦截「一次删除超过 50 个文件」的操作（SAFE_DELETE_BULK_CONFIRM_REQUIRED），
-  //    uitest 场景页数量增多后 build 即超出该阈值。删除失败时把旧目录改名移开（不删除，保留供人工清理）。
-  try {
-    fs.rmSync(BUILD, { recursive: true, force: true });
-  } catch (err) {
-    const stale = path.join(path.dirname(BUILD), `build_stale_bak`);
-    console.warn(`  ⚠ build 清理被拦（${err.code || err.message}），改名挪到 ${stale}`);
-    fs.rmSync(stale, { recursive: true, force: true }); // 上一次改名遗留的残留，通常不存在
-    fs.renameSync(BUILD, stale);
-  }
+  // 只重建暂存目录，保留历史 VSIX 与验收记录供回退。
+  if (path.dirname(path.resolve(STAGE)) !== path.resolve(BUILD) || fs.existsSync(STAGE) && fs.lstatSync(STAGE).isSymbolicLink()) throw new Error('暂存目录超出构建边界或为链接');
+  fs.rmSync(STAGE, { recursive: true, force: true });
   const extensionDir = path.join(STAGE, 'extension');
   fs.mkdirSync(extensionDir, { recursive: true });
 
@@ -139,12 +134,15 @@ function main() {
 
   // 3) 打包为 zip（使用 .NET 的实现，该实现在 .NET Core 上写入正斜杠路径，符合 vsix 要求）
   const vsix = path.join(BUILD, `${manifest.name}-${manifest.version}.vsix`);
+  if (path.dirname(path.resolve(vsix)) !== path.resolve(BUILD)) throw new Error('安装包路径超出构建边界');
   execFileSync(
     'pwsh',
     [
       '-NoProfile',
       '-Command',
-      `Compress-Archive -Path '${path.join(STAGE, '*')}' -DestinationPath '${vsix}' -Force`,
+      `$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; ` +
+        `if (Test-Path -LiteralPath ${powershellLiteral(vsix)}) { Remove-Item -LiteralPath ${powershellLiteral(vsix)} }; ` +
+        `[System.IO.Compression.ZipFile]::CreateFromDirectory(${powershellLiteral(STAGE)}, ${powershellLiteral(vsix)})`,
     ],
     { stdio: 'inherit' },
   );
@@ -155,9 +153,9 @@ function main() {
     [
       '-NoProfile',
       '-Command',
-      `Add-Type -AssemblyName System.IO.Compression.FileSystem; ` +
-        `$z=[System.IO.Compression.ZipFile]::OpenRead('${vsix}'); ` +
-        `$z.Entries | ForEach-Object { $_.FullName }; $z.Dispose()`,
+      `$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; ` +
+        `$z=[System.IO.Compression.ZipFile]::OpenRead(${powershellLiteral(vsix)}); ` +
+        `try { $z.Entries | ForEach-Object { $_.FullName } } finally { $z.Dispose() }`,
     ],
     { encoding: 'utf8' },
   );
@@ -180,4 +178,5 @@ function main() {
   console.log('  ✅ 自检通过（结构完整、条目名规范）');
 }
 
-main();
+if (require.main === module) main();
+module.exports = { manifestXml, contentTypesXml };

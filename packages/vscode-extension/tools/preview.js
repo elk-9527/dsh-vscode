@@ -176,7 +176,7 @@ const presetsMessage = {
  *
  * 选项由生产环境的翻译函数生成（`decorateOptions`），因此中文标签、
  * 说明以及「完全权限需要确认」这一约束，在预览与界面测试中的表现与真实面板一致；
- * 清单本身依据本机内核返回的四档记录（含 Auto Approval 插件增加的那一档）。
+ * 示例清单覆盖四种权限预设，包括 Auto Approval 扩展预设。
  */
 const permissionStateMessage = {
   type: 'permissionState',
@@ -200,37 +200,46 @@ const permissionStateMessage = {
 };
 
 const longAnswer = [
-  '我看了一下你的 `packages/dsh-door/lib/index.js`，问题出在**服务依赖没有声明**。\n',
+  '下面是示例加法函数的检查结果。\n',
   '\n',
-  '原因是 cordis 不允许在没有 `inject` 的情况下读服务属性：\n',
+  '**问题**：函数执行了减法，结果与名称不一致。\n',
+  '调用 `sum(a, b)` 时，两个参数应当分别作为加数参与计算；返回值应当等于两个参数的和。下面的代码使用了减号，因此输入两个不同的正数时，返回值会小于预期。这个示例用来展示长正文、行内代码、代码块、列表与引用的排版。\n',
   '\n',
   '```js\n',
-  "// ❌ 这样会抛：cannot get property \"agentPresets\" without inject\n",
-  "ctx.on('agent/created', ({ agent }) => ctx.agentPresets.mount(agent, 'standard'));\n",
-  '\n',
-  '// ✅ 声明成硬依赖之后就可以读了\n',
-  "export const inject = ['agents', 'agentPresets'];\n",
+  'export function sum(a, b) { return a - b; }\n',
   '```\n',
   '\n',
-  '要点有三个：\n',
+  '## 修改建议\n',
   '\n',
-  '1. 必须声明 `inject`，cordis 没有「可选依赖」这种写法；\n',
-  '2. 挂预设是异步的，而第一个 `session/prompt` 可能比它先到，所以入站要压一下；\n',
-  '3. 失败要吵 —— 用 `try/catch` 静默吞掉，就等于把这个坑埋起来。\n',
+  '1. 将减法运算改为加法。\n',
+  '2. 使用正数、负数与零验证结果。\n',
+  '3. 保存文件后重新执行测试。\n',
   '\n',
-  '> 实测时序：`agent/created` → +55ms 收到 prompt（压住）→ +357ms 预设挂好 → 放行。\n',
+  '测试可以先选取容易手工核对的输入，例如两个正数、一个正数与一个负数、两个零。每一种输入分别记录预期值与实际值，避免只检查函数能否运行。对于无效输入，需要明确是否允许字符串、空值或非数字类型；如需支持，应当先定义转换规则。\n',
   '\n',
-  '要我直接把改动写进去吗？\n',
+  '完成修改后，保留原有公开函数名和参数顺序，并检查调用位置是否依赖旧行为。确认结果正确后，再讨论是否增加新的类型约束。示例不执行实际文件修改，也不产生网络请求，所有内容仅用于界面测试。\n',
+  '\n',
+  '> 这是用于界面回放的合成示例。\n',
 ];
 
 /**
- * 一段真实的 429 报错原文（额度用完时内核即返回该内容，未作任何修改）。
- * 该原文用于构造错误场景：此前这段英文 JSON 会直接展示给用户。
+ * 模拟 429 额度限制的协议报文，用于验证长错误信息仍可查看。
  */
 const ERROR_RAW =
   '回合失败：Internal error: turn failed: 429: {"type":"GoUsageLimitError","message":"5-hour usage limit reached. Resets in 12min..."}';
 
 const SCENARIOS = {
+  composer() {
+    return { steps: [{ message: { type: 'meta', cwd: '/fixture' } }, { message: { type: 'status', state: 'ready', detail: '就绪' } }] };
+  },
+  drafts() {
+    return { steps: [
+      { message: { type: 'meta', cwd: '/fixture' } },
+      { message: { type: 'status', state: 'ready', detail: '就绪' } },
+      { message: { type: 'config', configOptions: [...configMessage.configOptions, { id: 'reasoning_effort', currentValue: 'low', options: [{ value: 'low', name: '低' }, { value: 'high', name: '高' }] }] } },
+      { message: { type: 'draftRestore', draft: { version: 1, cwd: '/fixture', savedAt: Date.now(), text: '恢复的草稿', attachments: [{ kind: 'content', name: 'scratch.js', id: 'scratch', text: 'unsaved', detail: '未保存文件' }] } } },
+    ] };
+  },
   /**
    * 刚打开、尚未连接：不应展示任何内容。
    *
@@ -256,7 +265,7 @@ const SCENARIOS = {
   },
 
   /**
-   * 短文案：展示提示文本可以达到的最短长度（2026-09-19 用户第二次提出意见之后）。
+   * 短提示场景：检查最小文本与控件布局。
    *
    * 单独设置该场景的原因：文案属于不可见的规格，仅记录在文档中会逐渐变长。
    * 此处将自启、复用、重开这三种最常见的提示与一张报错卡片并列展示，
@@ -350,14 +359,14 @@ const SCENARIOS = {
                 kind: 'file',
                 id: 'src/panel/view.js',
                 name: 'src/panel/view.js',
-                uri: 'file:///d%3A/dsh-vscode/packages/vscode-extension/src/panel/view.js',
+                uri: 'file:///fixture/src/panel/view.js',
                 detail: '当前文件',
               },
               {
                 kind: 'selection',
                 id: 'src/panel/html.js:80-82',
                 name: 'src/panel/html.js',
-                uri: 'file:///d%3A/dsh-vscode/packages/vscode-extension/src/panel/html.js',
+                uri: 'file:///fixture/src/panel/html.js',
                 text: '<footer class="composer">',
                 language: 'html',
                 detail: '选中 3 行',
@@ -374,14 +383,14 @@ const SCENARIOS = {
                 kind: 'file',
                 id: 'src/panel/view.js',
                 name: 'src/panel/view.js',
-                uri: 'file:///d%3A/dsh-vscode/packages/vscode-extension/src/panel/view.js',
+                uri: 'file:///fixture/src/panel/view.js',
                 detail: '当前文件',
               },
               {
                 kind: 'selection',
                 id: 'src/panel/html.js:80-82',
                 name: 'src/panel/html.js',
-                uri: 'file:///d%3A/dsh-vscode/packages/vscode-extension/src/panel/html.js',
+                uri: 'file:///fixture/src/panel/html.js',
                 text: '<footer class="composer">',
                 language: 'html',
                 detail: '选中 3 行',
@@ -405,13 +414,13 @@ const SCENARIOS = {
         { message: configMessage },
         { message: presetsMessage },
         { message: { type: 'usage', used: 12480, size: 262144 } },
-        { message: { type: 'user', text: '为什么我的门插件里读 agentPresets 会报错？' } },
+        { message: { type: 'user', text: '请检查这个示例加法函数。' } },
         { message: { type: 'assistant', id: 'a1' } },
         {
           message: {
             type: 'thinking',
             id: 'a1',
-            delta: '先看看 inject 里声明了什么，再对照 cordis 的服务解析规则……',
+            delta: '检查函数的返回值与预期结果……',
           },
         },
         {
@@ -482,7 +491,7 @@ const SCENARIOS = {
           message: {
             type: 'text',
             id: 'a1',
-            delta: '测试在跑，我先把刚才发现的那个问题说清楚：`session/list` 只返回已经落盘的会话',
+            delta: '示例测试仍在运行，完成后将汇总检查结果。',
           },
         },
         { message: { type: 'busy', busy: true } },
@@ -594,7 +603,7 @@ window.acquireVsCodeApi = function () {
   return {
     postMessage: function (message) { window.__received.push(message); },
     getState: function () { return undefined; },
-    setState: function () {},
+    setState: function (state) { window.__draftState = state; },
   };
 };
 </script>

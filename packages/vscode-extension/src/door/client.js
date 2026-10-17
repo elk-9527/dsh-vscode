@@ -204,6 +204,7 @@ class DoorClient extends EventEmitter {
    * @param {object} [options]
    * @param {AbortSignal} [options.signal] 中止时发送 `$/cancel_request`；
    *   注意**不**使该 promise 进入 rejected 状态 —— 内核会返回正常的 `stopReason: cancelled`。
+   * @param {(result: any) => void} [options.onResult] 在下一帧之前同步消费成功回复；异常仅拒绝本请求。
    * @returns {Promise<any>}
    */
   request(
@@ -214,6 +215,7 @@ class DoorClient extends EventEmitter {
       timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
       abortTimeoutMs = CANCEL_GRACE_MS,
       timeoutPhase = 'ACP 请求',
+      onResult,
     } = {},
   ) {
     const id = this.#nextId++;
@@ -243,6 +245,7 @@ class DoorClient extends EventEmitter {
       const entry = {
         resolve,
         reject,
+        onResult,
         cleanup: () => {
           clearTimeout(timeoutTimer);
           clearTimeout(abortTimer);
@@ -314,13 +317,49 @@ class DoorClient extends EventEmitter {
    *   （`agent-preset/locked`，实测），因此面板中更换预设的语义是「下一段新对话使用哪一个」。
    * @returns {Promise<object>} 内核的回复（`sessionId`、`configOptions`），
    *   该插件还会在 `_meta['dsh-door']` 中附加可用预设清单与实际使用的那一项。
+   * @param {(result: object) => void} [onResult] 成功回复的同步消费者，不写入协议参数。
+   * @param {AbortSignal} [options.signal] 取消建立或等待模型注册。
+   * @param {number} [options.modelReadyTimeoutMs] 建会话和模型注册共用的期限，最多三十秒。
    */
-  newSession(cwd, { preset } = {}) {
+  newSession(cwd, { preset, signal, modelReadyTimeoutMs } = {}, onResult) {
     const params = { cwd, mcpServers: [] };
     if (typeof preset === 'string' && preset) {
       params._meta = { [PRESET_META_KEY]: { preset } };
     }
-    return this.request('session/new', params, { timeoutMs: SESSION_REQUEST_TIMEOUT_MS });
+    return this.#sessionRequest('session/new', params, { signal, modelReadyTimeoutMs, onResult });
+  }
+
+  /** A listening ACP endpoint can precede asynchronous provider registration. */
+  async #sessionRequest(method, params, { signal, modelReadyTimeoutMs, onResult }) {
+    const budget = Number.isFinite(modelReadyTimeoutMs)
+      ? Math.max(1, Math.min(SESSION_REQUEST_TIMEOUT_MS, modelReadyTimeoutMs)) : SESSION_REQUEST_TIMEOUT_MS;
+    const deadline = Date.now() + budget, socket = this.#socket;
+    let lastError;
+    while (true) {
+      if (signal?.aborted) throw new DoorRequestError(-32800, `请求已取消：${method}`);
+      if (!this.isConnected || this.#socket !== socket) throw lastError || new Error('连接已中断');
+      const remaining = deadline - Date.now();
+      if (remaining <= 0 && lastError) throw lastError;
+      let accepted = false;
+      try {
+        return await this.request(method, params, { signal, timeoutMs: Math.max(1, remaining),
+          onResult: result => { accepted = true; if (signal?.aborted) throw new DoorRequestError(-32800, `请求已取消：${method}`); onResult?.(result); } });
+      } catch (error) {
+        const details = error.data?.details;
+        if (accepted || error.code !== -32603 || typeof details !== 'string' ||
+            !/^(?:no adapter registered for provider "[^"\r\n]+"|pi-ai provider "[^"\r\n]+" has no configured model "[^"\r\n]+")$/.test(details)) throw error;
+        lastError = error;
+        const delay = Math.min(250, deadline - Date.now());
+        if (delay <= 0 || !this.isConnected || this.#socket !== socket) throw error;
+        await new Promise((resolve, reject) => {
+          const cleanup = () => signal?.removeEventListener('abort', abort);
+          const abort = () => { clearTimeout(timer); cleanup(); reject(new DoorRequestError(-32800, `请求已取消：${method}`)); };
+          const timer = setTimeout(() => { cleanup(); resolve(); }, delay);
+          signal?.addEventListener('abort', abort, { once: true });
+          if (signal?.aborted) abort();
+        });
+      }
+    }
   }
 
   /**
@@ -335,13 +374,16 @@ class DoorClient extends EventEmitter {
    *   该插件会按此处指定的预设（或它自身记录的预设）补挂。
    * @returns {Promise<object>} 内核的回复；该插件同样会在 `_meta['dsh-door']`
    *   中附加可用预设清单与当前使用的那一项。
+   * @param {(result: object) => void} [onResult] 成功回复的同步消费者，不写入协议参数。
+   * @param {AbortSignal} [options.signal] 取消恢复或等待模型注册。
+   * @param {number} [options.modelReadyTimeoutMs] 恢复会话和模型注册共用的期限，最多三十秒。
    */
-  resumeSession(sessionId, cwd, { preset } = {}) {
+  resumeSession(sessionId, cwd, { preset, signal, modelReadyTimeoutMs } = {}, onResult) {
     const params = { sessionId, cwd, mcpServers: [] };
     if (typeof preset === 'string' && preset) {
       params._meta = { [PRESET_META_KEY]: { preset } };
     }
-    return this.request('session/resume', params, { timeoutMs: SESSION_REQUEST_TIMEOUT_MS });
+    return this.#sessionRequest('session/resume', params, { signal, modelReadyTimeoutMs, onResult });
   }
 
   /**
@@ -370,8 +412,9 @@ class DoorClient extends EventEmitter {
    *
    * @returns {Promise<{sessions: object[], skipped: number}>}
    */
-  listHistory() {
-    return this.request('dsh-door/sessions/list', {});
+  listHistory(options = {}) {
+    const { signal, ...params } = options;
+    return this.request('dsh-door/sessions/list', params, { signal });
   }
 
   /**
@@ -447,9 +490,9 @@ class DoorClient extends EventEmitter {
     );
   }
 
-  /** 按会话修改内核配置项（例如模型）。 */
-  setConfigOption(sessionId, configId, value) {
-    return this.request('session/set_config_option', { sessionId, configId, value });
+  /** 按会话修改内核配置项（例如模型）；onResult 在后续帧之前同步消费回读。 */
+  setConfigOption(sessionId, configId, value, onResult) {
+    return this.request('session/set_config_option', { sessionId, configId, value }, { onResult });
   }
 
   // ── 内部 ────────────────────────────────────────────────────────
@@ -481,6 +524,11 @@ class DoorClient extends EventEmitter {
   }
 
   #onMessage(message) {
+    if (!message || typeof message !== 'object' || Array.isArray(message) ||
+      (message.method !== undefined && typeof message.method !== 'string')) {
+      this.log('warn', '收到无效的 JSON-RPC 帧，已忽略');
+      return;
+    }
     // 1) 内核发来的请求（同时带 id 与 method）—— 需要回复，否则该请求会一直等待。
     if (message.method && message.id !== undefined) {
       this.#onAgentRequest(message);
@@ -504,7 +552,12 @@ class DoorClient extends EventEmitter {
           ),
         );
       } else {
-        entry.resolve(message.result);
+        try {
+          entry.onResult?.(message.result);
+          entry.resolve(message.result);
+        } catch (error) {
+          entry.reject(error);
+        }
       }
       return;
     }

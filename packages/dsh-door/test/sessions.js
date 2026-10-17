@@ -131,7 +131,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-sessions-test-'));
 
 // ─────────────────────────────────────────────────────────────
 section('1. resolveSessionsRoot：与内核同一套 DSH_HOME 判定');
-equal('DSH_HOME 优先', resolveSessionsRoot({ env: { DSH_HOME: 'D:\\x' }, homedir: 'H' }), 'D:\\x\\sessions');
+equal('DSH_HOME 优先', resolveSessionsRoot({ env: { DSH_HOME: root }, homedir: 'H' }), path.join(root, 'sessions'));
 equal('缺省落主目录', resolveSessionsRoot({ env: {}, homedir: '/home/u' }), path.join('/home/u', '.dsh', 'sessions'));
 equal('空白 DSH_HOME 当没填', resolveSessionsRoot({ env: { DSH_HOME: '  ' }, homedir: 'H' }), path.join('H', '.dsh', 'sessions'));
 

@@ -1,32 +1,8 @@
 'use strict';
 
-/**
- * 将「用户输入的文字 + 一并携带的编辑器上下文」组装为 ACP 的 prompt 内容块。
- *
- * 单独作为一个文件的原因：该模块为纯函数，可在数毫秒内完成全部测试（见 test/blocks.js），
- * 不需要编辑器，也不需要内核。
- *
- * 设计上有两项选择，均有依据：
- *
- * 1. **已落盘且没有未保存修改的当前文件使用 `resource_link`，不写入正文。** ACP 支持
- *    `{type:'resource_link', name, uri}`；内核（`dsh-acp` 的 `admitAcpPrompt`）
- *    会将其渲染为一行 `[resource_link name="…" uri="…"]` 并**并入正文文本**。
- *    这样 DSH 会**使用自身的工具读取**该文件 —— 不需要将整个文件写入上下文，
- *    大文件也不会导致上下文超限。未保存的新文件没有可读地址，已修改文件的磁盘版本
- *    又不是编辑器里的当前版本；这两种情况改为直接发送编辑器快照，避免模型读到空内容或旧内容。
- *    同时记录同一段源码中的事实，以免后续再次推测：
- *    - 可接受的块仅有 `text`、`resource_link`，以及 `image`（需要先在 initialize
- *      中声明相应能力，否则抛出 `inline image prompts were not advertised`）；
- *    - `audio` 与 `resource`（内嵌资源）被**明确拒绝**，
- *      分别抛出 `audio prompt content is not supported` /
- *      `embedded resource prompt content is not supported`，因此不可使用。
- *
- * 2. **选中的代码直接携带正文。** 选区通常很小，用户的意图通常也是
- *    「仅这几行」，直接给出正文最为准确；同时**也**附带 resource_link，
- *    使其在需要上下文时可以自行读取整个文件。两种信息同时提供，覆盖更完整。
- *
- * @module dsh-panel/blocks
- */
+/** Assemble ACP blocks from user text and explicit context snapshots. Source
+ * metadata identifies the captured body; it never requests a later file read.
+ * Legacy resource links remain supported for existing external callers. */
 
 /** 仅允许常规语言名进入代码围栏（避免异常字符破坏排版）。 */
 const SAFE_LANGUAGE = /^[\w+#.-]{1,20}$/;
@@ -55,27 +31,38 @@ function fenceFor(text) {
  * @returns {string}
  */
 function selectionText(item) {
-  const where = item.name || item.uri || '（未知位置）';
+  const where = item.sourcePath || item.name || item.uri || '（未知位置）';
   const fence = fenceFor(item.text);
   const language = SAFE_LANGUAGE.test(String(item.language || '')) ? item.language : '';
   return [
-    `以下是在编辑器里选中的代码（${where}）：`,
+    `以下是在编辑器里选中的代码快照（${where}${item.startLine ? `，${item.startLine}–${item.endLine || item.startLine} 行` : ''}${snapshotDetail(item)}）：`,
     `${fence}${language}`,
-    String(item.text).replace(/\s+$/, ''),
+    String(item.text),
     fence,
   ].join('\n');
 }
 
-/** 把未保存或已修改文件的编辑器快照转换为正文。 */
+function snapshotDetail(item) {
+  const parts = [];
+  if (item.isUntitled) parts.push('未保存文件');
+  else if (item.isDirty === true) parts.push('含未保存修改');
+  else if (item.isDirty === false) parts.push('加入时已保存');
+  if (item.snapshotAt) parts.push(`快照时间 ${item.snapshotAt}`);
+  return parts.length ? '，' + parts.join('，') : '';
+}
+
+/** 按明确的来源范围描述附加正文，不能将测试摘要或日志冒充完整文件。 */
 function contentText(item) {
-  const where = item.name || '（未命名文件）';
+  if (item.scope === 'selection') return selectionText(item);
+  const where = item.sourcePath || item.name || (item.scope === 'file' ? '（未命名文件）' : '（未知来源）');
   const content = String(item.text);
   const fence = fenceFor(content);
   const language = SAFE_LANGUAGE.test(String(item.language || '')) ? item.language : '';
+  const description = item.scope === 'file' ? '完整文件正文快照' : '附加正文快照';
   return [
-    `以下是编辑器中的当前文件内容（${where}，可能尚未保存）：`,
+    `以下是${description}（${where}${snapshotDetail(item)}）：`,
     `${fence}${language}`,
-    content.replace(/\s+$/, ''),
+    content,
     fence,
   ].join('\n');
 }
@@ -95,15 +82,22 @@ function buildPromptBlocks(text, attachments = []) {
     if (!item || typeof item !== 'object') continue;
     const hasText = typeof item.text === 'string' && item.text.trim();
     const hasUri = typeof item.uri === 'string' && item.uri;
+    if (item.kind === 'skill' && hasText) {
+      blocks.push({ type: 'text', text: `用户显式选择使用以下技能（${item.name || '技能'}）。请按照技能正文处理本次请求。\n\n${item.text}\n\n` });
+    }
     // 选区正文只要非空即携带 —— 正文是用户实际要提供的内容，
     // 位置信息为附加项（无法确定位置时记为「未知位置」）。
-    if (item.kind === 'selection' && hasText) blocks.push({ type: 'text', text: selectionText(item) });
+    if (item.kind === 'selection' && (hasText || item.snapshotAt && typeof item.text === 'string')) blocks.push({ type: 'text', text: selectionText(item) + '\n\n' });
     // 未保存/已修改文件必须使用编辑器快照；即使文件为空，也保留位置与空内容这一事实。
     if (item.kind === 'content' && typeof item.text === 'string') {
-      blocks.push({ type: 'text', text: contentText(item) });
+      blocks.push({ type: 'text', text: contentText(item) + '\n\n' });
+    }
+    // 审查报告只在显式发送附件时进入对话，保留其历史快照含义。
+    if (item.kind === 'review' && hasText) {
+      blocks.push({ type: 'text', text: `以下是已完成的代码审查报告。报告针对审查时的代码快照，后续修改需重新核对。\n${item.finishedAt ? `审查时间：${item.finishedAt}\n` : ''}\n${item.text}` });
     }
     // 选中代码时同时附带一条链接：需要更多上下文时模型可自行读取。
-    if (hasUri) {
+    if (hasUri && !item.snapshotAt && !['review', 'skill'].includes(item.kind)) {
       const link = { type: 'resource_link', name: item.name || item.uri, uri: item.uri };
       if (typeof item.mimeType === 'string' && item.mimeType) link.mimeType = item.mimeType;
       blocks.push(link);

@@ -8,21 +8,15 @@
  */
 
 import {
-  DEFAULT_LIST_LIMIT,
-  getSession,
-  listSessions,
+  getSessionAsync,
+  listSessionsAsync,
   sessionTranscript,
   summarizeSession,
 } from '../sessions.js';
+import historyQuery from '../history-query.cjs';
+const { historyOptions, matchesHistory, historyPage, pageMetadata } = historyQuery;
 
-const MAX_LIST_LIMIT = 500;
 const MAX_CONCURRENCY = 4;
-
-function requestedLimit(params = {}) {
-  return typeof params.limit === 'number' && Number.isFinite(params.limit) && params.limit > 0
-    ? Math.min(Math.floor(params.limit), MAX_LIST_LIMIT)
-    : DEFAULT_LIST_LIMIT;
-}
 
 function assertSessionId(id) {
   const value = String(id || '');
@@ -71,31 +65,55 @@ export function createSessionQueryHistory(service, diag = () => {}) {
   return {
     kind: 'session-query',
     async list(params = {}) {
-      const limit = requestedLimit(params);
-      const records = await service.listSessions();
-      const selected = records.slice(0, limit);
+      params.signal?.throwIfAborted();
+      const options = historyOptions(params);
+      const listed = await service.listSessions(); params.signal?.throwIfAborted();
+      const records = listed.filter(record => {
+        const header = record?.header ?? record?.session ?? record;
+        return typeof header?.id === 'string' && header.id && matchesHistory(header, { ...options, query: '' });
+      });
+      const selected = options.query ? records : records.slice(options.offset, options.offset + options.limit);
+      // The batch API resolves persistence once and folds titles without replaying
+      // every complete log. Full counts and fallback text remain in get(id).
+      if (typeof service.readTitleSnapshots === 'function') {
+        const ids = selected.map(record => record?.header?.id ?? record?.session?.id ?? record?.id).filter(id => typeof id === 'string' && id);
+        const observations = new Map((await service.readTitleSnapshots(ids)).map(item => [item.sessionId, item]));
+        params.signal?.throwIfAborted();
+        const cards = selected.map(record => {
+          const header = record?.header ?? record?.session ?? record ?? {};
+          const observation = observations.get(header.id);
+          const card = summarizeSession(eventsWithSessionHeader(observation?.status === 'fulfilled' ? observation.value.session : header, []));
+          card.summaryPartial = true;
+          if (observation?.status === 'fulfilled') card.title = observation.value.title?.title || '';
+          else if (observation?.status === 'rejected') card.decodeError = '会话标题暂时无法读取';
+          return card;
+        }).filter(card => card.id);
+        return options.query ? historyPage(cards, options) : pageMetadata(cards, records.length, options);
+      }
       const sessions = await mapLimited(selected, async (record) => {
+        params.signal?.throwIfAborted();
         const header = record?.header ?? record?.session ?? record ?? {};
         const id = typeof header.id === 'string' ? header.id : '';
         if (!id) return { id: '', title: '', fallbackTitle: '', cwd: '', preset: '', createdAt: 0, lastTime: 0, turns: 0, userMessages: 0, decodeError: '会话记录缺少 id' };
         try {
-          return historyFromQueryRead(await service.readSession(id)).card;
+          const read = await service.readSession(id); params.signal?.throwIfAborted();
+          return historyFromQueryRead(read).card;
         } catch (error) {
+          params.signal?.throwIfAborted();
           const card = summarizeSession(eventsWithSessionHeader(header, []));
           card.decodeError = error && error.message ? error.message : String(error);
           diag(`读取会话 ${id} 失败，列表中保留名片：${card.decodeError}`);
           return card;
         }
       });
-      return {
-        sessions: sessions.filter((card) => card.id),
-        skipped: Math.max(0, records.length - selected.length),
-      };
+      const cards = sessions.filter(card => card.id);
+      return options.query ? historyPage(cards, options) : pageMetadata(cards, records.length, options);
     },
-    async get(id) {
+    async get(id, options = {}) {
+      options.signal?.throwIfAborted();
       const wanted = assertSessionId(id);
       try {
-        return historyFromQueryRead(await service.readSession(wanted));
+        const result = historyFromQueryRead(await service.readSession(wanted)); options.signal?.throwIfAborted(); return result;
       } catch (error) {
         if (error?.code === 'SESSION_QUERY_SESSION_NOT_FOUND' || /not found|no session/i.test(error?.message || '')) {
           throw new Error(`找不到会话 ${wanted}`);
@@ -111,12 +129,12 @@ export function createLegacyHistory(root) {
   return {
     kind: 'legacy-v3-disk',
     async list(params = {}) {
-      const { sessions, skipped, error } = listSessions(root, { limit: requestedLimit(params) });
+      const { error, ...result } = await listSessionsAsync(root, params);
       if (error) throw new Error(error);
-      return { sessions, skipped };
+      return result;
     },
-    async get(id) {
-      return getSession(root, id, {});
+    async get(id, options = {}) {
+      return getSessionAsync(root, id, options);
     },
   };
 }

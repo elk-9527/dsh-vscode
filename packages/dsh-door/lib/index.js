@@ -24,6 +24,7 @@
  * @module dsh-acp-door
  */
 import net from 'node:net';
+import historyRequests from './history-requests.cjs';
 import { appendFileSync } from 'node:fs';
 import { Duplex } from 'node:stream';
 import { ndJsonStream } from '@agentclientprotocol/sdk';
@@ -33,9 +34,7 @@ import {
   MOUNT_WAIT_MS,
   createOutboundRelay,
   doorStreamNotification,
-  doorSessionsError,
   doorSessionsMethod,
-  doorSessionsResult,
   DOOR_SESSIONS_PREFIX,
   isDoorSessionsRequest,
   isNewSessionRequest,
@@ -49,6 +48,13 @@ import {
 import { resolveSessionsRoot } from './sessions.js';
 import { createLegacyHistory, createSessionQueryHistory } from './kernel/history.js';
 import { createPermissionHandler } from './kernel/permissions.js';
+import { ACP_RUNTIME_VERSION } from './kernel/runtime.js';
+import { IdeBridge } from './bridge/runtime.js';
+import { createEndpoint } from './bridge/endpoint.js';
+import { PREFIX as BRIDGE_PREFIX } from './bridge/protocol.js';
+import { bridgeTransport } from './bridge/transport.js';
+import { managedLifetime } from './bridge/managed-lifetime.js';
+import { withAcpApprovalPriority } from './kernel/acp-context.js';
 // 端口判定单独构成一个纯模块：否则必须载入整个插件（需 import 内核）才能测试该判定。
 import { LOOPBACK_HOST, resolveDoorHost, resolveDoorPort } from './port.js';
 import { resolveInitialModel } from './model.js';
@@ -79,7 +85,7 @@ export const name = 'acp-door';
  * 将 `agentPresets` 声明为**硬依赖**而不采用「运行时检测，缺失则跳过」的原因：
  * cordis 的服务代理对未声明的属性会**直接抛出异常**（`cannot get property "…" without inject`），
  * 而该异常发生在内核创建 agent 的同步流程中 —— 或者中断 `session/new`，
- * 或者被 async 捕获后不再传播、使该插件**表现为正在工作**（实测两种情况均遇到过）。声明为硬依赖后，
+ * 或者被 async 捕获后不再传播。声明为硬依赖后，
  * 缺少该服务的 profile 将直接不启动该接入点，可直接观察，优于静默产生一个没有可用工具的 agent。
  */
 export const inject = ['agents', 'llm', 'sessionPersistence', 'sessions', 'agentPresets'];
@@ -132,13 +138,8 @@ function makeDiag(file) {
  * `agent/created` 的载体是 **agent 自身的作用域**（`scopeTarget(agent, agent)`），
  * 事件按作用域过滤，因此注册在本连接上下文上的监听只接收本连接创建的 agent。
  *
- * ⚠️ 此处存在一个**经实测确认的竞态**：内核派发该事件时**不等待**监听器返回的
- * promise（`Promise.resolve(returned).catch(...)`），因此「补充挂载预设」与
- * 「客户端发出第一个 prompt」是并行的两件事。本地回环往返仅需约 1ms，
- * 而组装一份 preset 需要数十毫秒 —— 往返必然先完成，结果是模型收到
- * **0 个工具 schema**（会话记录中 `toolsTokens: 0`），因而只能把工具调用
- * 以文本形式写出。因此本函数把挂载 promise 记入 `pending`，由
- * {@link gatePrompts} 在传输层阻塞该会话的 `session/prompt`。
+ * 内核派发事件时不等待监听器返回的 promise，客户端可能在预设挂载结束前发送 prompt。
+ * 将挂载 promise 记入 pending，由 gatePrompts 等待完成，确保首轮具备工具 schema。
  *
  * @param child - 本连接的内核上下文（已声明 agentPresets 依赖）。
  * @param preset - preset id。
@@ -147,9 +148,7 @@ function makeDiag(file) {
  */
 function mountPresetOnNewSessions(child, { defaultPreset, state, diag }) {
   child.on('agent/created', ({ agent } = {}) => {
-    // 整段捕获异常：内核将该监听器**同步**执行于创建 agent 的流程内，
-    // 任何同步异常都会直接中断 session/new（实测遇到：
-    // `cannot get property "agentPresets" without inject`）。
+    // 捕获创建 agent 同步流程中的异常，避免直接中断 session/new。
     try {
       const sessionId = agent?.session?.id ?? agent?.id;
       if (typeof sessionId !== 'string' || !sessionId) {
@@ -157,12 +156,13 @@ function mountPresetOnNewSessions(child, { defaultPreset, state, diag }) {
       }
       state.sessions.add(sessionId);
       state.agents.add(agent);
+      state.agentsBySession?.set(sessionId, agent);
       // 本次应当挂载的预设共有三种来源，优先级由高到低：
       //   1. 客户端在 session/new 或 session/resume 中指定的（_meta）；
       //   2. 本内核进程内记录的（该会话此前挂载过的预设）—— 断线重连时适用；
       //   3. 该插件配置中的默认值。
       // 第 2 项重要的原因：内核仅在**桌面端那种建会话方式**下才把预设写入
-      // 会话记录，经该接入点建立的会话记录中没有 agentPreset（实测），因此恢复时
+      // 会话记录，经该接入点建立的会话可能没有 agentPreset，因此恢复时
       // 仅依据记录无法得知原先使用的预设。
       const asked = state.queue.shift() ?? state.resumes.get(sessionId);
       const remembered = state.sessionPresets.get(sessionId);
@@ -205,8 +205,7 @@ function mountPresetOnNewSessions(child, { defaultPreset, state, diag }) {
  * - **恢复的会话**（断线重连，或从历史中打开）不能使用 `select` —— 内核按
  *   「是否执行过回合」上锁（`agent-preset/locked`，属于设计，不是故障）。
  *   但恢复时 agent 的作用域是**重新组装**的，缺少此次补充则两者皆无：
- *   没有工具、没有提示词段落。实测症状较为典型 —— 模型把工具调用以文本形式写出
- *   （`<｜｜DSML｜｜invoke …>`），因为其没有任何工具 schema。
+ *   没有工具、没有提示词段落。
  *   此时使用 `mount(agent.ctx, id)`：该入口供**工厂期**使用，只负责组装，
  *   不受「已执行过回合」这一锁的限制。
  */
@@ -320,13 +319,15 @@ function gatePrompts(source, state, diag) {
           buffer = buffer.slice(index + 1);
           // 该插件自身的方法（历史会话 / 权限预设）在此处就地应答、不转发内核；
           // 其余帧照旧走闸。
+          const incoming = parseLine(line);
+          if (historyRequests.cancelHistoryRequest(incoming, state)) continue;
+          if (line.includes(BRIDGE_PREFIX) && await state.bridge?.handle(parseLine(line), state)) continue;
           if (line.includes(DOOR_STATUS_METHOD)) {
             const handled = handleDoorStatus(line, state, diag);
             if (handled) continue;
           }
           if (line.includes(DOOR_SESSIONS_PREFIX)) {
-            const handled = await handleDoorSessions(line, state, diag);
-            if (handled) continue;
+            if (isDoorSessionsRequest(incoming)) { void handleDoorSessions(line, state, diag).catch(() => diag('历史请求已结束，无法继续应答')); continue; }
           }
           if (line.includes(DOOR_PERMISSION_PREFIX)) {
             const handled = await handleDoorPermission(line, state, diag);
@@ -352,7 +353,11 @@ function handleDoorStatus(line, state, diag) {
   const result = doorStatusPayload({
     model: state.modelRoute,
     historyKind: state.sessionsHandler?.kind,
+    acpVersion: ACP_RUNTIME_VERSION,
     permissionKind: state.permissionHandler?.kind,
+    bridge: state.bridge?.endpoint ? { protocolVersion: 1, catalog: true, operations: true, resume: true, auth: 'endpoint-file-v1' } : undefined,
+    instanceId: state.bridge?.endpoint?.instanceId,
+    connectionCount: state.connectionCount?.(),
   });
   state.respond(doorStatusResult(frame.id, result));
   diag(
@@ -414,23 +419,7 @@ async function handleDoorSessions(line, state, diag) {
   const frame = parseLine(line);
   if (!isDoorSessionsRequest(frame)) return false;
   const method = doorSessionsMethod(frame);
-  const handler = state.sessionsHandler;
-  if (!handler || typeof handler[method] !== 'function') {
-    state.respond(doorSessionsError(frame.id, -32601, `该插件不支持 ${frame.method}（插件版本过低或方法名不符）`));
-    return true;
-  }
-  try {
-    const result =
-      method === 'get'
-        ? await handler.get(frame.params ? frame.params.id : undefined)
-        : await handler.list(frame.params || {});
-    state.respond(doorSessionsResult(frame.id, result));
-    diag(`旁路应答 ${frame.method}（请求 ${frame.id}）成功`);
-  } catch (error) {
-    const message = error && error.message ? error.message : String(error);
-    state.respond(doorSessionsError(frame.id, -32000, message));
-    diag(`旁路应答 ${frame.method}（请求 ${frame.id}）失败：${message}`);
-  }
+  await historyRequests.runHistoryRequest(frame, method, state, diag);
   return true;
 }
 
@@ -557,10 +546,7 @@ function isPresetLocked(error) {
  * @param config.host - 旧版兼容字段。接入点固定监听 127.0.0.1，其它取值会被忽略。
  * @param config.port - 监听端口，默认 47821；传 0 由系统分配一个空闲端口。
  *   优先级：环境变量 `DSH_ACP_DOOR_PORT` > 此处的配置 > 默认值。
- *   设置环境变量这一层的原因（2026-09-19）：端口原先只写在档的配置中，
- *   面板只能"期望"它与设置中的数值一致 —— 不一致即"内核已启动但该接入点未监听在
- *   预期位置"，用户面对「正在启动…」持续等待两分钟。现在启动内核的一方
- *   （VS Code 面板）可以在启动时将其固定，端口由此归**使用方**决定。
+ *   启动内核的客户端可通过环境变量指定端口，避免配置不同步与端口争用。
  * @param config.provider - 新会话初始模型的服务商。
  * @param config.model - 新会话初始模型名。
  * @param config.preset - 新会话挂载的 agent preset，默认 standard。见
@@ -585,10 +571,8 @@ export function apply(ctx, config = {}) {
    * DSH 的 settings 服务会先从磁盘异步读取 `$DSH_HOME/settings.yaml`，服务完成初始化后
    * 才变为可注入；agentDefaultModel 随后才会把基础默认值替换为用户保存的模型。
    *
-   * 真实复现过的竞态：内核进程启动后立刻连接，0 秒时 currentSelection() 返回
-   * deepseek-official/deepseek-flash，2 秒后重新连接才返回用户实际选择的
-   * opencode-go/deepseek-v4.1-flash。若接入点先开放端口，客户端会把这个短暂的基础值
-   * 固定为整条连接的模型，随后表现为“DSH 里明明选对了模型，VS Code 却认证失败”。
+   * 接入点提前开放端口时，客户端可能把尚未更新的基础值固定为整条连接的模型。
+   * 等待设置服务初始化后再解析模型，避免使用过渡期的选择。
    *
    * 因此：只有未显式配置完整 provider/model 时，首次 listen 前等待 settings 服务变为
    * 可注入。5 秒是兼容上限 —— 老 DSH 可能根本没有该服务，不能因此永久不监听。
@@ -626,8 +610,14 @@ export function apply(ctx, config = {}) {
   ctx.inject(['sessionQuery'], (queryCtx) => {
     const handler = createSessionQueryHistory(queryCtx.sessionQuery, diag);
     if (!handler) {
-      diag('sessionQuery 服务存在，但接口版本无法识别，继续使用旧版 v3 只读路径');
-      return undefined;
+      diag('sessionQuery 服务存在，但接口版本无法识别，历史方法明确返回不支持');
+      const unavailable = {
+        kind: 'unavailable',
+        async list() { throw new Error('当前内核的历史接口无法识别'); },
+        async get() { throw new Error('当前内核的历史接口无法识别'); },
+      };
+      sessionsHandler = unavailable;
+      return () => { if (sessionsHandler === unavailable) sessionsHandler = legacySessionsHandler; };
     }
     sessionsHandler = handler;
     diag('历史会话已接入内核 sessionQuery 服务');
@@ -656,6 +646,9 @@ export function apply(ctx, config = {}) {
 
   /** 每个连接对应一份 ACP 桥；断开时逐个拆除。 */
   const live = new Set();
+  const bridge = new IdeBridge();
+  const lifetime = managedLifetime({ bridge, live });
+  ctx.provide('ideBridge', bridge);
 
   /**
    * sessionId → 该会话使用的预设。**内核级**，所有连接共享。
@@ -700,13 +693,13 @@ export function apply(ctx, config = {}) {
     }
 
     // 同一个 socket 的两个方向：一个传给 ACP 读取，一个供 ACP 写入。
-    const { readable, writable } = Duplex.toWeb(socket);
 
     // 本连接共享的状态。置于此处而非模块级的原因：一个内核可能同时接入
     // 多个客户端（VS Code 面板 + 试验台 + …），任一方均不可见其他方的点名。
     const state = {
       /** sessionId → 预设挂载 promise（入站闸与出站方向均需使用）。 */
       pending: new Map(),
+      historyReads: new Map(),
       /** 客户端指定的预设，按 session/new 的发出顺序排队。 */
       queue: [],
       /** 建会话 / 恢复会话的请求 id → 该次点名；出站时按 id 对应回来（Map 同时作为 id 集合使用）。 */
@@ -744,7 +737,11 @@ export function apply(ctx, config = {}) {
       sessions: new Set(),
       /** 同一会话也可能被其它本机界面打开，故进一步按本连接创建的 agent 对象隔离。 */
       agents: new WeakSet(),
+      agentsBySession: new Map(),
+      bridge,
+      connectionCount: () => live.size,
     };
+    const { readable, writable } = bridgeTransport(socket, state);
 
     // 出站方向增加一道「补充预设清单」的闸，入站方向增加一道「阻塞 prompt」的闸。
     const stream = ndJsonStream(
@@ -771,7 +768,7 @@ export function apply(ctx, config = {}) {
           const notification = doorStreamNotification(sessionId, frame);
           if (notification) state.respond(notification);
         }, { global: true });
-        return acp.apply(child, { ...(modelRoute.selection ?? {}), stream });
+        return acp.apply(withAcpApprovalPriority(child), { ...(modelRoute.selection ?? {}), stream });
       },
     });
 
@@ -780,15 +777,17 @@ export function apply(ctx, config = {}) {
 
     const entry = { socket, teardown };
     live.add(entry);
+    lifetime.touch();
 
     const close = () => {
       if (!live.delete(entry)) return;
+      state.historyClosed = true;
+      for (const controller of state.historyReads.values()) controller.abort();
+      bridge.detach(state);
       diag('客户端已断开');
-      try {
-        teardown();
-      } catch (error) {
+      void bridge.idle(state).then(() => { teardown(); lifetime.schedule(); }).catch((error) => {
         ctx.logger?.warn?.(`acp-door: 拆除连接失败：${String(error)}`);
-      }
+      });
     };
 
     socket.on('close', close);
@@ -819,6 +818,9 @@ export function apply(ctx, config = {}) {
     server.listen(port, host, () => {
       const address = server.address();
       const shown = typeof address === 'object' && address ? address.port : port;
+      try { bridge.endpoint = createEndpoint(shown); }
+      catch { ctx.logger?.warn?.('acp-door: 无法准备受保护的本机鉴权文件，插件能力调用已禁用'); }
+      lifetime.schedule(Math.max(120000, Number(process.env.DSH_BRIDGE_OWNED_IDLE_MS) || 0));
       const configuredModel = provider && model ? `${provider}/${model}` : '跟随 DSH 当前默认模型';
       diag(`开始监听 ${host}:${shown}，preset=${preset}，model=${configuredModel}`);
       ctx.logger?.info?.(`acp-door: 正在监听 ${host}:${shown}`);
@@ -831,6 +833,8 @@ export function apply(ctx, config = {}) {
 
   ctx.on('dispose', () => {
     disposed = true;
+    lifetime.dispose();
+    bridge.dispose();
     diag('该插件已被卸载');
     const closed = disposeLiveConnections(live, (phase, error) => {
       const text = `acp-door: 卸载时清理${phase === 'socket' ? '连接' : '连接桥'}失败：${String(error)}`;

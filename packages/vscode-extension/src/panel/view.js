@@ -16,7 +16,12 @@
 const vscode = require('vscode');
 const path = require('node:path');
 const os = require('node:os');
-const { DoorClient } = require('../door/client');
+const { historyOptions } = require('../dsh/history-query');
+const { historyMarkdown } = require('../dsh/history-export');
+const { normalizeDraft, draftKey } = require('./drafts');
+const { ComposerContext } = require('./completions');
+const { MessageQueue, snapshotMessage } = require('./queue');
+const { DshConnectionService } = require('../connection/service');
 const { DshSession } = require('../dsh/session');
 const { describeError } = require('../dsh/errors');
 // 权限预设：中文标签与失败说明（纯函数，见该文件开头关于清单不硬编码的说明）。
@@ -30,6 +35,7 @@ const {
   redactSensitiveOutput,
 } = require('../door/locate');
 const { resolveLoopbackHost } = require('../door/endpoint');
+const { desktopProfilePatchArgs, syncPanelProfilePlugins } = require('../door/setup');
 const { renderHtml, makeNonce } = require('../panel/html');
 const localSessions = require('../dsh/sessions');
 const { kernelManager } = require('../panel/kernel-manager');
@@ -59,21 +65,34 @@ class DshPanelView {
    *   `--patch`，把接入点指向其它端口，这样测试「从零启动」时不需要占用 47821
    *   （桌面端运行时该端口上已存在接入点，否则该测试只能跳过）。
    */
-  constructor({ extensionUri, log, spawnArgs = [], kernels, desktopExecutables = [] }) {
+  constructor({ extensionUri, log, spawnArgs = [], kernels, desktopExecutables = [], connections, workspaceState }) {
+    this.workspaceState = workspaceState;
+    this.draftWrites = Promise.resolve();
+    this.contextTrustEpoch = 0;
+    this.contextSessionSerial = 0;
+    this.editorContextReads = new Set();
+    this.contextTrustWatcher = vscode.workspace.onDidGrantWorkspaceTrust?.(() => {
+      this.contextTrustEpoch++;
+      this.composerQuery?.abort(); this.composerSelection?.abort();
+      for (const controller of this.editorContextReads) controller.abort();
+    });
     this.extensionUri = extensionUri;
     this.log = log;
     this.spawnArgs = spawnArgs;
+    this.connections = connections || new DshConnectionService({ log });
+    this.ownsConnections = !connections;
+    this.connections.driver = () => this.ensureConnection();
     /** 曾经发现过的 DSH Desktop 安装位置；用于桌面端关闭后的自启。 */
     this.desktopExecutables = desktopExecutables;
     /**
-     * 后台内核的归属 —— 归**扩展**所有，不属于本视图（见 kernel-manager.js 开头）。
-     *
-     * 这一条是 2026-09-19 那次"对话进行数次后即断开"问题的结构性修复：原实现中视图一旦销毁
-     * 就终止内核，而视图的销毁条件很常见（折叠侧边栏、拖动面板、重载窗口）。
-     * 现在视图仅作为内核的"使用者"：销毁 = 释放引用，引用归零后仍保留宽限期，
-     * 该期间重新打开面板会继续使用同一个内核。
+     * 后台内核归扩展所有（见 kernel-manager.js）。视图销毁时释放使用引用；
+     * 引用归零后保留宽限期，期间重新打开面板可继续使用同一内核。
      */
     this.kernels = kernels || kernelManager(log);
+    this.kernelConsumer = this.ownsConnections ? this : this.connections;
+    if (!this.ownsConnections) this.connections.bindKernels(this.kernels, () => {
+      const cfg = this.config(); return this.kernels.live(cfg.host, cfg.selfStartPort);
+    });
     /** @type {vscode.WebviewView|undefined} */
     this.view = undefined;
     /** @type {DoorClient|undefined} */
@@ -88,6 +107,13 @@ class DshPanelView {
     this.connecting = null;
     /** 防止连续点击或快速切换模式时并发关闭/创建同一段会话。 */
     this.newSessionPending = null;
+    this.configRequests = Promise.resolve();
+    this.configPending = 0;
+    this.permissionPending = null;
+    this.reconnectPending = null;
+    this.recoveryGeneration = 0;
+    this.recoveryScopes = new Map();
+    this.recoverySequence = 0;
     /**
      * 断线后需要恢复的会话 id。
      *
@@ -101,12 +127,8 @@ class DshPanelView {
     /**
      * 接入现成的 DSH 之后，若该 DSH 无法切换权限 → 改用面板自行启动的 DSH。
      *
-     * 原因（2026-09-19 深夜用户报告"修改之后无法切换权限了"）：
-     * 面板默认先连接 `dshPanel.port`（47821）上现成的那台 —— 桌面端运行时该处即为
-     * **桌面端的内核**，而桌面配置集中的 ACP 接入点插件（dsh-acp-door）版本为 0.0.7（该配置集由桌面端自行
-     * 管理，面板无法修改），该版本没有权限方法，因此选择器只能显示「不可切换」。
-     * 用户观察到的结果是「权限无法切换」，而非「哪个接入点版本过低」—— 因此此处不由用户
-     * 自行判断：**无法切换权限时改用可切换权限的内核**（面板自行启动的那台使用较新的接入点插件）。
+     * 默认连接 `dshPanel.port`（47821）上的现有内核。桌面配置集由桌面端管理，
+     * 旧版 ACP 接入点插件可能不提供权限方法，此时改用面板启动的兼容内核。
      *
      * 两个判定开关，不应随意置位：`ownKernelOnly` 仅在该路径中置位（置位后不再检查
      * 47821，避免反复切换）；`switchedKernel` 保证单个面板只切换一次。
@@ -187,6 +209,18 @@ class DshPanelView {
     this.pendingPermissionRequests = new Map();
     /** 当前已经显示在 webview 中的权限请求 id；undefined 表示没有。 */
     this.visiblePermissionRequestId = undefined;
+    this.queue = new MessageQueue({ onChange: () => this.post(this.queue.state()) });
+    this.queueEpoch = 0;
+    this.sendRequests = new Map();
+    this.liveTranscript = [];
+    this.liveTranscriptBytes = 0;
+    this.liveTranscriptTruncated = false;
+    this.historyReadonly = false;
+    this.historyId = undefined;
+    this.currentPreset = undefined;
+    // ComposerContext immediately captures an already-open editor and reads
+    // workdir(), which requires the kernel manager and session state above.
+    this.composer = new ComposerContext({ vscode, workdir: () => this.workdir(), sessionId: () => this.session?.sessionId, invoke: (...args) => this.skillInvoke(...args), connected: () => Boolean(this.connections?.snapshot().connected) });
   }
 
   // ── 视图 ────────────────────────────────────────────
@@ -213,29 +247,117 @@ class DshPanelView {
     webviewView.onDidDispose(() => {
       if (this.view !== webviewView) return;
       this.view = undefined;
+      this.pauseQueue('面板已关闭，请重新打开后显式继续。');
+      this.composerQuery?.abort();
+      this.composerSelection?.abort();
       this.cancelPendingPermissionRequests(undefined, '面板已关闭');
       // 视图不再存在时释放“正在使用后台内核”的引用。会话连接本身暂时保留：
       // 宽限期内重新打开面板可以继续同一会话；宽限期到期后 manager 回收内核，
       // 正常的 close 处理会记录 resumeTarget，之后可恢复上下文。
-      this.kernels.release(this);
+      if (this.ownsConnections) this.kernels.release(this);
+      else this.connections.release('panel');
       this.log('info', '面板视图已销毁，已释放后台 DSH 的使用引用');
     });
     // 宽限期内重新建立视图：重新声明正在使用该后台内核，取消原定回收计时。
     if (this.background) {
       const cfg = this.config();
       const owned = this.kernels.live(cfg.host, cfg.selfStartPort);
-      if (owned && owned.background === this.background) this.kernels.acquire(this, owned);
+      if (owned && owned.background === this.background) this.kernels.acquire(this.kernelConsumer, owned);
     }
     this.log('info', '面板已打开');
   }
 
   /** 向界面发送一条消息（界面未打开时直接丢弃，不报错）。 */
   post(message) {
+    const transcript = ['user', 'assistant', 'text', 'thinking', 'tool', 'done', 'notice', 'error'];
+    if (message.type === 'reset') this.setLiveTranscript([]);
+    if (transcript.includes(message.type) && !message.historical) {
+      this.recordTranscript(message);
+      if (this.historyReadonly) return;
+    }
     const view = this.view;
     if (!view) return;
     view.webview.postMessage(message).then(undefined, (error) => {
       this.log('warn', `向界面发送消息失败：${error && error.message ? error.message : error}`);
     });
+  }
+
+  setLiveTranscript(events) {
+    this.liveTranscript = [];
+    this.liveTranscriptBytes = 0;
+    this.liveTranscriptTruncated = false;
+    for (const event of events) {
+      const copy = structuredClone(event);
+      if (copy.type === 'replay' && Array.isArray(copy.entries)) {
+        const sizes = copy.entries.map(item => Buffer.byteLength(JSON.stringify(item)) + 1);
+        let bytes = Buffer.byteLength(JSON.stringify({ ...copy, entries: [] })) + sizes.reduce((sum, size) => sum + size, 0);
+        while (bytes > 8 * 1024 * 1024 && copy.entries.length) {
+          const nextUser = copy.entries.findIndex((item, index) => index > 0 && item.kind === 'user');
+          const count = nextUser > 0 ? nextUser : 1;
+          copy.entries.splice(0, count);
+          bytes -= sizes.splice(0, count).reduce((sum, size) => sum + size, 0);
+          copy.truncated = true;
+        }
+        if (copy.truncated) this.liveTranscriptTruncated = true;
+      }
+      this.recordTranscript(copy);
+    }
+  }
+
+  recordTranscript(message) {
+    const copy = structuredClone(message);
+    const merge = ['text', 'thinking', 'tool'].includes(copy.type) && this.liveTranscript.findLastIndex(item => item.type === copy.type && item.id === copy.id &&
+      (copy.type !== 'tool' || item.tool?.toolCallId === copy.tool?.toolCallId));
+    if (typeof merge === 'number' && merge >= 0) {
+      const previous = this.liveTranscript[merge];
+      this.liveTranscriptBytes -= Buffer.byteLength(JSON.stringify(previous));
+      if (copy.type !== 'tool') copy.delta = previous.delta + copy.delta;
+      this.liveTranscript[merge] = copy;
+    } else this.liveTranscript.push(copy);
+    this.liveTranscriptBytes += Buffer.byteLength(JSON.stringify(copy));
+    while (this.liveTranscriptBytes > 8 * 1024 * 1024 || this.liveTranscript.length > 4000) {
+      const nextUser = this.liveTranscript.findIndex((item, index) => index > 0 && item.type === 'user');
+      if (nextUser > 0) {
+        const removed = this.liveTranscript.splice(0, nextUser);
+        this.liveTranscriptBytes -= removed.reduce((sum, item) => sum + Buffer.byteLength(JSON.stringify(item)), 0);
+      } else {
+        // A single very large turn still has a finite cache. Preserve message
+        // identities, and explicitly report omitted old output on restoration.
+        const index = this.liveTranscript.findIndex(item => !['user', 'assistant', 'done'].includes(item.type));
+        if (index < 0) break;
+        const [removed] = this.liveTranscript.splice(index, 1);
+        this.liveTranscriptBytes -= Buffer.byteLength(JSON.stringify(removed));
+      }
+      this.liveTranscriptTruncated = true;
+    }
+  }
+
+  postConversationSnapshot() {
+    this.post({ type: 'conversationSnapshot', events: structuredClone(this.liveTranscript), truncated: this.liveTranscriptTruncated });
+    if (this.liveTranscriptTruncated) this.post({ type: 'notice', historical: true, text: '较早的对话内容已从面板缓存中省略，可在历史记录中查看。' });
+  }
+
+  postWorkspaceMeta(cwd = this.workdir()) {
+    const trusted = vscode.workspace.isTrusted;
+    this.post({ type: 'meta', cwd, trusted, sessionId: this.session?.sessionId });
+    this.post({ type: 'draftRestore', cwd, draft: normalizeDraft(this.workspaceState?.get(draftKey(cwd)), { cwd, trusted }) });
+  }
+
+  contextRequestScope(message = {}) {
+    const cwd = this.workdir(), session = this.session;
+    return { cwd, session, sessionId: session?.sessionId, view: this.view, epoch: this.queueEpoch, trusted: vscode.workspace.isTrusted,
+      trustEpoch: this.contextTrustEpoch, sessionSerial: this.contextSessionSerial, resumeTarget: this.resumeTarget,
+      matches: (!message.cwd || draftKey(message.cwd) === draftKey(cwd)) && (!message.sessionId || message.sessionId === session?.sessionId) };
+  }
+
+  contextRequestCurrent(scope) {
+    return scope.matches && scope.view === this.view && scope.session === this.session && scope.sessionId === this.session?.sessionId &&
+      draftKey(scope.cwd) === draftKey(this.workdir()) && scope.epoch === this.queueEpoch && scope.trusted === vscode.workspace.isTrusted &&
+      scope.trustEpoch === this.contextTrustEpoch && scope.sessionSerial === this.contextSessionSerial && !this.newSessionPending && !this.historyReadonly;
+  }
+
+  contextReplyScope(scope, options) {
+    return { cwd: scope.cwd, sessionId: scope.sessionId, origin: options.origin, source: options.source };
   }
 
   /**
@@ -246,9 +368,15 @@ class DshPanelView {
    * 即在于避免用户直接阅读该内容。错误分类由 `dsh/errors.js` 完成（纯函数，便于测试），
    * 此处只负责把「中文说明 + 原文」一并发送 —— 原文不做任何删减。
    */
-  postError(message, human) {
+  postError(message, human, { historical = false } = {}) {
     const shaped = human && human.title ? human : describeError(message);
-    this.post({ type: 'error', message: shaped.raw || message, human: shaped });
+    const actions = shaped.kind === 'connection' ? [{ id: 'reconnect', label: '重新连接' }, { id: 'log', label: '查看日志' }]
+      : [{ id: 'settings', label: '打开扩展设置' }, { id: 'log', label: '查看日志' }];
+    const recoveryScope = `recovery-${++this.recoverySequence}`;
+    this.recoveryScopes.set(recoveryScope, { cwd: draftKey(this.workdir()), generation: this.recoveryGeneration, serial: this.contextSessionSerial,
+      session: this.session, client: this.client, sessionId: this.session?.sessionId, resumeTarget: this.resumeTarget });
+    if (this.recoveryScopes.size > 50) this.recoveryScopes.delete(this.recoveryScopes.keys().next().value);
+    this.post({ type: 'error', message: shaped.raw || message, human: { ...shaped, actions, recoveryScope }, ...(historical ? { historical: true } : {}) });
   }
 
   // ── 界面发来的消息 ──────────────────────────────────
@@ -261,32 +389,130 @@ class DshPanelView {
           // 界面可能刚打开，也可能被重新加载（会话仍然存在）——
           // 后一种情况需要补发当前状态，否则界面上没有内容。
           // 顶栏的工作目录不依赖连接，先发送。
-          this.post({ type: 'meta', cwd: this.workdir() });
+          this.postWorkspaceMeta();
           const existing = this.session;
           await this.ensureConnection();
           if (existing) this.pushSnapshot();
+          if (this.historyReadonly) { if (this.lastHistoricalReplay) this.post(this.lastHistoricalReplay); }
+          else if (existing) this.postConversationSnapshot();
+          this.post(this.queue.state());
+          this.post({ type: 'historyState', readonly: this.historyReadonly, id: this.historyId });
           break;
         }
         case 'send':
-          await this.send(message.text, message.attachments);
+          await this.acceptMessage(message);
+          break;
+        case 'queueAction':
+          await this.queueAction(message);
+          break;
+        case 'historyBack':
+          this.returnToConversation();
+          break;
+        case 'errorAction':
+          if (message.action === 'reconnect') {
+            await this.reconnect(message);
+          }
+          else if (message.action === 'settings') await vscode.commands.executeCommand('workbench.action.openSettings', '@ext:Elk-ydy.dsh-acp-panel');
+          else if (message.action === 'log') await vscode.commands.executeCommand('dshPanel.showLog');
+          break;
+        case 'draft': {
+          const cwd = message.draft?.cwd;
+          if (typeof cwd !== 'string' || !path.isAbsolute(cwd) || cwd.includes('\0')) break;
+          // A directory switch may arrive before the departing draft's save.
+          // Accept that draft only within the trusted workspace; it must keep
+          // its own storage key instead of being rebound to the new directory.
+          if (draftKey(cwd) !== draftKey(this.workdir()) && (!vscode.workspace.isTrusted || !vscode.workspace.getWorkspaceFolder?.(vscode.Uri.file(cwd)))) break;
+          const draft = normalizeDraft(message.draft, { cwd, trusted: vscode.workspace.isTrusted });
+          if (draft && this.workspaceState) this.draftWrites = this.draftWrites.catch(() => {}).then(() => this.workspaceState.update(draftKey(draft.cwd), draft)).catch(error => this.log('warn', `保存草稿失败：${error.message}`));
+          break;
+        }
+        case 'composerQuery': {
+          this.composerQuery?.abort();
+          this.composerSelection?.abort();
+          const controller = new AbortController(); this.composerQuery = controller;
+          const scope = this.contextRequestScope(message);
+          if (!this.contextRequestCurrent(scope)) break;
+          const options = { origin: message.origin === 'context' ? 'context' : 'syntax', source: message.source, requestId: message.requestId };
+          const reply = { type: 'composerSuggestions', requestId: message.requestId, ...this.contextReplyScope(scope, options) };
+          if (options.origin !== 'context' && message.trigger === '/' && typeof message.query === 'string') {
+            const { commandChoices } = require('../workflow/commands');
+            this.post({ ...reply, items: commandChoices(message.query, { busy: this.composer.busy(), trusted: vscode.workspace.isTrusted }), note: '命令可直接执行，正在查找可用技能…' });
+          }
+          try {
+            const result = await this.composer.query(message.trigger, message.query, controller.signal, options);
+            if (!controller.signal.aborted && this.contextRequestCurrent(scope)) this.post({ ...reply, ...result });
+          } catch (error) {
+            const { commandChoices } = require('../workflow/commands');
+            if (!controller.signal.aborted && this.contextRequestCurrent(scope)) this.post({ ...reply, items: options.origin !== 'context' && message.trigger === '/' && typeof message.query === 'string' ? commandChoices(message.query, { busy: this.composer.busy(), trusted: vscode.workspace.isTrusted }) : [], note: this.errText(error) });
+          }
+          break;
+        }
+        case 'contextAdd':
+        case 'composerSelect': {
+          this.composerSelection?.abort();
+          const controller = new AbortController(); this.composerSelection = controller;
+          const scope = this.contextRequestScope(message);
+          if (!this.contextRequestCurrent(scope)) break;
+          const options = { origin: message.type === 'contextAdd' || message.origin === 'context' ? 'context' : 'syntax', source: message.source, queryRequestId: message.queryRequestId };
+          const reply = { type: 'composerSelected', requestId: message.requestId, ...this.contextReplyScope(scope, options) };
+          try {
+            let id = message.id;
+            if (message.type === 'contextAdd') {
+              if (!['file', 'selection'].includes(message.source)) throw new Error('请选择当前文件或当前选区。');
+              this.composerQuery?.abort();
+              options.requestId = message.requestId;
+              options.queryRequestId = message.requestId;
+              const result = await this.composer.query('#', '', controller.signal, options);
+              id = result.items[0]?.id;
+              if (!id) throw new Error(message.source === 'selection' ? '当前没有可用选区，请在编辑器重新选择。' : '当前没有可引用的文件，请先打开文件。');
+            }
+            const item = await this.composer.select(id, controller.signal, options);
+            if (!controller.signal.aborted && this.contextRequestCurrent(scope)) this.post({ ...reply, item });
+          } catch (error) {
+            if (!controller.signal.aborted && this.contextRequestCurrent(scope)) this.post({ ...reply, error: this.errText(error) });
+          }
+          break;
+        }
+        case 'composerCommand': {
+          const scope = this.contextRequestScope(message);
+          if (!this.contextRequestCurrent(scope)) break;
+          const reply = { type: 'composerSelected', requestId: message.requestId, ...this.contextReplyScope(scope, { origin: message.origin === 'context' ? 'context' : 'syntax', source: message.source }) };
+          try {
+            if (message.origin === 'context') throw new Error('添加上下文入口只附加正文，不能执行命令。');
+            await this.executeComposerCommand(message.id, scope);
+            if (this.contextRequestCurrent(scope)) this.post({ ...reply, command: true });
+          } catch (error) { if (this.contextRequestCurrent(scope)) this.post({ ...reply, error: this.errText(error) }); }
+          break;
+        }
+        case 'workflowAction':
+          await this.onWorkflowAction(message);
+          break;
+        case 'composerCancel':
+          this.composerQuery?.abort();
+          this.composerSelection?.abort();
           break;
         case 'stop':
           // 停止当前回合也必须撤销权限弹窗；只取消主请求会留下一个已经过期、
           // 但仍可点击的确认框，并可能让内核继续等待反向请求的回答。
           this.cancelPendingPermissionRequests(undefined, '用户停止了当前回合');
+          this.pauseQueue('当前回合已停止，排队消息需显式继续。');
           this.session ? this.session.stop() : undefined;
           break;
         case 'newSession':
           await this.newSession();
           break;
         case 'setModel':
-          await this.setModel(message.value);
+          await this.configureSession(message, () => this.setModel(message.value), 'model');
+          break;
+        case 'setOption':
+          await this.configureSession(message, () => this.session.setOption(message.id, message.value), message.id);
           break;
         case 'setPreset':
+          if (!this.contextRequestCurrent(this.contextRequestScope(message))) throw new Error('当前界面只读或对话已变化，请返回当前对话后修改模式。');
           await this.setPreset(message.value);
           break;
         case 'setPermission':
-          await this.setPermission(message.value);
+          await this.setPermission(message.value, message);
           break;
         case 'refreshPermission':
           await this.refreshPermission();
@@ -295,13 +521,16 @@ class DshPanelView {
           this.answerPendingPermission(message.requestId, message.optionId);
           break;
         case 'historyList':
-          await this.sendHistoryList();
+          await this.sendHistoryList(message);
           break;
         case 'historyOpen':
           await this.sendHistoryReplay(message.id);
           break;
         case 'historyResume':
           await this.resumeHistory(message.id);
+          break;
+        case 'historyExport':
+          await this.exportHistory(message.id);
           break;
         case 'openLink':
           this.openLink(message.href);
@@ -313,6 +542,9 @@ class DshPanelView {
       const text = error && error.message ? error.message : String(error);
       this.log('error', `处理界面消息时出错（${message.type}）：${text}`);
       this.postError(text);
+      if (message.type === 'send') this.post({ type: 'sendResult', requestId: message.requestId, success: false, phase: 'rejected', error: text });
+      if (['setOption', 'setModel'].includes(message.type)) this.post({ type: 'config', configOptions: this.session?.configOptions || [] });
+      if (message.type === 'setPermission') this.post({ type: 'settingResult', setting: 'permission', requestId: message.requestId, cwd: this.workdir(), sessionId: this.session?.sessionId, phase: 'completed', success: false, error: text, text });
       // 只有“本回合自身失败”才会在抛出前把 session.busy 复位。若是切换模型、
       // 读取历史等旁路操作失败，模型回合可能仍在执行；此处不能无条件把停止按钮
       // 变回发送按钮，否则界面会允许用户误发第二个并发回合。
@@ -370,6 +602,7 @@ class DshPanelView {
     // 而不是把一串空格作为路径发送。
     const configured = String(this.config().cwd || '').trim();
     if (configured) return configured;
+    if (this.sessionCwd && vscode.workspace.getWorkspaceFolder?.(vscode.Uri.file(this.sessionCwd))) return this.sessionCwd;
     const folders = vscode.workspace.workspaceFolders;
     if (folders && folders.length > 0) return folders[0].uri.fsPath;
     return require('node:os').homedir();
@@ -402,16 +635,7 @@ class DshPanelView {
     });
   }
 
-  /**
-   * 后备启动时需要尝试的候选配置集（同理：测试中可仅保留配置项中指定的那一个）。
-   *
-   * 需要尝试多个配置集的原因：`desktop` 配置集由桌面端独占，命令行无法启动
-   * （2026-09-19 实测：`error: profile "desktop" is managed exclusively by the
-   * Electron application`）。用户未修改过配置项时使用的正是该默认值，因此面板
-   * 在"桌面端未运行"时必然无法启动 —— 而"桌面端未运行"正是最需要面板自行启动的
-   * 情况。因此：先按配置项尝试，失败后在 `$DSH_HOME/profiles` 中查找已安装接入点插件、
-   * 且不专属于桌面端的配置集继续尝试。
-   */
+   /** 优先使用指定的后备配置，再查找已安装接入点且可由命令行启动的配置集。 */
   profilesFor(cfg) {
     return panelProfileCandidates({ configured: cfg.fallbackProfile, homedir: os.homedir() });
   }
@@ -419,10 +643,8 @@ class DshPanelView {
   /**
    * 在后台启动 DSH：按候选命令逐个尝试，以最先开放接入点监听者为准。
    *
-   * 采用「逐个尝试」而非仅使用配置项中那一条的原因：默认值为直接给出的命令 `dsh`，
-   * 本机通常未将其放入 VS Code 可见的 PATH（用户遇到的面板启动失败即由此导致），
-   * 仅尝试一条等同于要求用户「先启动桌面端才能使用面板」。候选清单见
-   * {@link dshCommandCandidates}：配置项中填写的优先，其次是默认安装位置的
+    * `dsh` 可能不在 VS Code 可见的 PATH 中。候选清单见
+    * {@link dshCommandCandidates}：配置项中填写的命令优先，其次是默认安装位置的
    * `node …/@deepseek-ai/dsh/lib/bin.js`。
    *
    * 等待时间：存在下一个候选时只等待 30 秒（无法启动的命令通常立即退出，
@@ -457,7 +679,7 @@ class DshPanelView {
       );
       if (door.ok) {
         this.background = reusable.background;
-        this.kernels.acquire(this, reusable);
+        this.kernels.acquire(this.kernelConsumer, reusable);
         this.log('info', `面板自行启动的内核仍在运行（${cfg.host}:${door.port}），继续使用该内核，不重新启动`);
         this.post({ type: 'notice', text: '继续使用当前正在运行的 DSH。' });
         return { ok: true, command: reusable.command, profile: reusable.profile, port: door.port };
@@ -493,13 +715,61 @@ class DshPanelView {
 
     const failures = [];
     const kinds = new Set();
+    // 同一配置集只需成功同步一次；命令不可用时允许下一条命令候选重试。
+    const syncedProfiles = new Set();
+    const syncAttempts = new Set();
     for (let i = 0; i < plans.length; i += 1) {
       const { profile, command } = plans[i];
       const hasMore = i + 1 < plans.length;
       // 逐项尝试候选命令只写入日志，顶栏不需要随之变化。
       this.log('info', `尝试启动：${redactSensitiveOutput(command)}（配置集：${profile}）`);
+
+      /*
+       * desktop 与 vscode-panel 是两个独立的依赖清单。此前准备命令只给后者安装连接组件，
+       * 结果是：桌面端开着时模型能调用用户插件；桌面端关闭、自启 vscode-panel 后同一批
+       * 插件全部消失。这里在真正自启前做一次差异同步，后续桌面端增装/升级插件也能跟上。
+       *
+       * 仅自动维护约定的 vscode-panel：测试配置集与用户自定义配置集不应被静默改写；
+       * desktop 更不会在此处被写入。同步失败不阻止聊天启动，原有能力仍可继续使用，
+       * 具体原因保留在日志中。
+       */
+      const syncKey = `${profile}\0${command}`;
+      if (
+        profile === 'vscode-panel'
+        && !syncedProfiles.has(profile)
+        && !syncAttempts.has(syncKey)
+      ) {
+        syncAttempts.add(syncKey);
+        this.post({ type: 'status', state: 'connecting', detail: '正在同步插件与配置…' });
+        try {
+          const result = syncPanelProfilePlugins({ command, profile });
+          syncedProfiles.add(profile);
+          if (result.synced.length > 0) {
+            this.log('info', `已将桌面端的 ${result.synced.length} 个插件同步到 ${profile}：${result.synced.join('、')}`);
+            this.post({ type: 'notice', text: `已同步 ${result.synced.length} 个 DSH 插件。` });
+          }
+          if (result.skipped.length > 0) {
+            this.log(
+              'warn',
+              `有 ${result.skipped.length} 个桌面端插件使用本地或无法复现的来源，未自动同步：` +
+                result.skipped.map((item) => item.name).join('、'),
+            );
+          }
+        } catch (error) {
+          this.log('warn', `同步桌面端插件失败，继续启动现有配置：${redactSensitiveOutput(this.errText(error))}`);
+        }
+      }
       let entry;
       try {
+        /*
+         * desktop 的插件配置（模型路由、开关、插件参数）不在 package.json，而在
+         * cordis.patch.yml。自启实例通过 DSH 自身的 --patch 只读叠加这份配置；
+         * 测试传入的覆盖参数放在最后，以便测试端口等显式要求仍拥有最高优先级。
+         */
+        const inheritedConfigArgs = desktopProfilePatchArgs({ profile });
+        if (inheritedConfigArgs.length > 0) {
+          this.log('info', `自启 ${profile} 将只读继承 desktop 的插件配置与模型路由`);
+        }
         // 交由 manager 启动并登记：这样"视图销毁"不会终止该进程，另一个窗口也可以复用。
         // 接入点固定在面板自身的端口上（该插件读取 DSH_ACP_DOOR_PORT，见 dsh-door/lib/port.js）。
         // 配置集中的 port 是**默认值**，不是命令；内核由哪一方启动，端口即由该方决定。
@@ -509,7 +779,7 @@ class DshPanelView {
           command,
           profile,
           log: this.log,
-          extraArgs: this.spawnArgs,
+          extraArgs: [...inheritedConfigArgs, ...this.spawnArgs],
         });
       } catch (error) {
         failures.push(`「${redactSensitiveOutput(command)}」无法启动：${this.errText(error)}`);
@@ -526,7 +796,7 @@ class DshPanelView {
       if (outcome.ok) {
         // 启动成功：该内核归本视图使用（引用计数 +1）。
         // 接入点实际监听的端口即为连接端口（旧版接入点只识别该配置集配置的端口）。
-        this.kernels.acquire(this, entry);
+        this.kernels.acquire(this.kernelConsumer, entry);
         if (outcome.port !== cfg.selfStartPort) {
           this.log('warn', `该配置集中的接入点未识别端口设置，监听在 ${outcome.port}（该配置集中的接入点插件为旧版）`);
         }
@@ -592,9 +862,7 @@ class DshPanelView {
    * 只在该配置集配置的端口上监听，同时监测两者才不至于等待满两分钟。
    *
    * 例外：`ownPortOnly`（"接入的内核无法切换权限，改用面板自行启动的内核"这条路径）。
-   * 该情况下**仅监测面板自身的端口** —— 否则配置项所指端口上现成的旧版接入点会被判定为"新内核已启动完成"，
-   * 从而再次接入同一内核，切换未能生效（2026-09-20 真实窗口自检发现的问题即为该情况：
-   * 日志中记录了该配置集的接入点插件未识别端口设置、监听在 47821 的事实，接入的仍是桌面端的内核）。
+    * 该情况下仅监测面板自身的端口，避免把原端口的旧内核误判为新内核。
    */
   fallbackPorts(cfg) {
     if (this.ownPortOnly) return [cfg.selfStartPort];
@@ -633,6 +901,7 @@ class DshPanelView {
   }
 
   async connectInternal() {
+    this.recoveryGeneration++;
     const cfg = this.config();
     this.post({ type: 'status', state: 'connecting', detail: '正在连接…' });
 
@@ -649,7 +918,7 @@ class DshPanelView {
     }
 
     /*
-     * 连接端口的确定顺序（2026-09-19 修改）：
+     * 连接端口的确定顺序：
      *
      * 1. `dshPanel.port`（默认 47821）上存在接入点 → **接入该内核**。这是桌面端的内核，
      *    也是"一个进程对应一个内核"的情形 —— 面板不自启，也不改动它。
@@ -676,7 +945,7 @@ class DshPanelView {
       const mine = this.kernels.live(cfg.host, cfg.selfStartPort);
       if (mine) {
         // 由本扩展启动：记录为"本视图在用"，面板关闭后该内核才会进入宽限回收（否则会持续保留）。
-        this.kernels.acquire(this, mine);
+        this.kernels.acquire(this.kernelConsumer, mine);
         this.background = mine.background;
       }
       this.log(
@@ -704,11 +973,12 @@ class DshPanelView {
     // 后续所有涉及连接目标的位置均使用 target，不再使用 cfg.port。
     this.targetPort = target;
 
-    const client = new DoorClient({ host: cfg.host, port: target, log: this.log });
+    let client;
     try {
-      await client.connect();
+      client = await this.connections.connect({ host: cfg.host, port: target });
+      if (this.view || this.ownsConnections) this.connections.acquire('panel');
     } catch (error) {
-      client.close();
+      if (client) client.close();
       const text = error && error.message ? error.message : String(error);
       this.postError(`无法连接 DSH：${text}`);
       this.post({ type: 'status', state: 'error', detail: '未连接' });
@@ -721,7 +991,9 @@ class DshPanelView {
     try {
       const status = await client.doorStatus();
       this.doorStatus = status;
+      this.connections.setStatus(status);
       if (status?.version) this.log('info', `接入点插件版本 ${status.version}`);
+      if (status?.runtime?.acpVersion) this.log('info', `实际 ACP 运行时 ${status.runtime.acpVersion}；接入协议 ${status.protocolVersion || '未声明'}`);
       if (status?.capabilities?.historyKind || status?.capabilities?.permissionKind) {
         this.log(
           'info',
@@ -734,7 +1006,7 @@ class DshPanelView {
         client.close();
         this.postError('DSH 还没有可供新对话使用的模型。', {
           title: '尚未选择模型',
-          advice: '请先在 DSH 的模型设置中选择一个默认模型，再重新连接。',
+          advice: '先在 DSH 中选择默认模型，再重新连接。下方扩展设置仅检查连接，不配置默认路由或凭据。',
           raw:
             '接入点插件已正常连接，但未能从 DSH 读取完整的 provider/model。' +
             (status.model.partialConfig
@@ -764,7 +1036,9 @@ class DshPanelView {
     this.client = client;
     const session = new DshSession({ client, log: this.log });
     this.session = session;
+    this.connections.setSession('panel', session);
     this.wire(session, client);
+    this.post({ type: 'status', state: 'connecting', detail: this.resumeTarget ? '正在恢复会话上下文…' : '正在建立新会话…' });
 
     try {
       if (this.resumeTarget) {
@@ -773,7 +1047,7 @@ class DshPanelView {
         try {
           // 同时把当前预设告知该插件：内核不会把经由该插件建立的会话的预设写入会话记录，
           // 该插件依赖该值指定（或依赖其自身记录的值）补充挂载 —— 不补充时，恢复的会话没有可用工具。
-          await session.resume(target, this.workdir(), { preset: this.wantedPreset() });
+          await this.restoreSession(session, target, this.workdir(), this.currentPreset);
           this.resumeTarget = undefined;
           // 恢复的是「已发送过消息」的会话：不应因更换预设而将其静默重新开启。
           this.turnSent = true;
@@ -827,41 +1101,58 @@ class DshPanelView {
     // 无法切换（或不满足切换条件）：此时才输出该中文说明。
     this.explainPermissionOnce();
 
-    this.post({ type: 'status', state: 'ready', detail: '就绪' });
+    this.post({ type: 'status', state: 'ready', detail: '会话已建立，首个任务会验证模型请求。' });
     return session;
   }
 
   /** 把会话与客户端的事件转发到界面。 */
   wire(session, client) {
-    session.on('user', (payload) => this.post({ type: 'user', text: payload.text }));
-    session.on('assistant', (payload) => this.post({ type: 'assistant', id: payload.id }));
-    session.on('text', (payload) => this.post({ type: 'text', id: payload.id, delta: payload.delta }));
-    session.on('thinking', (payload) =>
+    this.unwire(session);
+    const handlers = [];
+    this.sessionBindings ||= new Map();
+    const onSession = (name, listener) => { session.on(name, listener); handlers.push(() => session.off(name, listener)); };
+    onSession('user', (payload) => this.post({ type: 'user', text: payload.text, attachments: payload.attachments }));
+    onSession('assistant', (payload) => {
+      if (this.workflow?.latest && !this.workflow.latest.finished) { this.workflow.latest.messageId = payload.id; this.workflow.publish(); }
+      this.post({ type: 'assistant', id: payload.id });
+    });
+    onSession('text', (payload) => this.post({ type: 'text', id: payload.id, delta: payload.delta }));
+    onSession('thinking', (payload) =>
       this.post({ type: 'thinking', id: payload.id, delta: payload.delta }),
     );
-    session.on('tool', (payload) => this.post({ type: 'tool', id: payload.id, tool: payload.tool }));
-    session.on('done', (payload) => this.post({ type: 'done', id: payload.id, status: payload.status }));
-    session.on('usage', (payload) =>
+    onSession('tool', (payload) => this.post({ type: 'tool', id: payload.id, tool: payload.tool }));
+    onSession('done', (payload) => {
+      if (payload.status === 'error' || payload.status === 'cancelled') this.pauseQueue('当前回合未完成，请处理后显式继续。');
+      this.post({ type: 'done', id: payload.id, status: payload.status });
+    });
+    onSession('usage', (payload) =>
       this.post({ type: 'usage', used: payload.used, size: payload.size }),
     );
-    session.on('config', (payload) => this.post({ type: 'config', configOptions: payload.configOptions }));
-    session.on('presets', (payload) => this.onPresets(payload));
-    session.on('busy', (payload) => {
+    onSession('config', (payload) => this.post({ type: 'config', configOptions: payload.configOptions }));
+    onSession('presets', (payload) => this.onPresets(payload));
+    onSession('busy', (payload) => {
       this.post({ type: 'busy', busy: payload.busy });
       this.post({
         type: 'status',
         state: payload.busy ? 'busy' : 'ready',
         detail: payload.busy ? '工作中…' : '就绪',
       });
+      if (!payload.busy) setTimeout(() => { void this.drainQueue(); }, 0);
     });
-    session.on('session', (payload) => {
+    onSession('session', (payload) => {
+      this.contextSessionSerial++;
+      this.workflow?.publish();
       this.log('info', `当前会话 ${payload.sessionId}`);
+      this.composerQuery?.abort(); this.composerSelection?.abort();
+      this.post({ type: 'meta', cwd: this.workdir(), trusted: vscode.workspace.isTrusted, sessionId: payload.sessionId });
       // 会话确定后（新建/恢复/切换内核）读取一次权限：权限属于内核状态，
       // 更换内核或更换会话时取值可能不同，不能沿用上一次的结果。
       void this.refreshPermission();
     });
 
-    client.on('permission', (requestId, params) => {
+    const onPermission = (requestId, params) => {
+      if (params?.sessionId && params.sessionId !== session.sessionId) return;
+      if (session.externalPermissionHandler) return;
       // 视图可能在模型发出权限请求之前被折叠/销毁。此时没有人能够点击选项，
       // 必须立即回“取消”；仅把消息 post() 给不存在的视图会使内核永久等待。
       if (!this.view) {
@@ -871,8 +1162,11 @@ class DshPanelView {
       }
       this.pendingPermissionRequests.set(requestId, { client, session, params });
       this.showNextPendingPermissionRequest();
-    });
+    };
+    client.on('permission', onPermission); handlers.push(() => client.off('permission', onPermission));
     const onClose = (reason) => {
+      this.pauseQueue('连接已中断，请恢复原对话后显式继续。');
+      this.unwire(session);
       this.clientCloseHandlers.delete(client);
       client.off('close', onClose);
       this.dropPendingPermissionRequests(client);
@@ -889,18 +1183,42 @@ class DshPanelView {
         this.client = undefined;
         this.doorStatus = undefined;
       }
+      this.workflow?.publish();
     };
     this.clientCloseHandlers.set(client, onClose);
     client.on('close', onClose);
+    handlers.push(() => { client.off('close', onClose); if (this.clientCloseHandlers.get(client) === onClose) this.clientCloseHandlers.delete(client); });
+    this.sessionBindings.set(session, handlers);
+  }
+  unwire(session) { for (const dispose of this.sessionBindings?.get(session) || []) dispose(); this.sessionBindings?.delete(session); }
+
+  /** 同一连接的活动会话直接交给面板，不重复 session/resume。 */
+  async adoptSession(session, { cwd, preset } = {}) {
+    if (this.newSessionPending || this.workflow?.activeTest || this.workflow?.recording || this.workflow?.undoing) throw new Error('请等测试、撤销或会话切换完成后再切换会话。');
+    return this.changeSession(() => this.adoptSessionInternal(session, { cwd, preset }), `adopt:${session.sessionId}`);
+  }
+
+  async adoptSessionInternal(session, { cwd, preset } = {}) {
+    if (!vscode.workspace.isTrusted || !vscode.workspace.getWorkspaceFolder(vscode.Uri.file(cwd))) throw new Error('会话目录不在受信任工作区');
+    if (session.client !== this.connections.client || !session.client.isConnected || this.session?.busy || session.busy || this.connections.turns?.has(this.session?.sessionId) || this.connections.turns?.has(session.sessionId)) throw new Error('当前无法切换会话');
+    if (this.session !== session) {
+      this.cancelPendingPermissionRequests(undefined, '切换会话'); this.unwire(this.session);
+      this.session = session; this.client = session.client; this.wire(session, session.client); this.connections.setSession('panel', session);
+    }
+    this.sessionCwd = cwd; this.preset = preset; this.turnSent = session.messages.size > 0;
+    this.workflow?.reset();
+    this.resumeTarget = undefined; this.postWorkspaceMeta(cwd);
+    const replay = await this.sendHistoryReplay(session.sessionId, { readonly: false });
+    if (replay) this.setLiveTranscript([replay]);
+    this.historyReadonly = false; this.historyId = undefined;
+    this.post({ type: 'historyState', readonly: false });
+    await this.refreshPermission(); this.pushSnapshot();
   }
 
   /**
    * 连接断开后，向对话流输出中文说明。
    *
-   * 2026-09-19 用户报告"对话进行数次后出现 read ECONNRESET"，查阅日志才发现面板自行
-   * 启动的内核以**退出码 code=1** 终止，而面板只返回了一句通用的
-   * "连接断开：read ECONNRESET" —— 用户无法判断该问题是否由自身操作引起。
-   * 现在区分两种情形说明：
+   * 通用连接错误不能说明内核是否已经退出，因此按内核所有权补充退出信息：
    *
    * - **本扩展启动的内核已终止** → 报告退出码 + 内核输出的最后内容（原文位于输出面板）；
    * - **连接的是其它来源正在运行的内核（通常为桌面端）** → 明确说明该内核已退出或重启，
@@ -933,11 +1251,13 @@ class DshPanelView {
 
   /** 界面刚加载完成时，补发当前状态。 */
   pushSnapshot() {
+    this.workflow?.publish();
     const session = this.session;
     if (!session) return;
+    this.post({ type: 'meta', cwd: this.workdir(), trusted: vscode.workspace.isTrusted, sessionId: session.sessionId });
     this.post({ type: 'status', state: session.busy ? 'busy' : 'ready', detail: session.busy ? '工作中…' : '就绪' });
     this.post({ type: 'config', configOptions: session.configOptions });
-    if (this.lastPresets) this.post({ type: 'presets', ...this.lastPresets });
+    this.postPresets();
     // 权限：先补发上一次读取的结果（避免出现空白）；从未读取成功时发起一次读取。
     if (this.permission) this.postPermissionState(this.permission);
     else if (this.permissionUnavailable) this.post({ type: 'permissionState', unavailable: this.permissionUnavailable });
@@ -954,15 +1274,33 @@ class DshPanelView {
   onPresets(payload) {
     const presets = Array.isArray(payload?.presets) ? payload.presets : [];
     const current = typeof payload?.current === 'string' && payload.current ? payload.current : undefined;
-    if (current) this.preset = current;
+    if (current) { this.currentPreset = current; if (!this.preset || !this.restoringPreset && this.preset === payload?.requested) this.preset = current; }
     this.lastPresets = { presets, current, requested: payload?.requested };
-    this.post({ type: 'presets', ...this.lastPresets });
+    this.postPresets();
     if (payload?.fallback) {
       this.post({
         type: 'notice',
         text: `「${payload.requested}」模式不存在，已使用「${this.labelOf(current)}」。`,
       });
     }
+  }
+
+  async restoreSession(session, id, cwd, preset) {
+    // A resumed session uses its original preset. Kernel normalization of that
+    // preset must not replace the user's separate choice for the next session.
+    this.restoringPreset = true;
+    try {
+      await session.resume(id, cwd, { preset });
+      if (this.session === session && !session.doorMeta?.current) {
+        this.currentPreset = undefined;
+        if (this.lastPresets) this.lastPresets = { ...this.lastPresets, current: undefined };
+        this.postPresets();
+      }
+    } finally { this.restoringPreset = false; }
+  }
+
+  postPresets() {
+    if (this.lastPresets) this.post({ type: 'presets', ...this.lastPresets, current: this.currentPreset || this.lastPresets.current, pending: this.preset && this.preset !== this.currentPreset ? this.preset : undefined });
   }
 
   /** 预设的中文名称（该插件或内核提供了名称时使用该名称，否则回退为 id）。 */
@@ -973,19 +1311,229 @@ class DshPanelView {
     return (hit && hit.name) || id;
   }
 
+  pauseQueue(reason) {
+    this.queueEpoch++;
+    if (this.queue.active || this.queue.items.length) this.queue.pause(reason);
+    else this.queue.resume();
+  }
+
+  async acceptMessage(message) {
+    const requestId = message.requestId ?? require('node:crypto').randomUUID();
+    let input, fingerprint;
+    try {
+      input = structuredClone({ text: message.text, attachments: message.attachments ?? [] });
+      if (typeof input.text !== 'string' || Buffer.byteLength(input.text) > 256 * 1024 || !Array.isArray(input.attachments) || input.attachments.length > 20) throw new Error('消息或附件超过限制，请缩小内容后重试。');
+      fingerprint = JSON.stringify(input);
+      const previous = this.sendRequests.get(requestId);
+      if (previous) {
+        if (previous.fingerprint !== fingerprint) throw new Error('发送标识已使用，请重新发送。');
+        return previous.promise;
+      }
+    } catch (error) {
+      this.post({ type: 'sendResult', requestId, success: false, phase: 'rejected', error: this.errText(error) });
+      this.postError(this.errText(error));
+      return false;
+    }
+    const epoch = this.queueEpoch;
+    const record = { fingerprint };
+    // The active queue item also owns its baseline preparation and final change
+    // capture. Follow-up messages may queue during those phases; an independent
+    // capture still blocks new messages.
+    const recordingBlocksSend = () => this.workflow?.recording && (!this.queue.active || !this.queueBindingMatches(this.queue.active));
+    record.promise = (async () => {
+      try {
+        if (this.historyReadonly) throw new Error('当前是只读历史，请先返回当前对话或接回该会话。');
+        if (!this.view) throw new Error('请先打开面板再发送。');
+        if (this.newSessionPending || this.configPending || this.reconnectPending) throw new Error('会话、设置或连接正在调整，请稍后发送。');
+        if (this.workflow?.activeTest || this.workflow?.undoing || recordingBlocksSend()) throw new Error('请等测试、撤销或改动整理完成后再发送消息。');
+        const cwd = this.workdir();
+        const session = await this.ensureConnection();
+        if (!session?.sessionId) throw new Error('对话未连接，请检查连接后重试。');
+        if (session.cwd && session.cwd !== cwd) throw new Error('当前工作目录与对话目录不同，请新建对话后发送。');
+        if (epoch !== this.queueEpoch || this.historyReadonly || !this.view || cwd !== this.workdir() || session !== this.session) throw new Error('对话已变化，请确认当前对话后重新发送。');
+        if (input.attachments.length && vscode.workspace.isTrusted === false) throw new Error('请信任当前工作区后再发送附件。');
+        if (input.attachments.some(item => item?.kind === 'file' && typeof item.text !== 'string')) throw new Error('旧文件附件没有正文快照，请移除后重新添加，再确认预览后发送。');
+        const draft = snapshotMessage(input.text, input.attachments);
+        if (epoch !== this.queueEpoch || this.historyReadonly || !this.view || cwd !== this.workdir() || session !== this.session || draft.attachments.length && vscode.workspace.isTrusted === false) throw new Error('对话或工作区已变化，请重新发送。');
+        if (this.workflow?.activeTest || this.workflow?.undoing || recordingBlocksSend()) throw new Error('请等测试、撤销或改动整理完成后再发送消息。');
+        if (this.queue.paused && !this.queue.items.length && !this.queue.active) this.queue.resume();
+        const queued = Boolean(this.queue.active || this.queue.items.length || this.queue.paused || session.busy || this.workflow?.recording || this.workflow?.activeTest || this.workflow?.undoing);
+        const entry = this.queue.add(draft, { cwd, sessionId: session.sessionId, instanceId: this.connections.snapshot?.().instanceId }, requestId);
+        this.post({ type: 'sendResult', requestId, success: true, phase: 'accepted', queued, id: entry.id });
+        void this.drainQueue();
+        return true;
+      } catch (error) {
+        this.sendRequests.delete(requestId);
+        this.post({ type: 'sendResult', requestId, success: false, phase: 'rejected', error: this.errText(error) });
+        this.postError(this.errText(error));
+        return false;
+      }
+    })();
+    this.sendRequests.set(requestId, record);
+    void record.promise.then(accepted => { if (!accepted && this.sendRequests.get(requestId) === record) this.sendRequests.delete(requestId); });
+    if (this.sendRequests.size > 64) for (const [key, value] of this.sendRequests) { if (value.completed) { this.sendRequests.delete(key); break; } }
+    return record.promise;
+  }
+
+  async queueAction({ action, id }) {
+    if (action === 'remove' || action === 'edit') {
+      try {
+        if (action === 'edit' && !this.view) throw new Error('请先打开面板再取回消息。');
+        const entry = this.queue.items.find(item => item.id === id);
+        if (!entry) throw new Error('此消息已不在队列中');
+        // Prepare the complete reply before changing the queue. No asynchronous
+        // operation can switch the session or close the view during retrieval.
+        const reply = { type: 'queueEdit', id, cwd: entry.cwd, text: entry.text, attachments: entry.attachments };
+        this.queue.remove(id);
+        const record = this.sendRequests.get(entry.requestId); if (record) record.completed = true;
+        if (action === 'edit') this.post(reply);
+        if (!this.queue.active && !this.queue.items.length) this.queue.resume();
+      } catch (error) {
+        if (action === 'edit') this.post({ type: 'queueEdit', id, error: this.errText(error) });
+        else throw error;
+      }
+      return;
+    }
+    if (action !== 'continue') return;
+    if (this.configPending || this.reconnectPending) throw new Error('请等设置或连接恢复完成后再继续队列。');
+    if (this.historyReadonly || !this.view) throw new Error('请先返回当前对话再继续排队消息。');
+    const first = this.queue.items[0];
+    if (first && !this.queueBindingMatches(first)) throw new Error('排队消息属于原会话或目录，请取回编辑后重新发送。');
+    this.queue.resume();
+    await this.drainQueue();
+  }
+
+  queueBindingMatches(entry) {
+    return Boolean(this.session?.sessionId === entry.sessionId && this.workdir() === entry.cwd &&
+      (!entry.instanceId || this.connections.snapshot?.().instanceId === entry.instanceId));
+  }
+
+  async drainQueue() {
+    if (this.queue.active || this.queue.paused || !this.queue.items.length) return;
+    if (!this.view || this.historyReadonly) { this.pauseQueue('请返回当前对话后显式继续。'); return; }
+    if (this.session?.busy || this.newSessionPending || this.configPending || this.reconnectPending || this.workflow?.recording || this.workflow?.activeTest || this.workflow?.undoing || this.connections.turns?.has(this.session?.sessionId)) return;
+    const first = this.queue.items[0];
+    if (!this.queueBindingMatches(first) || !this.client?.isConnected) { this.pauseQueue('会话或连接已变化，请确认后显式继续。'); return; }
+    const entry = this.queue.take();
+    const epoch = this.queueEpoch;
+    let result, error;
+    try { result = await this.send(entry.text, entry.attachments, { entry, epoch }); }
+    catch (failure) { error = failure; this.postError(this.errText(failure)); }
+    const success = !error && result !== false && (!result?.stopReason || result.stopReason === 'end_turn');
+    if (!success) this.pauseQueue(result?.stopReason === 'cancelled' ? '当前回合已取消，请确认后显式继续。' : '当前回合未完成，请处理后显式继续。');
+    this.post({ type: 'sendCompleted', requestId: entry.requestId, id: entry.id, cwd: entry.cwd, success, retained: !success, stopReason: result?.stopReason || (error ? 'error' : 'end_turn'), text: entry.text, attachments: entry.attachments });
+    const record = this.sendRequests.get(entry.requestId); if (record) record.completed = success;
+    this.queue.finish(success ? undefined : error ? this.errText(error) : '回合未完成');
+    if (success && epoch === this.queueEpoch) await this.drainQueue();
+  }
+
+  returnToConversation() {
+    this.historyReplayEpoch = (this.historyReplayEpoch || 0) + 1;
+    this.historyReadonly = false; this.historyId = undefined;
+    this.post({ type: 'historyState', readonly: false });
+    this.postConversationSnapshot();
+    this.pushSnapshot();
+  }
+
   // ── 操作 ────────────────────────────────────────────
 
-  async send(text, attachments = []) {
+  async send(text, attachments = [], queued) {
+    if (this.configPending || this.reconnectPending) throw new Error('请等设置或连接恢复完成后再发送消息。');
+    if (this.workflow?.activeTest || this.workflow?.undoing) throw new Error('请等测试或撤销完成后再发送消息。');
     const items = Array.isArray(attachments) ? attachments.filter(Boolean) : [];
+    if (items.length > 20 || items.reduce((size, item) => size + (typeof item.text === 'string' ? Buffer.byteLength(item.text) : 0), 0) > 256 * 1024) throw new Error('最多附加 20 项，正文总量不超过 256 KiB；请移除附件或选择较小选区。');
+    if (items.length && vscode.workspace.isTrusted === false) throw new Error('请信任当前工作区后再发送附件');
     if ((!text || !text.trim()) && items.length === 0) return;
     // 新建会话会先关闭旧会话、再等待 session/new。此窗口内若直接发送，旧实现会把消息
     // 发给已关闭且尚未取得新 id 的会话。等待切换落定；失败时再由 ensureConnection 重连。
     if (this.newSessionPending) await this.newSessionPending;
+    if (this.historyReadonly) throw new Error('当前是只读历史，请先返回当前对话或接回该会话。');
     const session = await this.ensureConnection();
-    if (!session) return;
+    if (!session) return false;
     // 自此该会话已「发送过消息」：更换预设时不能再静默重新开启该会话。
     this.turnSent = true;
-    await session.send(text, { attachments: items });
+    const execute = async () => {
+      if (this.historyReadonly || queued && (queued.epoch !== this.queueEpoch || !this.queueBindingMatches(queued.entry))) throw new Error('消息所属会话已变化，请取回编辑后重新发送。');
+      if (this.workflow?.activeTest || this.workflow?.undoing) throw new Error('请等测试或撤销完成后再发送消息。');
+      const turn = await this.workflow?.begin();
+      let outcome = 'failed';
+      try {
+        if (this.historyReadonly || session !== this.session || session.busy || this.workflow?.activeTest || this.workflow?.undoing || queued &&
+          (queued.epoch !== this.queueEpoch || !this.view || !this.queueBindingMatches(queued.entry))) throw new Error('消息所属会话或任务已变化，请确认后重新发送。');
+        const result = await session.send(text, { attachments: items }); outcome = result?.stopReason === 'cancelled' ? 'cancelled' : result?.stopReason === 'end_turn' || !result?.stopReason ? 'completed' : 'failed'; return result;
+      }
+      finally { await this.workflow?.finish(turn, outcome); }
+    };
+    if (typeof this.connections.runSession === 'function') return this.connections.runSession(session, execute);
+    return execute();
+  }
+
+  async executeComposerCommand(id, scope = this.contextRequestScope()) {
+    if (!this.contextRequestCurrent(scope)) throw new Error('对话或工作区已变化，请重新选择命令。');
+    const { COMMANDS } = require('../workflow/commands');
+    const command = COMMANDS.find(item => item.id === id);
+    if (!command) throw new Error('未知命令，请重新选择。');
+    const busy = this.session?.busy || this.queue.active || this.newSessionPending || this.workflow?.recording || this.workflow?.activeTest || this.workflow?.undoing;
+    if (busy && ['new', 'model', 'changes', 'test'].includes(command.name)) throw new Error('请等当前任务结束后再执行此命令。');
+    switch (command.name) {
+      case 'new': return this.newSession();
+      case 'review': return vscode.commands.executeCommand('dshPanel.bridge.review');
+      case 'status': return vscode.commands.executeCommand('dshPanel.bridge.diagnoseConfig');
+      case 'changes': return this.workflow.showChanges();
+      case 'test': return this.tests.run({ current: () => this.contextRequestCurrent(scope) });
+      case 'help': return vscode.window.showInformationMessage('@ 搜索文件，# 引用当前文件或选区，/ 选择命令或技能。命令直接执行；技能附加后随消息发送。改动记录以本轮开始时内容为基线；/test 选择工作区测试任务。');
+      case 'model': {
+        const session = this.session, sessionId = session?.sessionId;
+        const option = session?.configOptions.find(item => item.id === 'model');
+        const choices = (option?.options || []).flatMap(group => group.options || [group]).filter(item => typeof item.value === 'string');
+        if (!choices.length) throw new Error('内核尚未提供可切换模型，请先连接。');
+        const selected = await vscode.window.showQuickPick(choices.map(item => ({ label: item.name || item.value, value: item.value })), { placeHolder: '选择当前对话模型' });
+        if (selected) {
+          if (!this.contextRequestCurrent(scope) || this.session !== session || session.sessionId !== sessionId || session.busy || this.queue.active || this.newSessionPending || this.workflow?.recording || this.workflow?.activeTest || this.workflow?.undoing) throw new Error('会话或当前任务已变化，请重新选择模型。');
+          const applied = await this.configureSession({ cwd: scope.cwd, sessionId, requestId: `model-command-${++this.recoverySequence}` }, () => this.setModel(selected.value), 'model');
+          if (!applied) throw new Error('模型设置未确认，请查看实际设置后重试。');
+        }
+        break;
+      }
+    }
+  }
+
+  /** Test evidence is returned to the requesting draft without sending it. */
+  async onWorkflowAction(message) {
+    if (this.configPending || this.reconnectPending) {
+      this.post({ type: 'workflowResult', action: message.action, requestId: message.requestId, turnId: message.turnId, testId: message.testId, cwd: this.workdir(), sessionId: this.session?.sessionId, error: '请等设置或连接恢复完成后再操作测试或改动。' });
+      return;
+    }
+    if (message.action === 'preview') return this.workflow?.preview(message.id);
+    if (message.action === 'undo') return this.workflow?.undo(message.id);
+    const actions = ['test', 'cancelTest', 'previewTest', 'attachTest', 'prepareTest', 'logTest', 'taskTerminals'];
+    if (!actions.includes(message.action)) return;
+    const scope = this.contextRequestScope(message);
+    if (!this.contextRequestCurrent(scope)) return;
+    const reply = { type: 'workflowResult', action: message.action, requestId: message.requestId,
+      turnId: message.turnId, testId: message.testId, cwd: scope.cwd, sessionId: scope.sessionId };
+    try {
+      if (!this.tests) throw new Error('测试任务尚未就绪，请重新打开面板。');
+      if (message.requestId === undefined || message.requestId === null || !['string', 'number'].includes(typeof message.requestId)) throw new Error('操作标识缺失，请重新选择测试结果。');
+      if (!vscode.workspace.isTrusted) throw new Error('请先信任工作区，再操作测试结果。');
+      const identity = { turnId: message.turnId, testId: message.testId, requestId: message.requestId,
+        cwd: scope.cwd, sessionId: scope.sessionId, current: () => this.contextRequestCurrent(scope) };
+      let result;
+      if (message.action === 'test') result = await this.tests.run(identity);
+      else if (message.action === 'cancelTest') result = await this.tests.cancel(identity);
+      else if (message.action === 'previewTest') result = await this.tests.preview(identity);
+      else if (message.action === 'attachTest') result = await this.tests.attach(identity);
+      else if (message.action === 'prepareTest') result = await this.tests.prepare(identity);
+      else if (message.action === 'logTest') result = await this.tests.supplement(identity, message.logText);
+      else if (message.action === 'taskTerminals') result = await this.tests.openTerminal(identity);
+      if (!this.contextRequestCurrent(scope)) return;
+      // The browser checks the aggregate attachment and draft budgets before
+      // applying this bundle atomically to its current, possibly newer input.
+      const items = result?.items ? snapshotMessage('', result.items).attachments : undefined;
+      this.post({ ...reply, ...(items ? { items } : {}), ...(typeof result?.text === 'string' ? { text: result.text } : {}), ...(typeof result?.note === 'string' ? { note: result.note } : {}) });
+    } catch (error) {
+      if (this.contextRequestCurrent(scope)) this.post({ ...reply, error: this.errText(error) });
+    }
   }
 
   // ── 历史会话 ──────────────────────────────────────────
@@ -995,11 +1543,8 @@ class DshPanelView {
   //   2. 面板自行读取本机磁盘。
   //
   // 第 2 条途径必要的原因：接入点插件安装在用户配置集中，而**该配置集由 DSH 桌面端自行
-  // 管理**（2026-09-19 实测：该配置集中安装的接入点插件版本仍为 0.0.7，且 `dsh plugin --profile
-  // desktop` 的增删操作会被拒绝），因此「接入点插件版本过低、没有旁路方法」属于常态而非异常。
-  // 在此前仅实现第 1 条途径时，历史会话在**最常用的那种模式**（接入桌面端那一个内核）下
-  // 直接不可用，并且要求用户执行「重启桌面端」—— 重启后该问题依然存在，等同于把
-  // 扩展自身的依赖问题转由用户承担。面板与内核本就位于同一台机器，自行读取是可行的。
+  // 管理**，接入点过旧或旁路方法不可用时仍需提供本地读取路径。
+  // 面板与内核位于同一台机器，历史读取无需启动或修改另一套内核配置。
 
   /**
    * 读取一次历史会话。
@@ -1008,7 +1553,7 @@ class DshPanelView {
    * @param {string} [id] kind==='get' 时使用的会话 id。
    * @returns {Promise<{result: object, via: 'door'|'local'}>}
    */
-  async readHistory(kind, id) {
+  async readHistory(kind, id, options = {}) {
     const localRoot = localSessions.resolveSessionsRoot();
     const client = this.client;
 
@@ -1018,7 +1563,7 @@ class DshPanelView {
     if (this.historyVia !== 'local' && client && client.isConnected) {
       try {
         const result = kind === 'list'
-          ? await client.listHistory()
+          ? await client.listHistory(options)
           : await client.getHistory(String(id || ''));
         this.historyVia = 'door';
         return { result, via: 'door' };
@@ -1034,8 +1579,8 @@ class DshPanelView {
       throw new Error('本机 Node 不支持 zstd 压缩格式，无法解析会话文件');
     }
     const result = kind === 'list'
-      ? localSessions.listSessions(localRoot)
-      : localSessions.getSession(localRoot, String(id || ''));
+      ? await localSessions.listSessionsAsync(localRoot, options)
+      : await localSessions.getSessionAsync(localRoot, String(id || ''), options);
     return { result, via: 'local' };
   }
 
@@ -1044,31 +1589,62 @@ class DshPanelView {
    *
    * 接入点插件版本过低时，上述本机读取途径会自动补上，不要求用户修改桌面端配置集。
    */
-  async sendHistoryList() {
+  async sendHistoryList(request = {}) {
+    this.historySearchController?.abort();
+    const controller = this.historySearchController = new AbortController();
+    const requestId = Number.isInteger(request.requestId) ? request.requestId : undefined;
     try {
-      const { result, via } = await this.readHistory('list');
+      const options = historyOptions({ ...request, cwd: request.projectOnly === true ? this.workdir() : '' });
+      const { result, via } = await this.readHistory('list', undefined, { ...options, signal: controller.signal });
+      if (controller.signal.aborted) return;
       const sessions = Array.isArray(result && result.sessions) ? result.sessions : [];
       // 本地读取失败时（目录不可读等）原因会写入 error 字段，不应将其视为「没有历史会话」。
       if (sessions.length === 0 && result && result.error) throw new Error(result.error);
-      this.post({ type: 'history', via, sessions, skipped: (result && result.skipped) || 0 });
+      this.post({ type: 'history', via, sessions, requestId, skipped: result?.skipped || 0, total: result?.total, offset: result?.offset || 0, nextOffset: result?.nextOffset,
+        queryUnsupported: (options.query || options.cwd || options.offset) && result?.offset === undefined });
     } catch (error) {
-      this.post({ type: 'history', error: this.historyErrorText(error) });
+      if (controller.signal.aborted) return;
+      this.post({ type: 'history', requestId, error: this.historyErrorText(error) });
     }
   }
 
+  async exportHistory(id) {
+    try {
+      const { result } = await this.readHistory('get', String(id || ''));
+      const uri = await vscode.window.showSaveDialog({ saveLabel: '导出对话', defaultUri: vscode.Uri.file(path.join(this.workdir(), 'dsh-conversation.md')), filters: { Markdown: ['md'] } });
+      if (!uri) return;
+      await vscode.workspace.fs.writeFile(uri, Buffer.from(historyMarkdown(result), 'utf8'));
+      void vscode.window.showInformationMessage('对话已导出。');
+    } catch (error) { this.postError(this.historyErrorText(error)); }
+  }
+
   /** 把一段历史会话的回放发送给界面。 */
-  async sendHistoryReplay(id) {
+  async sendHistoryReplay(id, { readonly = true } = {}) {
+    const epoch = this.historyReplayEpoch = (this.historyReplayEpoch || 0) + 1;
+    this.historyReplayFailed = false;
+    if (readonly) {
+      this.pauseQueue('正在查看只读历史，请返回当前对话后显式继续。');
+      this.historyReadonly = true; this.historyId = id;
+      this.post({ type: 'historyState', readonly: true, id });
+    }
     try {
       const { result, via } = await this.readHistory('get', id);
-      this.post({
+      if (epoch !== this.historyReplayEpoch) return;
+      const replay = {
         type: 'replay',
+        readonly,
         via,
         card: result && result.card ? result.card : {},
         entries: Array.isArray(result && result.entries) ? result.entries : [],
         truncated: Boolean(result && result.truncated),
-      });
+      };
+      if (readonly) this.lastHistoricalReplay = replay;
+      this.post(replay);
+      return replay;
     } catch (error) {
-      this.postError(this.historyErrorText(error));
+      if (epoch !== this.historyReplayEpoch) return;
+      this.historyReplayFailed = true;
+      this.postError(this.historyErrorText(error), undefined, { historical: readonly });
     }
   }
 
@@ -1090,20 +1666,49 @@ class DshPanelView {
    * 而无记录（或仅有记录而无上下文）都属于不完整的结果。resume 失败（内核已重启、
    * 内存中不存在该会话）时明确说明「以上仅为回放」，不将回放表示为恢复成功。
    */
-  async resumeHistory(id) {
+  resumeHistory(id, options = {}) {
+    return this.changeSession(() => this.resumeHistoryInternal(id, options), JSON.stringify(['resume', id, options.cwd, options.preset]));
+  }
+
+  async resumeHistoryInternal(id, options = {}) {
+    if (this.workflow?.activeTest || this.workflow?.recording || this.workflow?.undoing) {
+      this.post({ type: 'notice', text: '请等测试、撤销或改动整理完成后再恢复会话。' });
+      return false;
+    }
     const session = this.session || await this.ensureConnection();
     if (!session) return;
-    if (session.busy) {
+    if (session.busy || this.connections.turns?.has(session.sessionId)) {
       this.post({ type: 'notice', text: '当前正在工作，结束后再进行恢复。' });
       return;
     }
+    if (options.cwd && (!vscode.workspace.isTrusted || !vscode.workspace.getWorkspaceFolder(vscode.Uri.file(options.cwd)))) throw new Error('恢复目录不在受信任工作区');
     // 忙碌判断必须早于回放：回放会清空当前转录。若先回放再拒绝恢复，
     // 用户正在进行的回答会被历史内容覆盖，随后到达的增量又混进回放中。
-    await this.sendHistoryReplay(id);
+    const previousId = session.sessionId;
+    this.historyReadonly = true; this.historyId = id;
+    this.post({ type: 'historyState', readonly: true, id });
+    const replayPromise = this.sendHistoryReplay(id);
+    const replayEpoch = this.historyReplayEpoch;
+    const replay = await replayPromise;
+    if (replayEpoch !== this.historyReplayEpoch || this.historyReplayFailed || !this.historyReadonly || this.historyId !== id || this.session !== session || !this.client?.isConnected) return false;
     try {
-      await session.resume(String(id || ''), this.workdir(), { preset: this.wantedPreset() });
+      const historyPreset = typeof replay?.card?.preset === 'string' && replay.card.preset.trim() ? replay.card.preset.trim() : undefined;
+      await this.restoreSession(session, String(id || ''), options.cwd || this.workdir(), options.preset || historyPreset);
+      if (this.session !== session || this.client !== session.client || !this.client?.isConnected) return false;
+      this.workflow?.reset();
+      if (previousId && previousId !== session.sessionId) await session.client.closeSession(previousId).catch(error => this.log('warn', `关闭旧会话失败：${this.errText(error)}`));
+      if (this.session !== session || this.client !== session.client || !this.client?.isConnected) return false;
+      if (options.cwd) { this.sessionCwd = options.cwd; this.postWorkspaceMeta(options.cwd); }
       this.turnSent = true;
       this.resumeTarget = undefined;
+      // Resume has already changed the kernel session. Always keep its actual
+      // transcript, even if the reader navigated while the request was pending.
+      // A subsequently opened history must retain its read-only state.
+      if (replay) this.setLiveTranscript([{ ...replay, readonly: false }]);
+      if (replayEpoch === this.historyReplayEpoch && this.historyReadonly && this.historyId === id) {
+        this.historyReadonly = false; this.historyId = undefined;
+        this.post({ type: 'historyState', readonly: false });
+      } else if (!this.historyReadonly) this.postConversationSnapshot();
       this.post({ type: 'notice', text: '已恢复该历史会话。' });
       this.post({ type: 'status', state: 'ready', detail: '就绪' });
     } catch (error) {
@@ -1112,6 +1717,7 @@ class DshPanelView {
       this.log('warn', `恢复历史会话失败：${this.errText(error)}`);
       this.post({
         type: 'notice',
+        historical: true,
         text: `上下文未能恢复，以上内容仅为回放。\n原因：${clip(this.errText(error), 70)}`,
       });
     }
@@ -1131,9 +1737,36 @@ class DshPanelView {
   async attach(items) {
     const list = (Array.isArray(items) ? items : [items]).filter(Boolean);
     if (list.length === 0) return;
+    const scope = this.contextRequestScope();
+    if (!vscode.workspace.isTrusted) throw new Error('请先信任工作区，再添加上下文。');
+    const snapshot = snapshotMessage('', list);
     // 面板可能尚未展开（该命令可直接从命令面板调用），先使其显示。
     await this.reveal();
-    this.post({ type: 'attach', items: list });
+    // Opening the panel may establish its first view, but must not move the
+    // snapshot to another directory or session while reveal is pending.
+    if (!scope.view) {
+      // The first editor command opens the panel and can create its initial
+      // connection. Explicit switches and disconnects invalidate queueEpoch;
+      // a second session event also disqualifies this narrowly allowed start.
+      if (!scope.session && !scope.resumeTarget && !this.resumeTarget && this.contextSessionSerial <= scope.sessionSerial + 1 &&
+          (!this.session?.cwd || draftKey(this.session.cwd) === draftKey(scope.cwd))) {
+        scope.session = this.session; scope.sessionId = this.session?.sessionId; scope.sessionSerial = this.contextSessionSerial;
+      }
+      scope.view = this.view;
+    }
+    if (!this.view || !this.contextRequestCurrent(scope)) throw new Error('对话或工作区已变化，请重新添加上下文。');
+    this.post({ type: 'attach', items: snapshot.attachments, cwd: scope.cwd, sessionId: scope.sessionId });
+  }
+
+  async addEditorContext(editor, wanted) {
+    const scope = this.contextRequestScope();
+    const controller = new AbortController();
+    this.editorContextReads.add(controller);
+    try {
+      const item = await this.composer.fromEditor(editor, wanted, controller.signal);
+      if (controller.signal.aborted || !this.contextRequestCurrent(scope)) throw new Error('对话或工作区已变化，请重新添加上下文。');
+      await this.attach([item]);
+    } finally { this.editorContextReads.delete(controller); }
   }
 
   /**
@@ -1152,7 +1785,7 @@ class DshPanelView {
   }
 
   /** 把命令面板或右键菜单提供的编辑器信息整理为附件结构。 */
-  static attachmentFromEditor(editor, workdir) {
+  static attachmentFromEditor(editor, workdir, wanted = 'file') {
     if (!editor || !editor.document) return undefined;
     const document = editor.document;
     const uri = document.uri;
@@ -1160,9 +1793,6 @@ class DshPanelView {
     if (!absolute) return undefined;
     const scheme = uri && typeof uri.scheme === 'string' ? uri.scheme : '';
     const isFile = !scheme || scheme === 'file';
-    // resource_link 最终由 DSH 从磁盘读取。未保存文件没有可读磁盘地址；已修改文件的
-    // 磁盘内容又落后于编辑器。只有普通且未修改的文件才能安全地只传链接。
-    const canReadFromDisk = isFile && !document.isUntitled && !document.isDirty;
     // 名称使用相对于工作目录的路径：模型与用户查看时都更短、更明确。
     let name = absolute;
     if (workdir && pathIsInside(absolute, workdir)) {
@@ -1171,35 +1801,38 @@ class DshPanelView {
     const base = {
       name,
       mimeType: 'text/plain',
+      sourcePath: absolute,
+      sourceUri: uri?.toString?.(),
+      isDirty: Boolean(document.isDirty),
+      isUntitled: Boolean(document.isUntitled || scheme === 'untitled'),
+      snapshotAt: new Date().toISOString(),
+      documentVersion: document.version,
     };
-    if (canReadFromDisk) {
+    if (isFile && !document.isDirty && !document.isUntitled) {
       base.uri = uri && typeof uri.toString === 'function' ? uri.toString() : `file://${absolute}`;
     }
 
     const selection = editor.selection;
-    const selected = selection && !selection.isEmpty ? document.getText(selection) : '';
-    if (selected && selected.trim()) {
+    if (wanted === 'selection') {
+      if (!selection || selection.isEmpty) return undefined;
+      const selected = document.getText(selection);
+      const endLine = selection.end.line + (selection.end.character === 0 && selection.end.line > selection.start.line ? 0 : 1);
       return {
         ...base,
         kind: 'selection',
         text: selected,
         language: document.languageId,
-        detail: `选中 ${selection.end.line - selection.start.line + 1} 行`,
-        id: `${name}:${selection.start.line + 1}-${selection.end.line + 1}`,
+        scope: 'selection',
+        startLine: selection.start.line + 1, endLine,
+        startCharacter: selection.start.character || 0, endCharacter: selection.end.character || 0,
+        byteLength: Buffer.byteLength(selected),
+        detail: `选区 ${selection.start.line + 1}–${endLine} 行`,
+        id: `${name}:${selection.start.line}:${selection.start.character || 0}-${selection.end.line}:${selection.end.character || 0}`,
       };
     }
-    if (!canReadFromDisk) {
-      const unsaved = document.isUntitled || scheme === 'untitled';
-      return {
-        ...base,
-        kind: 'content',
-        text: document.getText(),
-        language: document.languageId,
-        detail: unsaved ? '未保存文件' : '当前文件（含未保存修改）',
-        id: name,
-      };
-    }
-    return { ...base, kind: 'file', detail: '当前文件', id: name };
+    const text = document.getText();
+    return { ...base, kind: 'content', scope: 'file', text, byteLength: Buffer.byteLength(text), language: document.languageId,
+      detail: base.isUntitled ? '未保存文件' : document.isDirty ? '全文件（含未保存修改）' : '全文件快照', id: name };
   }
 
   /** 下一段新对话使用的预设：面板中选择的值优先，其次是配置项中的默认值。 */
@@ -1208,23 +1841,32 @@ class DshPanelView {
   }
 
   newSession() {
-    if (this.newSessionPending) return this.newSessionPending;
+    return this.changeSession(() => this.newSessionInternal(), 'new');
+  }
+
+  changeSession(action, key) {
+    if (this.configPending || this.reconnectPending || this.permissionPending) return Promise.reject(new Error('请等设置或连接恢复完成后再切换会话。'));
+    if (this.newSessionPending && this.sessionChangeKey === key) return this.newSessionPending;
+    this.pauseQueue('会话正在切换，原会话的排队消息需取回编辑或显式继续。');
+    const previous = this.newSessionPending;
     let operation;
     operation = (async () => {
       try {
-        return await this.newSessionInternal();
+        if (previous) await previous.catch(() => {});
+        return await action();
       } finally {
         if (this.newSessionPending === operation) this.newSessionPending = null;
       }
     })();
-    this.newSessionPending = operation;
+    this.newSessionPending = operation; this.sessionChangeKey = key;
     return operation;
   }
 
   async newSessionInternal() {
+    if (this.workflow?.activeTest || this.workflow?.recording || this.workflow?.undoing) return false;
     const session = this.session || await this.ensureConnection();
     if (!session) return false;
-    if (session.busy) {
+    if (session.busy || this.connections.turns?.has(session.sessionId)) {
       this.post({ type: 'notice', text: '当前正在工作，结束后再新建对话。' });
       return false;
     }
@@ -1235,6 +1877,10 @@ class DshPanelView {
     // 使用发起时的明确值，后续最新选择会在本次完成后顺序再建一段。
     const desiredPreset = this.wantedPreset(cfg);
     const old = session.sessionId;
+    this.workflow?.reset();
+    this.historyReplayEpoch = (this.historyReplayEpoch || 0) + 1;
+    this.historyReadonly = false; this.historyId = undefined;
+    this.post({ type: 'historyState', readonly: false });
     this.post({ type: 'reset' });
     // 用户主动请求新对话时，不再尝试恢复上一段会话。
     this.resumeTarget = undefined;
@@ -1273,8 +1919,46 @@ class DshPanelView {
   }
 
   async setModel(value) {
-    if (!this.session) return;
+    if (!this.session) throw new Error('还没有会话，请等待连接完成。');
+    if (this.historyReadonly) throw new Error('当前是只读历史，请返回当前对话后修改模型。');
     await this.session.setModel(value);
+  }
+
+  controlBusy() {
+    return Boolean(this.session?.busy || this.queue.active || this.newSessionPending || this.workflow?.activeTest ||
+      this.workflow?.recording || this.workflow?.undoing || this.connections.turns?.has(this.session?.sessionId));
+  }
+
+  /** Queue rapid changes, then report only the kernel's confirmed selection. */
+  configureSession(message, apply, optionId) {
+    const scope = this.contextRequestScope(message);
+    const reply = { type: 'settingResult', requestId: message.requestId, setting: optionId, cwd: scope.cwd, sessionId: scope.sessionId };
+    this.configPending++;
+    this.post({ ...reply, phase: 'pending', text: '正在等待内核确认设置…' });
+    const operation = this.configRequests.catch(() => {}).then(async () => {
+      try {
+        if (!this.contextRequestCurrent(scope) || !scope.sessionId || this.reconnectPending) throw new Error('当前界面只读或对话已变化，请返回当前对话后重新设置。');
+        if (this.controlBusy()) throw new Error('当前任务仍在运行，请结束后调整模型或思考强度。');
+        await apply();
+        if (!this.contextRequestCurrent(scope)) throw new Error('设置请求结束时对话已变化，请查看当前对话的实际设置。');
+        const option = scope.session.configOptions.find(item => item?.id === optionId);
+        if (typeof option?.currentValue !== 'string') throw new Error('内核未返回当前设置，无法确认已生效。');
+        const choices = (option.options || []).flatMap(group => group.options || [group]);
+        const label = choices.find(item => item.value === option.currentValue)?.name || option.currentValue;
+        this.post({ ...reply, phase: 'completed', success: true, currentValue: option.currentValue,
+          text: `${optionId === 'model' ? '当前模型' : '当前思考设置'}：${label}（内核已确认）。` });
+        return true;
+      } catch (error) {
+        this.post({ ...reply, phase: 'completed', success: false, error: this.errText(error), text: this.errText(error) });
+        return false;
+      } finally {
+        this.configPending--;
+        this.post({ type: 'config', configOptions: this.session?.configOptions || [] });
+        if (!this.configPending) void this.drainQueue();
+      }
+    });
+    this.configRequests = operation;
+    return operation;
   }
 
   /**
@@ -1286,9 +1970,11 @@ class DshPanelView {
    *   - 该会话已发送过消息 → 记录该预设，并明确说明下一段新对话使用该预设，不将更换表示为已生效。
    */
   async setPreset(value) {
+    if (this.historyReadonly || this.reconnectPending || this.configPending || this.permissionPending) throw new Error('请返回当前对话，并等待设置或恢复完成后修改模式。');
     const preset = typeof value === 'string' ? value.trim() : '';
     if (!preset) return;
     this.preset = preset;
+    this.postPresets();
     // 若前一次新建尚未结束，先等待它完成。等待期间又有更新的选择时，本次已被取代，
     // 直接退出；只有最后一次选择负责顺序重建，避免并发 session/new 与错误成功提示。
     const pending = this.newSessionPending;
@@ -1319,17 +2005,20 @@ class DshPanelView {
    */
   async refreshPermission() {
     const client = this.client;
-    const sessionId = this.session && this.session.sessionId;
+    const session = this.session, sessionId = session?.sessionId;
     if (!client || !sessionId || typeof client.permissionGet !== 'function') return;
+    const serial = this.permissionReadSerial = (this.permissionReadSerial || 0) + 1;
+    const current = () => client === this.client && session === this.session && sessionId === this.session?.sessionId && serial === this.permissionReadSerial;
     try {
       const payload = await client.permissionGet(sessionId);
+      if (!current()) return;
       this.permission = payload;
       this.permissionUnavailable = undefined;
       this.postPermissionState(payload);
-      // 记录一行日志：真实窗口自检（tools/vscode-check.js）依据该日志证明
-      // 「面板确实从内核读取到了权限清单」，而不是依据界面的显示结果。
+      // 原生验收通过该日志核对权限清单来自内核回读。
       this.log('info', `当前权限：${currentLabel(payload.currentValue, payload.options)}（${payload.currentValue}）`);
     } catch (error) {
+      if (!current()) return;
       const shaped = explainPermissionFailure({ code: error && error.code, message: this.errText(error) });
       this.permission = undefined;
       this.permissionUnavailable = shaped;
@@ -1360,7 +2049,6 @@ class DshPanelView {
     if (this.permissionNotice === shaped.state) return;
     this.permissionNotice = shaped.state;
     // 两行都简短，而且**都不含内部术语**：不出现「dsh-acp-door」「0.0.12」这类内部词
-    // 这类内部词（用户 2026-09-19 的意见为：内部组件名称不应出现在界面文案中）。
     // 版本号、包名只记录在日志中。
     this.post({
       type: 'notice',
@@ -1396,9 +2084,7 @@ class DshPanelView {
     this.switchedKernel = true;
     this.ownKernelOnly = true;
     /*
-     * 另有一项更关键的设置：**仅识别面板自身的端口**。配置项所指端口上现成的旧版接入点仍在监听，
-     * 若自启等待过程将其判定为"新内核已启动完成"，则会再次接入同一内核（切换未生效）——
-     * 真实窗口自检中发现的问题即为该情况。
+     * 仅识别面板自身的端口，避免自启等待过程重新接入原端口的旧内核。
      */
     this.ownPortOnly = true;
     this.log(
@@ -1436,7 +2122,10 @@ class DshPanelView {
    * 切换结果以**内核回读的值为准**（不做乐观更新）：即使某项设置被其它机制限制，
    * 界面显示的仍是真实状态，而不是用户预期的状态。
    */
-  async setPermission(value) {
+  async setPermission(value, message = {}) {
+    const scope = this.contextRequestScope(message);
+    if (!this.contextRequestCurrent(scope) || this.reconnectPending || this.newSessionPending) throw new Error('当前界面只读或对话已变化，请返回当前对话后修改权限。');
+    if (this.permissionPending) throw new Error('权限设置正在等待确认，请稍后再试。');
     const client = this.client;
     const sessionId = this.session && this.session.sessionId;
     const wanted = typeof value === 'string' ? value.trim() : '';
@@ -1449,15 +2138,31 @@ class DshPanelView {
       this.post({ type: 'notice', text: '该项仅表示当前状态，不是可切换的选项。' });
       return;
     }
-    const label = currentLabel(wanted, this.permission && this.permission.options);
+    this.permissionPending = scope;
+    this.permissionReadSerial = (this.permissionReadSerial || 0) + 1;
+    const reply = { type: 'settingResult', setting: 'permission', requestId: message.requestId, cwd: scope.cwd, sessionId: scope.sessionId };
+    let completion, confirmed = false;
+    this.post({ ...reply, phase: 'pending', text: '正在等待内核确认权限…' });
     try {
       const payload = await client.permissionSet(sessionId, wanted);
+      if (client !== this.client || scope.session !== this.session || sessionId !== this.session?.sessionId) throw new Error('权限请求结束时对话已变化，请查看当前对话的实际权限。');
+      if (typeof payload?.currentValue !== 'string') throw new Error('内核未返回当前权限，无法确认已生效。');
+      this.permissionReadSerial = (this.permissionReadSerial || 0) + 1;
       this.permission = payload;
       this.permissionUnavailable = undefined;
+      confirmed = true;
       this.postPermissionState(payload);
-      this.post({ type: 'notice', text: `权限已切到「${label}」。` });
+      if (!this.contextRequestCurrent(scope)) throw new Error('权限请求已返回当前权限；界面或任务状态已变化，请查看当前值。');
+      const text = `当前权限为「${currentLabel(payload.currentValue, payload.options)}」（内核已确认）。`;
+      this.post({ type: 'notice', text });
+      completion = { ...reply, phase: 'completed', success: true, currentValue: payload.currentValue, text };
       this.log('info', `权限已切换到 ${wanted}（内核回读 ${payload.currentValue}）`);
     } catch (error) {
+      completion = { ...reply, phase: 'completed', success: false, error: this.errText(error), text: this.errText(error) };
+      if (!this.contextRequestCurrent(scope)) {
+        if (!confirmed && client === this.client && scope.session === this.session && sessionId === this.session?.sessionId) await this.refreshPermission();
+        return;
+      }
       // 失败时需要说明失败类型（接入点插件版本过低 / 名称不正确 / 会话不存在），并把界面
       // 恢复为真实状态 —— 否则用户会误认为切换已经生效。
       const shaped = explainPermissionFailure({ code: error && error.code, message: this.errText(error) });
@@ -1465,15 +2170,51 @@ class DshPanelView {
       // 本次由用户主动触发，说明一次即可：预先记录去重标记，
       // 避免后续重新读取时把同一句说明作为「notice」再次输出。
       this.permissionNotice = shaped.state;
-      await this.refreshPermission();
+      if (!confirmed) await this.refreshPermission();
+    } finally {
+      if (this.permissionPending === scope) this.permissionPending = null;
+      // A completed frame unlocks the controls, so publish it after readback and backend cleanup.
+      if (completion) this.post(completion);
     }
   }
 
-  async reconnect() {
-    this.log('info', '用户请求重新连接');
-    this.teardown();
-    this.post({ type: 'reset' });
-    await this.ensureConnection();
+  async reconnect(message = {}) {
+    const reply = { type: 'recoveryResult', requestId: message.requestId, action: 'reconnect' };
+    try {
+      if (this.reconnectPending) {
+        this.post({ ...reply, phase: 'pending', text: '正在恢复连接，请等待确认…' });
+        const success = await this.reconnectPending;
+        this.post({ ...reply, phase: 'completed', success, text: success ? '连接已恢复；排队消息需显式继续。' : '连接未恢复，请查看错误或日志后重试。' });
+        return success;
+      }
+      if (this.controlBusy() || this.connections.turns?.size || this.configPending || this.permissionPending || this.connecting || this.connections.pending) throw new Error('当前任务仍在运行，请先停止或等待结束后重新连接。');
+      if (message.type === 'errorAction') {
+        const source = this.recoveryScopes.get(message.recoveryScope);
+        const sameSession = source && source.session === this.session && source.client === this.client && source.sessionId === this.session?.sessionId && source.resumeTarget === this.resumeTarget;
+        const disconnectedSource = source && !this.session && !this.client && (source.sessionId ? source.sessionId === this.resumeTarget : source.resumeTarget === this.resumeTarget);
+        if (!source || source.cwd !== draftKey(this.workdir()) || source.generation !== this.recoveryGeneration || source.serial !== this.contextSessionSerial || !sameSession && !disconnectedSource)
+          throw new Error('这张错误卡对应的连接或会话已变化，请查看当前状态后使用重新连接命令。');
+      }
+      this.post({ ...reply, phase: 'pending', text: '正在恢复连接，请等待确认…' });
+      let operation;
+      operation = Promise.resolve().then(async () => {
+        this.log('info', '用户请求重新连接');
+        if (this.session?.sessionId) this.resumeTarget = this.session.sessionId;
+        this.teardown();
+        // The history view and drafts remain visible until the user explicitly leaves them.
+        const session = await this.ensureConnection();
+        this.post({ type: 'historyState', readonly: this.historyReadonly, id: this.historyId });
+        return Boolean(session?.sessionId && this.client?.isConnected);
+      }).finally(() => { if (this.reconnectPending === operation) this.reconnectPending = null; });
+      this.reconnectPending = operation;
+      const success = await operation;
+      this.post({ ...reply, phase: 'completed', success, text: success ? '连接已恢复；排队消息需显式继续。' : '连接未恢复，请查看错误或日志后重试。' });
+      return success;
+    } catch (error) {
+      this.post({ ...reply, phase: 'completed', success: false, error: this.errText(error), text: this.errText(error) });
+      this.postError(this.errText(error), undefined, { historical: this.historyReadonly });
+      return false;
+    }
   }
 
   errText(error) {
@@ -1484,7 +2225,7 @@ class DshPanelView {
    * 把一段可能很长的原文截短（仅用于**附加在**面板说明之后的引用）。
    *
    * 需要截短的原因：内核报错常达上百字，直接放入提示会形成大段文本 ——
-   * 用户已两次提出该意见。完整原文另有记录位置（日志，以及错误卡片的折叠区），
+   * 完整原文另有记录位置（日志，以及错误卡片的折叠区），
    * 此处只需足以判断属于哪一类问题。
    */
   clip(text, max = 70) {
@@ -1563,8 +2304,10 @@ class DshPanelView {
   }
 
   teardown() {
+    this.pauseQueue('连接正在关闭，请确认原对话后显式继续。');
     this.cancelPendingPermissionRequests(undefined, '连接正在关闭');
     if (this.session) {
+      this.unwire(this.session);
       this.session.dispose();
       this.session = undefined;
     }
@@ -1573,7 +2316,8 @@ class DshPanelView {
       const onClose = this.clientCloseHandlers.get(client);
       if (onClose) client.off('close', onClose);
       this.clientCloseHandlers.delete(client);
-      client.close();
+      if (client === this.connections.client) this.connections.disconnect();
+      else client.close();
       this.client = undefined;
     }
     this.doorStatus = undefined;
@@ -1582,19 +2326,24 @@ class DshPanelView {
     // 权限相关说明也重新输出一次（接入点插件可能已升级）。
     this.permissionNotice = undefined;
     this.permissionUnavailable = undefined;
+    this.workflow?.publish();
   }
 
   dispose() {
+    this.composerQuery?.abort();
+    this.composerSelection?.abort();
+    for (const controller of this.editorContextReads) controller.abort();
+    this.contextTrustWatcher?.dispose();
+    this.composer.dispose?.();
+    this.historySearchController?.abort();
     this.teardown();
+    this.connections.release('panel');
+    if (this.ownsConnections) this.connections.dispose();
     /*
-     * 关键的一行（2026-09-19 修改）：**不终止内核，只释放引用**。
-     *
-     * 此处原为 `this.background.dispose()` —— 视图一旦销毁即终止内核，
-     * 而视图的销毁条件很常见（折叠侧边栏、拖动面板、Reload Window、另一个窗口关闭）。
-     * 现在交由 manager 处理：引用归零后仍保留宽限期（默认 10 分钟），该期间重新打开
-     * 面板会继续使用同一个内核 —— 不重启，也不需要 resume。
+     * 释放视图引用，由 manager 在宽限期后回收自有内核。
+     * 期间重新打开面板可继续使用同一内核。
      */
-    this.kernels.release(this);
+    this.kernels.release(this.kernelConsumer);
     this.background = undefined;
   }
 }
@@ -1675,13 +2424,8 @@ function shouldSwitchToOwnKernel({ state, targetPort, cfgPort, autoStart, switch
 }
 
 /**
- * 所有启动方式均失败之后，向用户输出**与原因对应**的建议。
- *
- * 此处原为固定的一句"把 dshCommand 填成完整命令" —— 而当失败原因为
- * "该配置集无法通过命令行启动"（2026-09-19 那次）时，该表述会将用户引向错误方向。
- *
- * ⚠️ 这几句是**给用户看的**（错误卡片的"怎么办"那一行）：不出现「接入点插件」
- * 「接入点插件」「设置项全名」这类内部词。
+ * 所有启动方式均失败后，按实际原因给出建议。错误卡片使用通用表述；
+ * 命令、配置项等细节留在折叠诊断中。
  */
 function fallbackAdvice(kinds) {
   if (kinds.has('app-managed-profile')) {
