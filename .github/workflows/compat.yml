@@ -88,6 +88,7 @@ jobs:
   minimum-editor:
     needs: discover
     runs-on: windows-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -134,7 +135,19 @@ jobs:
             node tools/compat/editor-evidence.cjs $report.FullName build/public-editor-validation.json --supported
           }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: 导出原生阶段状态
+        if: always()
+        shell: pwsh
+        run: |
+          $report = Get-ChildItem -LiteralPath build/compat -Filter bridge-report.json -Recurse -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if ($report) {
+            node tools/compat/public-evidence.cjs $report.FullName build/public-editor-stages.json
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: editor-${{ matrix.editor }}
-          path: build/public-editor-validation.json
+          path: |
+            build/public-editor-validation.json
+            build/public-editor-stages.json

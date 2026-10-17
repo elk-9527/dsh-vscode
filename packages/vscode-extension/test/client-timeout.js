@@ -287,6 +287,7 @@ async function main() {
           : await client.newSession('/fixture', options, consume);
         check(`${restore ? '恢复' : '建立'}等待模型注册后成功一次`, result.sessionId === 'ready-session' && accepted === 1 && frames.length === 3);
         check('等待保持会话参数且不发送客户端等待选项', frames.every(frame => JSON.stringify(frame.params) === JSON.stringify(frames[0].params))
+          && frames[0].params._meta?.['dsh-door']?.preset === 'standard'
           && !('modelReadyTimeoutMs' in frames[0].params) && !('signal' in frames[0].params));
       } finally { client.close(); }
     });

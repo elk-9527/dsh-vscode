@@ -277,7 +277,7 @@ check(
 );
 check(
   '扩展在 resume 时一并告知该插件预设（否则接回的会话没有工具）',
-  /resumeSession\(sessionId,\s*cwd,\s*\{\s*preset\s*\}/.test(clientSource),
+  /resumeSession\(sessionId,\s*cwd,\s*\{\s*preset(?:\s*,[^}]*)?\s*\}/.test(clientSource),
   'client.js 的 resumeSession 没有 preset 参数',
 );
 check(
