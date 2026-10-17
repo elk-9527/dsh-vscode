@@ -23,9 +23,8 @@ async function checkEditor({ folder, cwd, port }) {
   fs.mkdirSync(extensions); fs.mkdirSync(path.join(userData, 'User'), { recursive: true });
   fs.renameSync(path.join(extracted, 'extension'), path.join(extensions, `Elk-ydy.dsh-acp-panel-${panelVersion}`));
   const panelRoot = path.join(ROOT, 'packages/vscode-extension');
-  for (const file of require('../../packages/vscode-extension/tools/ship-list').shipFiles(panelRoot)) {
-    assert(fs.readFileSync(path.join(panelRoot, file)).equals(fs.readFileSync(path.join(extensions, `Elk-ydy.dsh-acp-panel-${panelVersion}`, file))), `Stale VSIX: ${file}; rebuild the package before editor validation`);
-  }
+  require('../../packages/vscode-extension/tools/package-links.cjs').verifyPackageFiles(panelRoot,
+    path.join(extensions, `Elk-ydy.dsh-acp-panel-${panelVersion}`));
   const extensionEntry = path.join(extensions, `Elk-ydy.dsh-acp-panel-${panelVersion}`, 'src/extension.js');
   const extensionSource = fs.readFileSync(extensionEntry, 'utf8');
   assert.equal(extensionSource.split('  return api.exports;').length, 2);

@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { shipFiles } = require('../tools/ship-list');
 const { contentTypesXml } = require('../tools/build-vsix');
-const { CONTENT, invalidSourceLinks } = require('../tools/package-links.cjs');
+const { CONTENT, invalidSourceLinks, renderedReadme, verifyPackageFiles } = require('../tools/package-links.cjs');
 const root = path.resolve(__dirname, '..');
 
 function publication({ mismatch = false, failedList = false, privateContent = false } = {}) {
@@ -44,6 +44,30 @@ for (const link of [
   'https://github.com/elk-9527/dsh-vscode/blob/main/API.md',
   'https://github.com/elk-9527/dsh-vscode/tree/f67309db5e0c791b0a99a836915d13367889cf45/packages/dsh-door',
 ]) assert.equal(invalidSourceLinks(`[source](${link})`).length, 1);
+const temporary = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'dsh-package-format-'));
+try {
+  const source = path.join(temporary, 'source'), packed = path.join(temporary, 'packed');
+  fs.mkdirSync(path.join(source, 'src'), { recursive: true }); fs.mkdirSync(path.join(packed, 'src'), { recursive: true });
+  const readme = '[API](API.md)\n[external](https://example.invalid/page)\n';
+  for (const [name, text] of [['README.md', readme], ['LICENSE', 'Fixture license\n'], ['API.md', 'Fixture API\n'], ['src/index.js', 'exports.value = 1;\n']]) fs.writeFileSync(path.join(source, name), text);
+  fs.writeFileSync(path.join(packed, 'readme.md'), renderedReadme(readme));
+  fs.writeFileSync(path.join(packed, 'LICENSE.txt'), 'Fixture license\r\n');
+  fs.writeFileSync(path.join(packed, 'API.md'), 'Fixture API\n');
+  fs.writeFileSync(path.join(packed, 'src/index.js'), 'exports.value = 1;\r\n');
+  assert.equal(verifyPackageFiles(source, packed).files, 4);
+  fs.writeFileSync(path.join(packed, 'src/index.js'), 'exports.value = 2;\n');
+  assert.throws(() => verifyPackageFiles(source, packed), /Stale package: src\/index.js/);
+  fs.writeFileSync(path.join(packed, 'src/index.js'), 'exports.value = 1;\n');
+  fs.writeFileSync(path.join(packed, 'readme.md'), 'Wrong README\n');
+  assert.throws(() => verifyPackageFiles(source, packed), /Stale package: README.md/);
+  fs.writeFileSync(path.join(packed, 'readme.md'), renderedReadme(readme));
+  fs.writeFileSync(path.join(packed, 'extra.js'), 'not shipped');
+  assert.throws(() => verifyPackageFiles(source, packed), /Unexpected package file/);
+} finally {
+  assert.equal(path.dirname(path.resolve(temporary)), path.resolve(require('node:os').tmpdir()));
+  assert(path.basename(temporary).startsWith('dsh-package-format-') && !fs.lstatSync(temporary).isSymbolicLink());
+  fs.rmSync(temporary, { recursive: true, force: true });
+}
 assert(!/Extension="\./.test(contentTypesXml()), 'Content type extensions must omit the leading dot');
 const packedWithoutEditor = require('node:child_process').spawnSync(process.execPath,
   [path.resolve(root, '../../tools/bridge/test-live.cjs'), '--packed-vsix'],
