@@ -1,5 +1,5 @@
 #requires -Version 7.0
-param([string]$DshVersion = '0.2.1-alpha.1')
+param([string]$DshVersion = '0.2.1-alpha.1', [switch]$UsePackedVsix)
 # 在普通 PowerShell 中复测最低编辑器，不使用诊断启动标志或身份检查豁免。
 $ErrorActionPreference = 'Stop'
 $projectDirectory = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
@@ -19,7 +19,9 @@ Push-Location -LiteralPath $projectDirectory
 try {
     foreach ($name in $variableNames) { Remove-Item -LiteralPath ('Env:' + $name) -ErrorAction SilentlyContinue }
     $env:DSH_PANEL_CODE = $minimumExecutable
-    node tools/bridge/test-live.cjs $DshVersion --editor
+    $editorArguments = @('tools/bridge/test-live.cjs', $DshVersion, '--editor')
+    if ($UsePackedVsix) { $editorArguments += '--packed-vsix' }
+    node @editorArguments
     if ($LASTEXITCODE -ne 0) { throw '最低编辑器完整验收未通过，报告与失败记录已保留。' }
 } finally {
     foreach ($name in $variableNames) {

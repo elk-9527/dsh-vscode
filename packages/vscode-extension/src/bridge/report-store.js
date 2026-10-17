@@ -31,7 +31,8 @@ class ReportStore {
     const claim = path.join(this.directory, `.writer.${process.pid}.${id}`);
     const pattern = /^\.(choosing|writer)\.(\d+)\.([a-f0-9-]{36})$/;
     const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) { return error.code !== 'ESRCH'; } };
-    const claims = async () => {
+    const deadline = Date.now() + 5000;
+    const scanClaims = async () => {
       const result = [];
       for (const name of await fs.readdir(this.directory)) {
         const match = pattern.exec(name); if (!match) continue;
@@ -45,15 +46,28 @@ class ReportStore {
       }
       return result;
     };
+    // Retry only complete ticket scans; failed scans never yield partial claims.
+    const claims = async () => {
+      while (true) {
+        try { return await scanClaims(); }
+        catch (error) {
+          if (error.code !== 'EPERM' && error.code !== 'EBUSY') throw error;
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) throw error;
+          await new Promise(resolve => setTimeout(resolve, Math.min(50, remaining)));
+          if (Date.now() >= deadline) throw error;
+        }
+      }
+    };
     await fs.writeFile(choosing, '', { flag: 'wx', mode: 0o600 });
     try {
       // Choosing markers prevent a partly selected ticket from being overtaken.
       owner.ticket = Math.max(0, ...(await claims()).filter(value => !value.choosing).map(value => value.ticket)) + 1;
       if (!Number.isSafeInteger(owner.ticket)) fail('结果存储锁超限。');
       await fs.writeFile(choosing, JSON.stringify(owner)); await fs.link(choosing, claim); await fs.unlink(choosing);
-      const deadline = Date.now() + 5000;
       while (Date.now() < deadline) {
         const others = (await claims()).filter(value => value.id !== id);
+        if (Date.now() >= deadline) break;
         let busy = others.some(value => value.choosing || value.ticket < owner.ticket || value.ticket === owner.ticket && value.id < id);
         if (!busy) return await action();
         await new Promise(resolve => setTimeout(resolve, 50));

@@ -10,6 +10,111 @@ const exec = promisify(execFile);
 const op = (id, cwd, caseKey) => ({ id, cwd, caseKey, status: 'completed', fingerprint: 'snapshot', clientId: 'client', instanceId: 'kernel',
   input: { mode: 'worktree', instructions: 'PRIVATE_REQUIREMENT' }, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString() });
 const report = { verdict: 'Review finished', findings: [{ title: 'Finding', body: 'Complete body', file: 'sample.js', startLine: 1 }] };
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+const denied = code => Object.assign(new Error('Fixture ticket access denied'), { code });
+async function ticketFixture(root, name, count = 1) {
+  const directory = path.join(root, name), store = new ReportStore({ directory });
+  await store.ready();
+  const peers = [];
+  for (let i = 1; i <= count; i++) {
+    const id = `00000000-0000-0000-0000-${String(i).padStart(12, '0')}`;
+    const file = path.join(directory, `.writer.${process.pid}.${id}`);
+    await fs.writeFile(file, JSON.stringify({ pid: process.pid, id, ticket: i }));
+    peers.push(file);
+  }
+  return { directory, store, peers };
+}
+async function ticketScanRegressions(root) {
+  {
+    const { directory, store, peers } = await ticketFixture(root, 'ticket-election', 2);
+    const read = store.readFile.bind(store), reads = new Map();
+    let firstPeer, refusedPeer, recovered, publishedAtRecovery, entered = false;
+    const recovery = new Promise(resolve => { recovered = resolve; });
+    store.readFile = async file => {
+      if (!peers.includes(file)) return read(file);
+      reads.set(file, (reads.get(file) || 0) + 1);
+      firstPeer ||= file;
+      if (file !== firstPeer && !refusedPeer) { refusedPeer = file; throw denied('EPERM'); }
+      const value = await read(file);
+      if (file === refusedPeer) {
+        publishedAtRecovery = (await fs.readdir(directory)).some(name => name.startsWith('.writer.') && !peers.includes(path.join(directory, name)));
+        recovered();
+      }
+      return value;
+    };
+    const pending = store.locked(() => { entered = true; return 'saved'; });
+    await Promise.race([recovery, pending]);
+    assert(refusedPeer && reads.get(firstPeer) >= 2, 'Election restarts the entire scan after a peer access failure');
+    assert.equal(publishedAtRecovery, false, 'An unread peer cannot be treated as an absent election ticket');
+    await pause(80);
+    assert.equal(entered, false, 'A recovered active peer continues to block the critical section');
+    for (const file of peers) await fs.unlink(file);
+    assert.equal(await pending, 'saved');
+    assert.equal(entered, true);
+  }
+  {
+    const { store, peers } = await ticketFixture(root, 'ticket-waiting');
+    const read = store.readFile.bind(store); let reads = 0, recovered, entered = false;
+    const recovery = new Promise(resolve => { recovered = resolve; });
+    store.readFile = async file => {
+      if (file !== peers[0]) return read(file);
+      reads += 1;
+      if (reads === 2) throw denied('EBUSY');
+      const value = await read(file);
+      if (reads >= 3) recovered();
+      return value;
+    };
+    const pending = store.locked(() => { entered = true; return 'saved'; });
+    await Promise.race([recovery, pending]);
+    assert(reads >= 3, 'Waiting scans retry a transient busy ticket');
+    await pause(80);
+    assert.equal(entered, false, 'A retry does not skip the active peer');
+    await fs.unlink(peers[0]);
+    assert.equal(await pending, 'saved');
+  }
+  {
+    const { directory, store, peers } = await ticketFixture(root, 'ticket-persistent');
+    const read = store.readFile.bind(store); let attempts = 0, entered = false;
+    store.readFile = async file => {
+      if (file !== peers[0]) return read(file);
+      attempts += 1;
+      // 选票消耗一部分时间，再验证等待阶段不能重新获得五秒预算。
+      if (attempts === 1) { await pause(2000); throw denied('EPERM'); }
+      if (attempts === 2) return read(file);
+      throw denied('EPERM');
+    };
+    const started = Date.now();
+    await assert.rejects(store.locked(() => { entered = true; }), error => error.code === 'EPERM');
+    const elapsed = Date.now() - started;
+    assert(attempts >= 3 && elapsed >= 4000 && elapsed < 6500, `Persistent rejection exhausts one shared election and waiting budget (${elapsed}ms)`);
+    assert.equal(entered, false, 'Persistent ticket rejection never enters the critical section');
+    assert.deepEqual(await fs.readdir(directory), [path.basename(peers[0])], 'Failed acquisition removes only its own markers');
+  }
+  {
+    const { store, peers } = await ticketFixture(root, 'ticket-invalid');
+    await fs.writeFile(peers[0], JSON.stringify({ pid: process.pid, id: 'wrong-owner', ticket: 1 }));
+    const read = store.readFile.bind(store); let reads = 0, entered = false;
+    store.readFile = file => {
+      if (file === peers[0] && ++reads === 1) return Promise.reject(denied('EPERM'));
+      return read(file);
+    };
+    await assert.rejects(store.locked(() => { entered = true; }), /锁无效/);
+    assert.equal(reads, 2, 'A transient rejection cannot bypass recovered owner validation');
+    assert.equal(entered, false);
+  }
+  {
+    const { store, peers } = await ticketFixture(root, 'ticket-permission');
+    const read = store.readFile.bind(store); let reads = 0, entered = false;
+    store.readFile = file => {
+      if (file === peers[0]) { reads += 1; return Promise.reject(denied('EACCES')); }
+      return read(file);
+    };
+    await assert.rejects(store.locked(() => { entered = true; }), error => error.code === 'EACCES');
+    assert.equal(reads, 1, 'Other permission errors remain immediate failures');
+    assert.equal(entered, false);
+  }
+  console.log('Ticket scan retries, active peers, shared deadlines and rejection boundaries passed');
+}
 (async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-report-store-'));
   try {
@@ -57,6 +162,7 @@ const report = { verdict: 'Review finished', findings: [{ title: 'Finding', body
     const mutual = `const fs=require('node:fs/promises'),path=require('node:path'),{ReportStore}=require(process.argv[1]); const directory=process.argv[2],store=new ReportStore({directory}); (async()=>{for(let i=0;i<8;i++)await store.locked(async()=>{const active=path.join(directory,'critical');await fs.writeFile(active,'owned',{flag:'wx'});try{const file=path.join(directory,'counter'),n=Number(await fs.readFile(file,'utf8').catch(()=>0));await new Promise(r=>setTimeout(r,5));await fs.writeFile(file,String(n+1))}finally{await fs.unlink(active)}})})().catch(e=>{console.error(e.message);process.exitCode=1})`;
     await Promise.all(Array.from({ length: 4 }, () => exec(process.execPath, ['-e', mutual, storePath, coordination])));
     assert.equal(Number(await fs.readFile(path.join(coordination, 'counter'))), 32, 'Dead-claim recovery keeps all concurrent critical sections mutually exclusive');
+    await ticketScanRegressions(root);
     await fs.writeFile(path.join(directory, '.write-lock'), JSON.stringify({ pid: 2147483647, id: 'dead' }));
     await first.save(op('recover-lock', root), report); assert.equal((await first.list()).length, 3);
     const series = path.join(root, 'series'), seriesStore = new ReportStore({ directory: series });

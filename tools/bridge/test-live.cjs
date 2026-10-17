@@ -29,6 +29,10 @@ async function run() {
       throw error;
     } };
   try {
+    const reuseVsix = process.argv.includes('--packed-vsix');
+    assert(!reuseVsix || process.argv.includes('--editor'), '--packed-vsix requires --editor');
+    const vsix = path.join(ROOT, `packages/vscode-extension/build/dsh-acp-panel-${require('../compat/lib.cjs').versions().panel}.vsix`);
+    const suppliedVsixSha256 = reuseVsix ? sha256(vsix) : undefined;
     await stage('loopback-environment', () => require('../compat/loopback.cjs').verifyLoopback());
     for (const k of Object.keys(proxy)) delete process.env[k];
     process.env.DSH_HOME = path.join(folder, 'home'); fs.mkdirSync(process.env.DSH_HOME, { recursive: true });
@@ -138,11 +142,14 @@ async function run() {
       const restored = await bridge.request('operation/get', { operationId: id }); assert.equal(restored.status, 'completed'); return true;
     });
     if (process.argv.includes('--editor')) {
-      locate.runDshSync({ command: process.execPath, args: [path.join(ROOT, 'packages/vscode-extension/tools/build-vsix.js')] });
+      if (!reuseVsix) locate.runDshSync({ command: process.execPath, args: [path.join(ROOT, 'packages/vscode-extension/tools/build-vsix.js')] });
+      if (reuseVsix) assert.equal(sha256(vsix), suppliedVsixSha256, 'Supplied VSIX changed before native validation');
       model.setReviewDelay(5000);
       bridge.dispose(); session.dispose(); client.close();
       await new Promise(resolve => setTimeout(resolve, 200));
       await stage('packed-vsix-native-editor', () => require('./editor-check.cjs').checkEditor({ folder, cwd, port }));
+      if (reuseVsix) assert.equal(sha256(vsix), suppliedVsixSha256, 'Supplied VSIX changed during native validation');
+      report.artifacts.push({ kind: 'vsix', file: path.relative(ROOT, vsix).replace(/\\/g, '/'), sha256: sha256(vsix) });
     }
     await stage('owned-idle-exit', async () => {
       bridge.dispose(); session.dispose(); client.close();

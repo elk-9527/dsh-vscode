@@ -35,4 +35,9 @@ assert.equal(publication({ failedList: true }).published, false, 'A failed file 
 assert.equal(publication({ privateContent: true }).published, false, 'Public content check must run before publication');
 const valid = publication(); assert.equal(valid.published, true); assert.equal(valid.exitCode, 0);
 assert(!/Extension="\./.test(contentTypesXml()), 'Content type extensions must omit the leading dot');
+const packedWithoutEditor = require('node:child_process').spawnSync(process.execPath,
+  [path.resolve(root, '../../tools/bridge/test-live.cjs'), '--packed-vsix'],
+  { cwd: path.resolve(root, '../..'), encoding: 'utf8', windowsHide: true, timeout: 10000 });
+assert.equal(packedWithoutEditor.status, 1, 'Reusing a native archive requires editor validation');
+assert(packedWithoutEditor.stderr.includes('--packed-vsix requires --editor'));
 console.log('Publication content gates, inventory failures and package content types passed');

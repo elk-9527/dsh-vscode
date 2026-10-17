@@ -20,6 +20,7 @@ jobs:
     runs-on: windows-latest
     outputs:
       matrix: ${{ steps.versions.outputs.matrix }}
+      vsix_sha256: ${{ steps.panel.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -38,6 +39,19 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           "matrix=$matrix" >> $env:GITHUB_OUTPUT
+      - name: 构建供编辑器共同验收的安装包
+        run: node packages/vscode-extension/tools/build-vsix.js
+      - id: panel
+        shell: pwsh
+        run: |
+          $file = Get-ChildItem -LiteralPath packages/vscode-extension/build -Filter '*.vsix'
+          if (@($file).Count -ne 1) { throw 'Expected exactly one panel archive' }
+          "sha256=$((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+      - uses: actions/upload-artifact@v4
+        with:
+          name: panel-native-candidate
+          path: packages/vscode-extension/build/*.vsix
+          if-no-files-found: error
 
   kernel:
     needs: discover
@@ -72,6 +86,7 @@ jobs:
             build/compat/**/public-validation.json
 
   minimum-editor:
+    needs: discover
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -84,6 +99,15 @@ jobs:
           node-version: 24
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: panel-native-candidate
+          path: packages/vscode-extension/build
+      - name: 核对共同安装包摘要
+        shell: pwsh
+        run: |
+          $file = Get-ChildItem -LiteralPath packages/vscode-extension/build -Filter '*.vsix'
+          if (@($file).Count -ne 1 -or (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne '${{ needs.discover.outputs.vsix_sha256 }}') { throw 'Panel archive digest mismatch' }
       - name: 准备精确内核和最低编辑器
         shell: pwsh
         run: |
@@ -94,13 +118,12 @@ jobs:
           Invoke-WebRequest "https://update.code.visualstudio.com/$version/win32-x64-archive/stable" -OutFile build/vscode-minimum.zip
           Expand-Archive -LiteralPath build/vscode-minimum.zip -DestinationPath build/vscode-editor
       - run: node tools/bridge/build-pilots.cjs
-      - run: node packages/vscode-extension/tools/build-vsix.js
       - name: 默认启动下验收完整原生流程
         shell: pwsh
         run: |
           $env:DSH_PANEL_DSH = 'node "' + (Join-Path $PWD 'build/editor-runtime/node_modules/@deepseek-ai/dsh/lib/bin.js') + '"'
           $env:DSH_PANEL_CODE = Join-Path $PWD 'build/vscode-editor/Code.exe'
-          ./tools/bridge/check-minimum.ps1 -DshVersion 0.2.1-alpha.1
+          ./tools/bridge/check-minimum.ps1 -DshVersion 0.2.1-alpha.1 -UsePackedVsix
       - name: 导出最低编辑器公开验证结果
         shell: pwsh
         run: |
