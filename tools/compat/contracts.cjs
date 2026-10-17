@@ -2,7 +2,7 @@
 /** 版本声明、诊断脱敏及严格发布门槛的跨包契约。 */
 const assert = require('node:assert/strict');
 const os = require('node:os');
-const { argsOf, safeObject, versions, semver, json, ROOT } = require('./lib.cjs');
+const { argsOf, safeObject, versions, semver, json, ROOT, contentSha256 } = require('./lib.cjs');
 const { validateReport, REQUIRED } = require('./release-check.cjs');
 const path = require('node:path');
 const fs = require('node:fs');
@@ -12,6 +12,21 @@ const { publicEvidence } = require('./public-evidence.cjs');
 
 assert.deepEqual(mergeExclusions(['@scope/plugin@1.0.7', '@scope/plugin@1.0.10', 'billion-context@0.1.174', 'billion-context@0.1.175']), ['@scope/plugin@1.0.7 || 1.0.10', 'billion-context@0.1.174 || 0.1.175']);
 assert.throws(() => mergeExclusions(['billion-context@*']));
+const attemptReport = { checks: [{ name: 'editor-failure', status: 'failed', evidence: 'first attempt' }, { name: 'self-failure', status: 'failed', evidence: 'unresolved' }] };
+require('./local.cjs').completeAttempt(attemptReport, 'editor');
+assert.deepEqual(attemptReport.previousFailures, [{ name: 'editor-failure', status: 'failed', evidence: 'first attempt' }]);
+assert.deepEqual(attemptReport.checks, [{ name: 'self-failure', status: 'failed', evidence: 'unresolved' }]);
+const contentFixture = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-content-'));
+try {
+  const first = path.join(contentFixture, 'first'), second = path.join(contentFixture, 'second');
+  const compare = (a, b) => { fs.writeFileSync(first, a); fs.writeFileSync(second, b); return contentSha256(first) === contentSha256(second); };
+  assert(compare('first\r\nsecond\r\n', 'first\nsecond\n'));
+  assert(!compare('first\nsecond\n', 'first\nchanged\n'));
+  assert(!compare('first\n', 'first'));
+  assert(!compare('\uFEFFfirst\n', 'first\n'));
+  assert(!compare(Buffer.from([0, 13, 10]), Buffer.from([0, 10])));
+  assert(!compare(Buffer.from([255, 13, 10]), Buffer.from([255, 10])));
+} finally { fs.rmSync(contentFixture, { recursive: true, force: true }); }
 
 assert.equal(explainKernelFailure({ stderr: 'Plugin dsh-acp-door@0.1.1 is incompatible with dsh 0.2.0-rc.2: peerDependencies' }).kind, 'plugin-incompatible');
 if (process.platform === 'win32') {

@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { ROOT, argsOf, json, versions, resolveRuntime, locate, sha256, sourceState, safeObject } = require('./lib.cjs');
+const { ROOT, argsOf, json, versions, resolveRuntime, locate, sha256, contentSha256, sourceState, safeObject } = require('./lib.cjs');
 
 /** pnpm 使用同包名的首条规则；将原有精确版本合为一条，保持既有允许集合。 */
 function mergeExclusions(values) {
@@ -107,7 +107,7 @@ function install(options) {
         }
       };
       walk(path.join(ROOT, 'packages/dsh-door/lib'), 'lib');
-      for (const file of files) if (sha256(path.join(ROOT, 'packages/dsh-door', file)) !== sha256(path.join(directory, 'node_modules/dsh-acp-door', file))) throw new Error(`${profile} 的装机文件与源码不同：${file}`);
+      for (const file of files) if (contentSha256(path.join(ROOT, 'packages/dsh-door', file)) !== contentSha256(path.join(directory, 'node_modules/dsh-acp-door', file))) throw new Error(`${profile} 的装机文件与源码不同：${file}`);
       const manifestFile = path.join(directory, 'package.json');
       const manifest = json(manifestFile);
       if (!manifest.dsh.profile.bundles.includes('dsh-acp-door')) {

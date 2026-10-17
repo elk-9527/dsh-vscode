@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { ROOT, argsOf, json, versions, sourceState, resolveRuntime, locate, runDir, safeObject } = require('./lib.cjs');
+const { ROOT, argsOf, json, versions, sourceState, resolveRuntime, locate, runDir, safeObject, contentSha256 } = require('./lib.cjs');
 const { freePort, waitFor, bounded } = require('./test.cjs');
 const { desktopProfilePatchArgs, syncPanelProfilePlugins } = require('../../packages/vscode-extension/src/door/setup');
 const { DoorClient } = require('../../packages/vscode-extension/src/door/client');
@@ -14,6 +14,13 @@ const { execFileSync, spawnSync } = require('node:child_process');
 function check(report, name, evidence) {
   report.checks = report.checks.filter((item) => item.name !== name);
   report.checks.push({ name, status: 'passed', evidence });
+}
+function completeAttempt(report, mode) {
+  const previous = report.checks.filter(item => item.name === `${mode}-failure`);
+  if (previous.length) {
+    report.previousFailures = [...(report.previousFailures || []), ...previous];
+    report.checks = report.checks.filter(item => item.name !== `${mode}-failure`);
+  }
 }
 
 async function editor(report, options, folder) {
@@ -51,9 +58,10 @@ function installed(report) {
     const directory = path.join(home, 'profiles', profile);
     assert(json(path.join(directory, 'package.json')).dsh.profile.bundles.includes('dsh-acp-door'));
     for (const file of files) {
-      const sha = require('./lib.cjs').sha256(path.join(ROOT, 'packages/dsh-door', file));
-      assert.equal(require('./lib.cjs').sha256(path.join(directory, 'node_modules/dsh-acp-door', file)), sha, `${profile}/${file} 内容不一致`);
-      hashes.push({ profile, file: file.replace(/\\/g, '/'), sha256: sha });
+      const source = path.join(ROOT, 'packages/dsh-door', file);
+      const target = path.join(directory, 'node_modules/dsh-acp-door', file);
+      assert.equal(contentSha256(target), contentSha256(source), `${profile}/${file} 内容不一致`);
+      hashes.push({ profile, file: file.replace(/\\/g, '/'), sha256: require('./lib.cjs').sha256(target), sourceSha256: require('./lib.cjs').sha256(source), contentSha256: contentSha256(target) });
     }
   }
   const result = spawnSync(process.execPath, [path.join(ROOT, 'packages/vscode-extension/tools/check-installed.cjs')], { encoding: 'utf8', windowsHide: true, timeout: 10000 });
@@ -71,10 +79,10 @@ async function local(options) {
   const file = options.out ? path.resolve(options.out) : path.join(folder, 'local-report.json');
   const report = fs.existsSync(file) ? json(file) : { schemaVersion: 1, time: new Date().toISOString(), source: sourceState(), packages: versions(), checks: [], artifacts: [] };
   assert.equal(report.source.fingerprint, sourceState().fingerprint, '本机报告对应的源码已变化');
-  let kernel, client, session, port;
+  let kernel, client, session, port, succeeded = false;
   try {
-    if (options.mode === 'editor') { await editor(report, options, folder); return report; }
-    if (options.mode === 'installed') { installed(report); return report; }
+    if (options.mode === 'editor') { await editor(report, options, folder); succeeded = true; return report; }
+    if (options.mode === 'installed') { installed(report); succeeded = true; return report; }
     port = Number(options.port || 47821);
     if (options.mode !== 'attach') {
       const runtime = resolveRuntime(options);
@@ -142,6 +150,7 @@ async function local(options) {
       assert.equal(result.stopReason, 'end_turn'); assert(toolComplete, '真实模型没有完成文件工具'); assert(answer.includes(marker), '真实模型没有读取测试文件');
       check(report, 'real-model-tool', { completedTool: true, markerRead: true, provider: status.model.provider, model: status.model.model });
     }
+    succeeded = true;
   } catch (error) { report.checks.push({ name: `${options.mode}-failure`, status: 'failed', evidence: require('./lib.cjs').redact(error.message) }); throw error; }
   finally {
     if (session?.sessionId && client) { try { await client.closeSession(session.sessionId); } catch {} }
@@ -151,6 +160,7 @@ async function local(options) {
       try { await waitFor(async () => !await locate.probePort('127.0.0.1', port), 10000); check(report, 'local-kernel-cleanup', { portClosed: true }); }
       catch (error) { cleanupError = error; report.checks.push({ name: 'local-kernel-cleanup', status: 'failed', evidence: error.message }); }
     }
+    if (succeeded && !cleanupError) completeAttempt(report, options.mode);
     report.finishedAt = new Date().toISOString();
     fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, `${JSON.stringify(safeObject(report), null, 2)}\n`);
     console.log(`本机验收记录：${file}`);
@@ -159,4 +169,4 @@ async function local(options) {
   return report;
 }
 if (require.main === module) local(argsOf()).catch((error) => { console.error(require('./lib.cjs').redact(error.stack)); process.exitCode = 1; });
-module.exports = { local };
+module.exports = { local, completeAttempt };

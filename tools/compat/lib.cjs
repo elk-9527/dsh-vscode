@@ -12,6 +12,15 @@ const locate = require('../../packages/vscode-extension/src/door/locate');
 
 function json(file) { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); }
 function sha256(file) { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); }
+function contentSha256(file) {
+  const bytes = fs.readFileSync(file);
+  const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+  let content = bytes;
+  if (!bytes.includes(0)) {
+    try { content = Buffer.from(text.decode(bytes).replace(/\r\n/g, '\n')); } catch {}
+  }
+  return crypto.createHash('sha256').update(content).digest('hex');
+}
 function argsOf(args = process.argv.slice(2)) {
   const out = {};
   for (let i = 0; i < args.length; i += 1) {
@@ -160,4 +169,4 @@ async function discover() {
   const all = [...new Set([...matrix.versions.map((item) => item.dsh), stable, prerelease, upstream].filter(Boolean))];
   return { stable, prerelease, upstream, versions: all, matrix: { dsh: all } };
 }
-module.exports = { ROOT, locate, json, sha256, argsOf, redact, safeObject, sourceState, versions, readAsar, desktopInfo, desktopGuiProcessIds, candidates, resolveRuntime, runDir, writeReport, fetchJson, discover, semver };
+module.exports = { ROOT, locate, json, sha256, contentSha256, argsOf, redact, safeObject, sourceState, versions, readAsar, desktopInfo, desktopGuiProcessIds, candidates, resolveRuntime, runDir, writeReport, fetchJson, discover, semver };
