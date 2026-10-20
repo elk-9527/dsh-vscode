@@ -91,11 +91,9 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
   </div>
 
   <main id="messages" class="messages" tabindex="0" aria-live="polite">
-    <section id="empty" class="onboarding" aria-label="项目与连接状态">
-      <h1>从当前项目开始</h1>
-      <p id="onboarding-project" class="onboarding-project">正在读取对话目录…</p>
-      <p id="onboarding-stage" class="onboarding-stage" role="status" aria-live="polite" aria-atomic="true">正在连接 DSH…</p>
-      <p id="onboarding-next" class="onboarding-next">连接完成后，可以描述任务，或先添加当前文件与选区。</p>
+    <section id="empty" class="onboarding" aria-label="开始对话">
+      <h1 id="onboarding-stage">连接 DSH</h1>
+      <p id="onboarding-next" class="onboarding-next">连接完成后即可开始。</p>
     </section>
   </main>
 
@@ -145,7 +143,7 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
     </div>
     <div class="attachments" id="attachments" hidden></div>
     <div class="composer-box">
-      <textarea id="input" class="input" rows="1" aria-label="消息输入" aria-autocomplete="list" aria-haspopup="listbox" aria-controls="composer-options" aria-expanded="false" placeholder="输入消息，@ 文件 · / 技能 · # 上下文"></textarea>
+      <textarea id="input" class="input" rows="1" aria-label="消息输入" aria-autocomplete="list" aria-haspopup="listbox" aria-controls="composer-options" aria-expanded="false" placeholder="描述你要完成的任务…" title="@ 文件 · / 技能 · # 上下文"></textarea>
       <button id="send" class="send" type="button" title="发送" aria-label="发送">
         <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M2.2 7.3 13 2.2c.5-.2 1 .2.8.7l-5.1 10.8c-.2.5-1 .5-1.2 0L6 10.4a.8.8 0 0 0-.4-.4L2.2 8.5c-.5-.2-.5-1 0-1.2Z"/></svg>
       </button>
@@ -159,9 +157,9 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
       <span id="usage-inline" class="hint mono"></span>
     </div>
     <div class="composer-shortcuts" aria-label="添加文件、技能或上下文">
-      <button id="context-open" type="button" aria-haspopup="dialog" aria-expanded="false">＋ 添加上下文</button>
-      <button type="button" data-context-add="file">当前文件</button>
-      <button type="button" data-context-add="selection">当前选区</button>
+      <button id="context-open" type="button" title="添加上下文" aria-label="添加上下文" aria-haspopup="dialog" aria-expanded="false">＋ 上下文</button>
+      <button type="button" data-context-add="file" title="添加当前文件">当前文件</button>
+      <button type="button" data-context-add="selection" title="添加当前选区" aria-label="添加当前选区">选区</button>
       <button type="button" data-composer="/" title="执行命令或选择技能">/ 命令</button>
     </div>
   </footer>
@@ -172,6 +170,7 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
     <div class="context-actions">
       <button type="button" data-context-add="file">加入当前全文件</button><button type="button" data-context-add="selection">加入当前选区</button>
       <button type="button" data-context-source="search" aria-pressed="true">搜索文件</button><button type="button" data-context-source="skill" aria-pressed="false">选择技能</button>
+      <button type="button" data-context-source="diff" aria-pressed="false">Git 变更</button><button type="button" data-context-source="diagnostics" aria-pressed="false">问题诊断</button>
     </div>
     <label for="context-search" id="context-search-label">搜索本次对话目录中的文件</label>
     <input id="context-search" type="search" maxlength="128" aria-controls="context-options" aria-autocomplete="list" placeholder="输入名称或路径">

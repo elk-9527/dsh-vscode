@@ -11,6 +11,7 @@ out/
 /.workbuddy/
 /AGENTS.md
 /local-notes/
+/.local/
 /tools/bridge/round2-baseline.cjs
 /tools/bridge/round2-matrix.cjs
 /%SystemDrive%/

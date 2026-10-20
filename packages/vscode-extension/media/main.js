@@ -252,7 +252,7 @@
     const sendSettingsPending = Array.from(settingRequests.values()).some(request => request.setting !== 'permission');
     const sessionSettingsPending = settingRequests.size > 0;
     el.input.readOnly = readonly;
-    el.input.placeholder = readonly ? '继续此对话或返回当前对话后发送' : queueMode ? '输入下一条消息，Enter 加入队列' : '输入消息，@ 文件 · / 技能 · # 上下文';
+    el.input.placeholder = readonly ? '继续此对话或返回当前对话后发送' : queueMode ? '输入下一条消息，Enter 加入队列' : '描述你要完成的任务…';
     el.send.hidden = false;
     el.send.disabled = Boolean(readonly || sendSettingsPending || pendingRecovery || pendingSend || pendingChoice || (state.queue.items || []).length + (state.queue.active ? 1 : 0) >= 5);
     el.send.classList.toggle('queue-send', Boolean(queueMode));
@@ -691,7 +691,7 @@
 
   // ── 顶部状态 ────────────────────────────────────────
 
-  /** Stage feedback stays readable after the first conversation hides onboarding. */
+  /** 正常连接只显示圆点；准备、错误等必要反馈仍完整显示。 */
   function setStatus(kind, detail) {
     const text = detail || '';
     state.connectionStage = { kind, detail: text };
@@ -699,7 +699,7 @@
     el.statusDot.className = 'dot';
     if (kind === 'ready') {
       el.statusDot.classList.add('ok');
-      el.statusText.textContent = text || '就绪';
+      el.statusText.textContent = '';
     } else if (kind === 'busy') {
       el.statusDot.classList.add('busy');
       el.statusText.textContent = text || '正在处理…';
@@ -709,7 +709,11 @@
     } else {
       el.statusText.textContent = text || '正在连接…';
     }
-    el.statusText.title = text;
+    el.statusText.title = kind === 'ready'
+      ? '会话已建立；模型请求与凭据将在实际任务运行时验证。'
+      : text;
+    el.statusText.setAttribute('aria-label', kind === 'ready' ? '会话已连接' : el.statusText.textContent);
+    el.statusDot.title = el.statusText.title;
     if (kind === 'ready' || kind === 'busy') syncConfigRow();
   }
 
@@ -739,28 +743,30 @@
 
   // ── 顶栏元信息：工作目录、回合时间戳/耗时 ─────────────
 
-  /** 工作目录只显示末尾两段（过长的路径顶栏放不下），完整路径置于悬浮提示中。 */
+  /** 顶栏显示目录名，完整路径保留在悬浮提示与可访问名称中。 */
   function setWorkdir(cwd) {
     if (!cwd || typeof cwd !== 'string') return;
     const parts = cwd.split(/[\\/]/).filter(Boolean);
-    const short = parts.length > 2 ? `…/${parts.slice(-2).join('/')}` : cwd;
+    const short = parts.at(-1) || cwd;
     el.barCwd.textContent = short;
     el.barCwd.title = cwd;
+    el.barCwd.setAttribute('aria-label', `当前目录：${cwd}`);
     el.barCwd.hidden = false;
     state.projectCwd = cwd;
     updateOnboarding();
   }
 
   function updateOnboarding() {
-    const project = document.getElementById('onboarding-project'), stage = document.getElementById('onboarding-stage'), next = document.getElementById('onboarding-next');
-    if (project) project.textContent = `当前项目：${state.projectCwd || '正在读取工作目录…'}`;
+    const stage = document.getElementById('onboarding-stage'), next = document.getElementById('onboarding-next');
     const status = state.connectionStage || {};
-    if (stage) stage.textContent = status.detail || '正在等待连接状态…';
-    if (next) next.textContent = status.kind === 'ready' ? '可以提出第一个任务。会话已建立；模型请求与凭据将在实际任务运行时验证。'
-      : status.kind === 'error' ? '查看下方错误的下一步；设置和日志可随时打开。修复后显式重新连接。'
-        : status.kind === 'busy' ? '任务正在运行；可准备下一条消息。'
-          : /同步|准备/.test(status.detail || '') ? '准备流程正在进行，请等待完成；此步骤暂不支持安全取消。'
-            : '连接、启动和建立会话需要一些时间；完成后可提出任务。';
+    if (stage) stage.textContent = status.kind === 'ready' ? '开始新任务'
+      : status.kind === 'error' ? '连接暂不可用' : status.kind === 'busy' ? '任务进行中' : '连接 DSH';
+    if (next) next.hidden = status.kind === 'ready';
+    if (next) next.textContent = status.kind === 'ready' ? ''
+      : status.kind === 'error' ? '查看错误提示，修复后重新连接。'
+        : status.kind === 'busy' ? '可以在下方准备下一条消息。'
+          : /同步|准备/.test(status.detail || '') ? '请稍候，准备完成后即可开始。'
+            : '连接完成后即可开始。';
   }
 
   let turnClockTimer = 0;
@@ -1228,14 +1234,14 @@
     const fields = [
       ['来源', item.sourcePath || item.sourceUri || item.uri || '未记录来源'],
       ['范围', range],
-      ['保存状态', scope === 'test' ? '任务结果快照' : item.isUntitled ? '未命名 · 未保存' : item.isDirty === true ? '包含未保存编辑' : item.isDirty === false ? '加入时已保存' : '未记录'],
+      ['保存状态', scope === 'git-diff' ? 'Git 输出快照' : scope === 'diagnostics' ? '诊断快照' : scope === 'test' ? '任务结果快照' : item.isUntitled ? '未命名 · 未保存' : item.isDirty === true ? '包含未保存编辑' : item.isDirty === false ? '加入时已保存' : '未记录'],
       ['快照时间', item.snapshotAt ? new Date(item.snapshotAt).toLocaleString() : '未记录'],
       ['正文大小', typeof item.text === 'string' ? `${new TextEncoder().encode(item.text).length.toLocaleString()} 字节（UTF-8）` : '未读取'],
     ];
     for (const [name, value] of fields) { const dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = name; dd.textContent = value; el.previewMeta.append(dt, dd); }
     el.previewBody.textContent = typeof item.text === 'string' ? item.text : '';
     el.previewBody.hidden = typeof item.text !== 'string';
-    el.previewNote.textContent = item.previewNote || (typeof item.text === 'string' ? '只读快照；发送时附加此正文。原文件之后的修改不会改变它，再次添加可更新。' : '旧附件未保存正文，无法预览或发送。请移除后重新添加。');
+    el.previewNote.textContent = item.previewNote || (scope === 'git-diff' ? '只读 Git 补丁快照，不含未保存编辑和未跟踪文件；再次添加可更新，发送时附加此正文。' : scope === 'diagnostics' ? '只读诊断快照；没有运行测试或审查，诊断可能尚未更新。再次添加可更新，发送时附加此正文。' : typeof item.text === 'string' ? '只读快照；发送时附加此正文。原文件之后的修改不会改变它，再次添加可更新。' : '旧附件未保存正文，无法预览或发送。请移除后重新添加。');
     el.preview.hidden = false; el.previewClose.focus();
   }
   function closePreview() {
@@ -1656,7 +1662,10 @@
     el.presetField.hidden = !state.hasPresets;
     state.presetCurrent = message.current;
     const pending = message.pending;
-    const label = id => presets.find(item => item.id === id)?.name || id;
+    const label = id => {
+      const name = presets.find(item => item.id === id)?.name;
+      return name && name !== id ? name : id === 'standard' ? '标准模式' : id;
+    };
     el.presetNote.hidden = !pending || pending === message.current;
     el.presetNoteText.textContent = pending ? `当前：${label(message.current) || '未确定'} · 新对话：${label(pending)}` : '';
     el.presetSelect.title = `当前模式：${label(message.current) || '未确定'}；更换后用于新对话。`;
@@ -1667,7 +1676,7 @@
       for (const preset of presets) {
         const opt = document.createElement('option');
         opt.value = preset.id;
-        opt.textContent = preset.name || preset.id;
+        opt.textContent = label(preset.id);
         if (preset.description) opt.title = preset.description;
         if (preset.id === current) {
           opt.selected = true;
@@ -1679,7 +1688,7 @@
       if (!matched && current) {
         const opt = document.createElement('option');
         opt.value = current;
-        opt.textContent = current;
+        opt.textContent = label(current);
         opt.selected = true;
         el.presetSelect.appendChild(opt);
       }
@@ -2061,7 +2070,7 @@
   document.querySelectorAll('[data-context-source]').forEach(button => button.addEventListener('click', () => {
     contextSource = button.dataset.contextSource;
     document.querySelectorAll('[data-context-source]').forEach(candidate => candidate.setAttribute('aria-pressed', String(candidate === button)));
-    el.contextSearchLabel.textContent = contextSource === 'skill' ? '搜索随消息使用的技能' : '搜索本次对话目录中的文件';
+    el.contextSearchLabel.textContent = contextSource === 'skill' ? '搜索随消息使用的技能' : contextSource === 'diff' ? '按文件名筛选 Git 变更' : contextSource === 'diagnostics' ? '按文件名筛选问题诊断' : '搜索本次对话目录中的文件';
     el.contextSearch.value = ''; el.contextSearch.focus(); queryContext();
   }));
   el.contextSearch.addEventListener('input', queryContext);

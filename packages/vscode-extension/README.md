@@ -47,6 +47,10 @@
 
 ## 文件引用、历史和修复建议
 
+在输入框旁点击“添加上下文”，选择 **Git 变更** 或 **问题诊断**。可以按文件名筛选，添加当前目录范围或单个文件；附件正文可在发送前预览，并随草稿保存。选择来源不会自动发送消息。
+
+Git 变更分别提供已暂存与未暂存补丁，仅包含已跟踪文件，不含编辑器未保存修改、未跟踪文件和子模块正文；这些内容可另外通过文件或选区添加。问题诊断来自 VS Code 当前已提供的结果，可能来自未保存编辑或尚未更新，不代表执行了测试或完整审查。再次添加可取得新快照；现有附件不会随代码变化而更新。
+
 输入 `/` 时，菜单同时提供命令和技能。命令直接执行，不向模型发送消息；技能选择后成为附件，随下一条消息发送。命令菜单先显示可用操作，再加载技能；工作中的不兼容操作显示为不可用。
 
 | 命令 | 操作 |
@@ -119,7 +123,7 @@
 
 当前工作区最多保存 100 条已结束运行的元数据；完整正文另存于本地结果文件，自定义要求不持久保存。清理同时移除允许回收的正文与对应问题提示，打开的报告和正在使用的关联资料保留。界面使用 VS Code 原生树、文字、主题图标和命令入口，支持键盘操作与高对比主题。
 
-0.15.0 的最低支持版本为 VS Code 1.141.0，以本次完整安装包验收为准。更早版本未计入本次支持范围。身份无法确认时限制插件执行，普通聊天与只读诊断保留。
+0.17.0 的最低支持版本为 VS Code 1.90.2。侧栏对话、上下文、审查、技能和测试流程不依赖原生 Chat；原生 `@dsh` Chat 需要 VS Code 1.91 或更高版本及可用的 Chat 界面。身份无法确认时限制插件执行，普通聊天与只读诊断保留。
 
 ## 快速开始
 
@@ -210,10 +214,10 @@ dsh plugin --profile vscode-panel list
 
 ## 系统要求
 
-- VS Code 1.141 或更高版本。
+- VS Code 1.90.2 或更高版本；原生 Chat 为可选功能，需要 1.91 或更高版本。
 - 本机已安装 DSH，并配置了可用模型。
 - 已安装 ACP 接入点插件（`dsh-acp-door`）。
-- 兼容 DSH `0.1.5-rc.2`、`0.2.0-rc.1`、`0.2.0-rc.2` 与预览版 `0.2.1-alpha.1`。
+- 兼容 DSH `0.1.5-rc.2`、`0.2.0-rc.1`、`0.2.0-rc.2` 与预览版 `0.2.1-alpha.1`、`0.2.1-rc.2`。
 
 当前界面语言为中文，暂不支持粘贴图片。完整端到端验证环境为 Windows；其他系统暂未列入已验证兼容性范围。
 
@@ -232,6 +236,6 @@ dsh plugin --profile vscode-panel list
 
 DSH ACP Panel brings DeepSeek Harness into the VS Code sidebar. Chat with DSH, attach the current file or selected code, inspect tool activity, switch models and permissions, and resume local sessions without leaving the editor.
 
-The extension connects to an existing local DSH instance or starts a dedicated local profile on demand. It requires VS Code 1.141+, a configured DSH installation, and the companion `dsh-acp-door` plugin. Connections are loopback-only, and the current UI is Chinese.
+The extension connects to an existing local DSH instance or starts a dedicated local profile on demand. It requires VS Code 1.90.2+, a configured DSH installation, and the companion `dsh-acp-door` plugin. Native Chat is optional and requires VS Code 1.91+; the sidebar remains available without it. Connections are loopback-only, and the current UI is Chinese.
 
 </details>

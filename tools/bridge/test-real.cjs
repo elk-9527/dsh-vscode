@@ -25,7 +25,7 @@ async function run() {
     fs.writeFileSync(path.join(cwd,'sample.js'),header+'export function sum(a, b) { return a - b; }\n');
     fs.writeFileSync(path.join(cwd,'sum.test.js'),"import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { sum } from './sample.js';\ntest('adds numeric inputs', () => { assert.equal(sum(2, 3), 5); assert.equal(sum(-4, 7), 3); assert.equal(sum(0, 1), 1); });\n");
     const before = await repositorySnapshot(cwd);
-    const runtime = resolveRuntime({dsh:'0.2.0-rc.2'}), profile='bridge-real';
+    const runtime = resolveRuntime({dsh:process.env.DSH_PANEL_TEST_DSH_VERSION, command:process.env.DSH_PANEL_DSH}), profile='bridge-real';
     const directory = path.join(process.env.DSH_HOME || path.join(os.homedir(),'.dsh'),'profiles',profile);
     if (fs.existsSync(path.join(directory,'package.json'))) {
       const backup = path.join(folder,'profile-before'); fs.mkdirSync(backup);

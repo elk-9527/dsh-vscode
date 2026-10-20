@@ -39,7 +39,7 @@ async function run() {
   const recordPath = path.join(folder, 'scenario-report.json');
   try {
     if (!candidate) execFileSync(process.execPath, ['packages/vscode-extension/tools/check-installed.cjs'], { cwd: ROOT, stdio: 'pipe', windowsHide: true });
-    const runtime = resolveRuntime({ dsh: '0.2.0-rc.2' });
+    const runtime = resolveRuntime({ dsh: process.env.DSH_PANEL_TEST_DSH_VERSION, command: process.env.DSH_PANEL_DSH });
     const sourceProfile = path.join(originalHome, 'profiles/bridge-real');
     const sourcePatch = path.join(originalHome, 'profiles/desktop/cordis.patch.yml');
     sourceConfigHashes = [path.join(sourceProfile, 'package.json'), path.join(sourceProfile, 'cordis.yml'), path.join(sourceProfile, 'cordis.patch.yml'), sourcePatch].map(file => ({ file, sha256: sha256(file) }));

@@ -4,6 +4,7 @@ const fs = require('node:fs/promises');
 const { randomUUID } = require('node:crypto');
 const { referenceAttachments, MAX_CONTEXT_BYTES, selectionEndLine } = require('../chat/context');
 const { commandChoices } = require('../workflow/commands');
+const { gitChoices, diagnosticChoices, captureGit, captureDiagnostics } = require('./workspace-context');
 
 const SKILLS = 'linxin.skill-explorer.';
 const EXCLUDE = '**/{.git,node_modules,build,dist,coverage,.next}/**';
@@ -93,14 +94,17 @@ class ComposerContext {
     const generation = ++this.queryGeneration;
     const sessionId = this.sessionId(), origin = options.origin || 'syntax', source = options.source;
     const context = origin === 'context';
-    if (context && !['file', 'selection', 'search', 'skill'].includes(source)) throw new Error('无效的上下文来源。');
+    if (context && !['file', 'selection', 'search', 'skill', 'diff', 'diagnostics'].includes(source)) throw new Error('无效的上下文来源。');
     if (context) trigger = source === 'skill' ? '/' : source === 'search' ? '@' : '#';
     if (!['@', '/', '#'].includes(trigger) || typeof query !== 'string' || query.length > 128 || /[\0\r\n]/.test(query)) throw new Error('无效的快捷查询。');
     if (!context && trigger === '/' && !this.vscode.workspace.isTrusted) { this.candidates.clear(); this.recentEditor = undefined; this.skillCatalog = undefined; return { items: commandChoices(query, { busy: this.busy(), trusted: false }), note: '受限工作区仅提供命令；文件技能需要工作区信任。' }; }
     await this.realGuard(cwd, signal);
     query = query.trim().replace(/\\/g, '/');
     const choices = []; let note = '';
-    if (trigger === '/') {
+    if (context && ['diff', 'diagnostics'].includes(source)) {
+      const result = source === 'diff' ? await gitChoices(cwd, query, signal) : await diagnosticChoices(this.vscode, cwd, query, signal);
+      choices.push(...result.choices); note = result.note;
+    } else if (trigger === '/') {
       if (!context) choices.push(...commandChoices(query, { busy: this.busy(), trusted: this.vscode.workspace.isTrusted }));
       if (!this.skillCatalog || this.skillCatalog.cwd !== cwd || this.skillCatalog.sessionId !== sessionId || Date.now() > this.skillCatalog.expires) {
         const promise = Promise.resolve().then(() => { if (!this.connected()) throw new Error('技能服务尚未连接'); return this.invoke(SKILLS + 'list', {}, { cwd }); });
@@ -178,6 +182,10 @@ class ComposerContext {
     await this.realGuard(choice.cwd, signal); guardChoice();
     const { cwd } = choice; this.guard(cwd, signal);
     if (choice.kind === 'command') throw new Error('命令需要通过命令入口执行。');
+    if (['git-diff', 'diagnostics'].includes(choice.kind)) {
+      const item = choice.kind === 'git-diff' ? await captureGit(cwd, choice, signal) : await captureDiagnostics(this.vscode, cwd, choice, signal);
+      await this.realGuard(cwd, signal); guardChoice(); return item;
+    }
     if (choice.kind === 'skill') {
       const result = await this.invoke(SKILLS + 'read', { skillId: choice.skillId }, { cwd, signal });
       await this.realGuard(cwd, signal);

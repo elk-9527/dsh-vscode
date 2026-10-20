@@ -1240,6 +1240,18 @@ function assertionsScript(scene) {
       document.querySelector('#attachments .chip-label').click();
       assert('旧链接明确提示重新添加且不假预览磁盘正文', document.getElementById('preview-body').hidden && document.getElementById('preview-note').textContent.includes('重新添加'));
       document.getElementById('preview-close').click();
+      document.querySelectorAll('#attachments .chip-close').forEach(function (button) { button.click(); });
+      before = sentCount();
+      for (var contextKind of ['diff', 'diagnostics']) {
+        document.getElementById('context-open').click(); document.querySelector('[data-context-source="' + contextKind + '"]').click(); await contextWait(); cq = latestContext('composerQuery');
+        assert('工作区上下文来源独立筛选 ' + contextKind, cq.source === contextKind && document.getElementById('context-search-label').textContent.includes('按文件名') && sentCount() === before);
+        receive({ type: 'composerSuggestions', origin: 'context', source: contextKind, requestId: cq.requestId, items: [{ id: contextKind, kind: contextKind === 'diff' ? 'git-diff' : 'diagnostics', label: contextKind === 'diff' ? '未暂存变更' : '问题诊断' }] });
+        document.querySelector('#context-options button').click(); select = latestContext('composerSelect');
+        receive({ type: 'composerSelected', origin: 'context', source: contextKind, cwd: '/context-project', requestId: select.requestId, item: { id: contextKind, kind: 'content', scope: contextKind === 'diff' ? 'git-diff' : 'diagnostics', name: contextKind, sourcePath: '/context-project', text: 'snapshot <img> safe', snapshotAt: snapshotItem.snapshotAt } });
+        document.querySelectorAll('#attachments .chip-label')[contextKind === 'diff' ? 0 : 1].click();
+        assert('工作区上下文可预览且明确来源限制 ' + contextKind, document.getElementById('preview-body').textContent === 'snapshot <img> safe' && document.getElementById('preview-note').textContent.includes(contextKind === 'diff' ? '未跟踪文件' : '没有运行测试') && sentCount() === before);
+        document.getElementById('preview-close').click();
+      }
       receive({ type: 'meta', cwd: '/untrusted', trusted: false });
       assert('信任撤销清附件并禁用新入口', document.getElementById('attachments').hidden && document.getElementById('context-open').disabled);
       cq = await type('/help'); receive({ type: 'composerSuggestions', requestId: cq.requestId, items: [{ id: 'command:help', kind: 'command', label: '/help' }] }); key('Enter'); command = latestContext('composerCommand');
@@ -1436,15 +1448,15 @@ function assertionsScript(scene) {
       var controlsLast = function (type) { return window.__received.filter(function (message) { return message.type === type; }).pop(); };
       controlsRecv({ type: 'meta', cwd: '/fixture/long-project-name', sessionId: 'controls-session', trusted: true });
       var onset = document.getElementById('onboarding-stage'), onnext = document.getElementById('onboarding-next');
-      assert('首屏显示完整项目来源', document.getElementById('onboarding-project').textContent.indexOf('/fixture/long-project-name') >= 0);
-      assert('首屏阶段可以被辅助技术播报', onset.getAttribute('role') === 'status' && onset.getAttribute('aria-live') === 'polite');
+      assert('顶栏保留完整目录且只展示目录名', document.getElementById('bar-cwd').title === '/fixture/long-project-name' && document.getElementById('bar-cwd').textContent === 'long-project-name');
+      assert('连接阶段由顶栏向辅助技术播报', document.getElementById('status-text').getAttribute('role') === 'status' && document.getElementById('status-text').getAttribute('aria-live') === 'polite');
       controlsRecv({ type: 'status', state: 'connecting', detail: '正在同步准备 DSH…' });
-      assert('同步阶段说明等待且不虚构安全取消', onset.textContent.indexOf('同步') >= 0 && onnext.textContent.indexOf('不支持安全取消') >= 0);
+      assert('同步阶段保留完整进度并提示等待', document.getElementById('status-text').textContent.indexOf('同步') >= 0 && onnext.textContent.indexOf('请稍候') >= 0);
       controlsRecv({ type: 'status', state: 'ready', detail: '会话已建立' });
-      assert('会话就绪明确模型与凭据尚待真实任务验证', onnext.textContent.indexOf('凭据') >= 0 && onnext.textContent.indexOf('任务') >= 0);
+      assert('会话连接后移除状态与引导文案且保留连接播报与验证说明', document.getElementById('status-text').textContent === '' && document.getElementById('status-text').getAttribute('aria-label') === '会话已连接' && onnext.hidden && onnext.textContent === '' && document.getElementById('status-text').title.indexOf('实际任务') >= 0);
       controlsRecv({ type: 'notice', text: '已完成同步准备' });
       controlsRecv({ type: 'status', state: 'connecting', detail: '正在建立新会话：等待内核返回当前项目的实际会话身份' });
-      assert('首次系统notice不隐藏项目与连接阶段', visible(document.getElementById('empty')) && onset.textContent.indexOf('建立') >= 0);
+      assert('首次系统notice不隐藏引导与完整连接阶段', visible(document.getElementById('empty')) && document.getElementById('status-text').textContent.indexOf('建立') >= 0);
       var controlsStatus = document.getElementById('status-text');
       assert('顶栏完整连接阶段换行且可播报', controlsStatus.textContent.indexOf('实际会话身份') >= 0 && controlsStatus.getAttribute('aria-live') === 'polite' && getComputedStyle(controlsStatus).whiteSpace !== 'nowrap');
       controlsRecv({ type: 'error', message: '401 Unauthorized', human: { title: '认证来源待核对', advice: '先查日志', actions: [{ id: 'log', label: '查看日志' }] } });

@@ -6,10 +6,10 @@ const { createHash } = require('node:crypto');
 const { runDshSync } = require('../../packages/vscode-extension/src/door/locate');
 const ROOT = path.resolve(__dirname, '../..');
 const PILOTS = [
-  { name: '@michengai/dsh-code-review', version: '0.1.9', candidate: '0.1.9-ide.4',
+  { name: '@michengai/dsh-code-review', version: '0.1.9', candidate: '0.1.9-ide.5',
     sha256: 'd77a24a0f54c69728112fbd6817c643c1489f006045cefb6d328bab1d9bdc606',
     runtimeSha256: '7df2296398e2508af6dd87525bf0c3af2ae56c9f7ed182334228532a1326b54d', key: 'review' },
-  { name: '@linxin666/dsh-client-ui-skill-explorer', version: '0.4.4', candidate: '0.4.4-ide.4',
+  { name: '@linxin666/dsh-client-ui-skill-explorer', version: '0.4.4', candidate: '0.4.4-ide.5',
     sha256: 'd09440cf5557d3e3bf09a35fbea05f3fbfae073e25b3658344bd63d95a666862', key: 'skills' },
 ];
 /** 从已校验的上游发行包生成候选包，不改动已安装插件目录。 */
@@ -45,8 +45,10 @@ function build({ home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh') 
     if (pilot.key === 'review') fs.writeFileSync(path.join(target,'lib/runtime.js'), modifiedNotice + require('./review-runtime.cjs').patchReviewRuntime(fs.readFileSync(path.join(source,'lib/runtime.js'),'utf8')));
     if (pilot.key === 'review') fs.copyFileSync(path.join(__dirname, 'review-budget.cjs'), path.join(target, 'lib/review-budget.cjs'));
     manifest.version = pilot.candidate;
-    for (const [name, range] of Object.entries(manifest.peerDependencies || {})) if (name.startsWith('@deepseek-ai/dsh') && !range.includes('0.2.1-alpha.1')) manifest.peerDependencies[name] = range + ' || 0.2.1-alpha.1';
-    if (manifest.dsh?.engines?.dsh && !manifest.dsh.engines.dsh.includes('0.2.1-alpha.1')) manifest.dsh.engines.dsh += ' || 0.2.1-alpha.1';
+    for (const version of ['0.2.1-alpha.1', '0.2.1-rc.2']) {
+      for (const [name, range] of Object.entries(manifest.peerDependencies || {})) if (name.startsWith('@deepseek-ai/dsh') && !range.includes(version)) manifest.peerDependencies[name] = range + ' || ' + version;
+      if (manifest.dsh?.engines?.dsh && !manifest.dsh.engines.dsh.includes(version)) manifest.dsh.engines.dsh += ' || ' + version;
+    }
     manifest.dependencies = { ...manifest.dependencies, 'dsh-ide-bridge-sdk': '0.1.0' };
     manifest.dshIdeBridge = { upstreamVersion: pilot.version, upstreamEntrySha256: hash, protocolVersion: 1,
       modificationNotice: 'Modified by DSH in VS Code to register IDE Bridge capabilities and declare the SDK dependency.' };

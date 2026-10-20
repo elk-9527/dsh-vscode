@@ -48,6 +48,8 @@ const redacted = safeObject({ apiKey: 'must-hide', nested: { path: path.join(os.
 assert(!JSON.stringify(redacted).includes('must-hide'));
 assert(!JSON.stringify(redacted).includes(os.homedir()));
 const current = versions();
+assert(semver.satisfies('0.2.1-rc.2', current.peer), 'DSH 0.2.1-rc.2 必须能够通过接入点依赖检查');
+assert(!semver.satisfies('0.2.1-rc.3', current.peer), '未验收的预发布版不应自动进入支持范围');
 const publicResult = publicEvidence({ status: 'passed', source: { commit: 'a'.repeat(40), fingerprint: 'b'.repeat(64), path: 'PRIVATE_PATH' },
   packages: current, runtime: { version: '0.2.0-rc.2', acpVersion: '0.2.0-rc.2', distribution: 'desktop', command: 'PRIVATE_COMMAND' },
   accountsBefore: [{ ciphertextDigest: 'PRIVATE_DIGEST' }], backup: 'PRIVATE_BACKUP', error: 'PRIVATE_ERROR',
@@ -66,15 +68,39 @@ assert(validateReport({ ...report, stages: [...report.stages, { name: 'tools', s
 assert(validateReport({ ...report, runtime: { version: '0.2.0-rc.1' } }, current, state).length);
 const matrix = json(path.join(ROOT, 'compat/versions.json'));
 const editorMatrix = json(path.join(ROOT, 'compat/editors.json'));
+{
+  const { CHECKS, requiredChecks } = require('./editor-evidence.cjs');
+  const legacy = requiredChecks('1.85.0');
+  assert.equal(legacy.length, CHECKS.length);
+  assert(legacy.includes('native Chat unavailable keeps sidebar'));
+  assert(legacy.includes('sidebar receives unsaved file reference'));
+  assert(!legacy.includes('native participant registered'));
+  assert.deepEqual(requiredChecks('1.91.0'), CHECKS);
+  assert.deepEqual(requiredChecks('1.142.0'), CHECKS);
+  assert.deepEqual(requiredChecks('1.90.2', true), CHECKS);
+  assert.deepEqual(requiredChecks('1.90.2', false), legacy);
+  assert(semver.satisfies('1.90.2', json(path.join(ROOT, 'packages/vscode-extension/package.json')).engines.vscode), 'VS Code 1.90.2 必须能够安装当前面板');
+  const evidence = { status: 'passed', editor: '1.90.2', defaultLaunch: true, source: state, packages: current, vsixSha256: 'a'.repeat(64), checks: legacy.map(name => ({ name, status: 'passed' })) };
+  const { validateEditorEvidence } = require('./release-check.cjs');
+  assert.deepEqual(validateEditorEvidence(evidence, evidence.vsixSha256, current, state), []);
+  const nativeEvidence = { ...evidence, capabilities: { nativeChat: true }, checks: CHECKS.map(name => ({ name, status: 'passed' })) };
+  assert.deepEqual(validateEditorEvidence(nativeEvidence, evidence.vsixSha256, current, state), []);
+  assert(validateEditorEvidence({ ...evidence, capabilities: { nativeChat: true } }, evidence.vsixSha256, current, state).length);
+  assert(validateEditorEvidence({ ...evidence, editor: '1.91.0' }, evidence.vsixSha256, current, state).length);
+  assert(validateEditorEvidence({ ...evidence, checks: evidence.checks.filter(check => check.name !== 'native composer Git diff snapshot') }, evidence.vsixSha256, current, state).length);
+  assert(validateEditorEvidence({ ...evidence, checks: evidence.checks.filter(check => check.name !== 'sidebar receives unsaved file reference') }, evidence.vsixSha256, current, state).length);
+}
 if (editorMatrix.supported?.length) {
   const { validateEditorEvidence } = require('./release-check.cjs');
   const evidence = json(path.join(ROOT, editorMatrix.supported[0].evidence));
   const state = { fingerprint: evidence.source.fingerprint };
-  assert.deepEqual(validateEditorEvidence(evidence, evidence.vsixSha256, current, state), []);
-  assert(validateEditorEvidence(evidence, '0'.repeat(64), current, state).length);
-  assert(validateEditorEvidence({ ...evidence, defaultLaunch: false }, evidence.vsixSha256, current, state).length);
-  assert(validateEditorEvidence({ ...evidence, checks: evidence.checks.slice(1) }, evidence.vsixSha256, current, state).length);
-  assert(validateEditorEvidence(evidence, evidence.vsixSha256, current, { fingerprint: 'changed' }).length);
+  const testedPackages = { ...current, ...evidence.packages };
+  assert.deepEqual(validateEditorEvidence(evidence, evidence.vsixSha256, testedPackages, state), []);
+  assert(validateEditorEvidence(evidence, evidence.vsixSha256, { ...testedPackages, door: 'changed' }, state).length);
+  assert(validateEditorEvidence(evidence, '0'.repeat(64), testedPackages, state).length);
+  assert(validateEditorEvidence({ ...evidence, defaultLaunch: false }, evidence.vsixSha256, testedPackages, state).length);
+  assert(validateEditorEvidence({ ...evidence, checks: evidence.checks.slice(1) }, evidence.vsixSha256, testedPackages, state).length);
+  assert(validateEditorEvidence(evidence, evidence.vsixSha256, testedPackages, { fingerprint: 'changed' }).length);
 }
 assert.equal(editorMatrix.minimum, json(path.join(ROOT, 'packages/vscode-extension/package.json')).engines.vscode.replace(/^\^/, ''));
 assert.equal(json(path.join(ROOT, editorMatrix.evidence)).editor, editorMatrix.minimum);

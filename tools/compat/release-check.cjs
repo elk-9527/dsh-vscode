@@ -24,7 +24,8 @@ function validateEditorEvidence(evidence, archive, current = versions(), state =
   if (evidence.status !== 'passed' || !evidence.defaultLaunch || !semver.satisfies(evidence.editor || '', range)) issues.push('编辑器版本、状态或默认启动证据无效');
   if (evidence.source?.fingerprint !== state.fingerprint || evidence.packages?.panel !== current.panel || evidence.packages?.door !== current.door) issues.push('编辑器证据对应的产品已变化');
   if (!/^[a-f0-9]{64}$/.test(evidence.vsixSha256 || '') || evidence.vsixSha256 !== archive) issues.push('编辑器未验收同一份最终 VSIX');
-  for (const name of require('./editor-evidence.cjs').CHECKS) if (!evidence.checks?.some(check => check.name === name && check.status === 'passed')) issues.push(`编辑器检查 ${name} 缺失`);
+  const nativeChat = evidence.capabilities?.nativeChat ?? evidence.checks?.some(check => check.name === 'native participant registered' && check.status === 'passed');
+  for (const name of require('./editor-evidence.cjs').requiredChecks(evidence.editor, nativeChat)) if (!evidence.checks?.some(check => check.name === name && check.status === 'passed')) issues.push(`编辑器检查 ${name} 缺失`);
   return issues;
 }
 function releaseCheck(options) {
@@ -40,7 +41,8 @@ function releaseCheck(options) {
   const editorMinimum = json(path.join(ROOT, 'packages/vscode-extension/package.json')).engines.vscode.replace(/^\^/, '');
   if (editorMatrix.status !== 'passed' || editorMatrix.minimum !== editorMinimum || editorEvidence.editor !== editorMinimum || editorEvidence.status !== 'passed' || !editorEvidence.defaultLaunch) issues.push('最低编辑器缺少默认启动的通过证据');
   if (editorEvidence.source?.fingerprint !== sourceState().fingerprint || editorEvidence.packages?.panel !== current.panel || editorEvidence.packages?.door !== current.door) issues.push('最低编辑器证据对应的产品已变化');
-  for (const name of require('./editor-evidence.cjs').CHECKS) if (!editorEvidence.checks?.some(check => check.name === name && check.status === 'passed')) issues.push(`最低编辑器检查 ${name} 缺失`);
+  const minimumNativeChat = editorEvidence.capabilities?.nativeChat ?? editorEvidence.checks?.some(check => check.name === 'native participant registered' && check.status === 'passed');
+  for (const name of require('./editor-evidence.cjs').requiredChecks(editorMinimum, minimumNativeChat)) if (!editorEvidence.checks?.some(check => check.name === name && check.status === 'passed')) issues.push(`最低编辑器检查 ${name} 缺失`);
   if (!Array.isArray(editorMatrix.supported) || !editorMatrix.supported.length) issues.push('缺少另一个支持编辑器对最终安装包的验收');
   for (const entry of editorMatrix.supported || []) {
     if (entry.status !== 'passed' || !entry.evidence) { issues.push('支持编辑器缺少通过证据'); continue; }

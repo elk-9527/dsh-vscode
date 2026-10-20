@@ -43,14 +43,17 @@ async function checkEditor({ folder, cwd, port }) {
   const progressFile = path.join(folder, 'editor-progress.json');
   fs.writeFileSync(path.join(checker, 'index.js'), `'use strict';
 const vscode = require('vscode'), fs = require('node:fs');
-exports.activate = async () => {
+exports.activate = () => { setTimeout(() => void run(), 0); };
+async function run() {
   const checks = []; const check = (name, condition) => { if (!condition) throw new Error(name); checks.push(name); fs.writeFileSync(${JSON.stringify(progressFile)},JSON.stringify({checks})); };
   try {
     const extension = vscode.extensions.getExtension('Elk-ydy.dsh-acp-panel');
     const api = await extension.activate(); check('extension activation', api.apiVersion === 1);
     const observed=process[Symbol.for('dsh.validation.observer')]; check('isolated observation loaded',!!observed);
-    check('existing file editor present during activation',observed.startupEditor?.document.uri.fsPath.toLowerCase()===${JSON.stringify(path.join(cwd, 'sample.js').toLowerCase())});
-    check('startup composer captures existing editor',observed.view.composer.recentEditor?.document===observed.startupEditor.document);
+    const startupEditor=await vscode.window.showTextDocument(vscode.Uri.file(${JSON.stringify(path.join(cwd, 'sample.js'))}),{preview:false});
+    check('native file editor opens',startupEditor.document.uri.fsPath.toLowerCase()===${JSON.stringify(path.join(cwd, 'sample.js').toLowerCase())});
+    await new Promise(resolve=>setTimeout(resolve,50));
+    check('composer captures opened editor',observed.view.composer.recentEditor?.document===startupEditor.document);
     if (fs.existsSync(${JSON.stringify(closingFile)})) {
       await observed.nativeViews.historyReady;
       const saved=JSON.parse(fs.readFileSync(${JSON.stringify(closingFile)}));
@@ -93,8 +96,11 @@ exports.activate = async () => {
     await observed.view.onWebviewMessage({type:'draft',draft:{version:1,cwd:${JSON.stringify(cwd)},savedAt:Date.now(),text:'NATIVE_DRAFT_FIXTURE',attachments:[{kind:'content',name:'scratch.js',text:'UNSAVED_DRAFT_FIXTURE'}]}});await observed.view.draftWrites;
     const draftKey=require(require('node:path').join(extension.extensionPath,'src/panel/drafts.js')).draftKey;
     check('native draft persistence',observed.view.workspaceState.get(draftKey(${JSON.stringify(cwd)}))?.attachments[0].text==='UNSAVED_DRAFT_FIXTURE');
-    await vscode.commands.executeCommand('dshPanel.bridge.copyDiagnostics');
-    check('diagnosis clipboard', (await vscode.env.clipboard.readText())===diagnosis.getText());
+    const previousClipboard=await vscode.env.clipboard.readText();
+    try{
+      await vscode.commands.executeCommand('dshPanel.bridge.copyDiagnostics');
+      check('diagnosis clipboard', (await vscode.env.clipboard.readText())===diagnosis.getText());
+    }finally{await vscode.env.clipboard.writeText(previousClipboard);}
     for(const [theme,kind] of [['Default Light Modern',1],['Default Dark Modern',2],['Default High Contrast',3]]) {
       await vscode.workspace.getConfiguration('workbench').update('colorTheme',theme,vscode.ConfigurationTarget.Global);
       const themeDeadline=Date.now()+5000;
@@ -161,12 +167,39 @@ exports.activate = async () => {
     const skills=await composer.query('/','bridge-fixture');
     const skillSnapshot=await composer.select(skills.items[0].id);
     check('native composer manual skill attachment',skillSnapshot.kind==='skill'&&skillSnapshot.text.includes('BRIDGE_SKILL_CONTENT'));
-    const chat=observed.chatRegistration;check('native participant registered',!!chat?.handler);
-    let reply='';const chatCancel=new vscode.CancellationTokenSource();
-    const chatResult=await chat.handler({prompt:'Explain the attached file',references:[{value:document.uri}]},{history:[]},{markdown:delta=>{reply+=delta;},progress(){},button(){}},chatCancel.token);
+    const gitChoices=await composer.query('@','context-git',undefined,{origin:'context',source:'diff'});
+    const gitChoice=gitChoices.items.find(item=>item.label==='context-git.txt'&&item.description==='未暂存变更');
+    const gitSnapshot=await composer.select(gitChoice.id);
+    check('native composer Git diff snapshot',gitSnapshot.scope==='git-diff'&&gitSnapshot.text.includes('+context-working')&&!gitSnapshot.text.includes('CHAT_REFERENCE_UNSAVED_MARKER'));
+    const contextDiagnostics=vscode.languages.createDiagnosticCollection('dsh-context-fixture');
+    contextDiagnostics.set(document.uri,[new vscode.Diagnostic(new vscode.Range(0,0,0,6),'CONTEXT_DIAGNOSTIC_MARKER',vscode.DiagnosticSeverity.Warning)]);
+    try {
+      const diagnosticChoices=await composer.query('@','sample',undefined,{origin:'context',source:'diagnostics'});
+      const diagnosticSnapshot=await composer.select(diagnosticChoices.items.find(item=>item.label==='sample.js').id);
+      check('native composer Problems snapshot',diagnosticSnapshot.scope==='diagnostics'&&diagnosticSnapshot.text.includes('CONTEXT_DIAGNOSTIC_MARKER')&&diagnosticSnapshot.text.includes('未保存编辑'));
+      contextDiagnostics.clear();check('native composer immutable context',diagnosticSnapshot.text.includes('CONTEXT_DIAGNOSTIC_MARKER')&&gitSnapshot.text.includes('+context-working'));
+      const {snapshotMessage}=require(${JSON.stringify(path.join(panelRoot,'src/panel/queue'))});
+      check('native composer context queue',snapshotMessage('inspect',[gitSnapshot,diagnosticSnapshot]).attachments[1].source==='vscode-diagnostics');
+      const contextSession=await api.createSession({cwd:${JSON.stringify(cwd)},userInitiated:true});let contextAnswer='';
+      try {await api.prompt(contextSession,'Acknowledge the attached context',{userInitiated:true,attachments:[gitSnapshot,diagnosticSnapshot],onEvent:event=>{if(event.type==='text')contextAnswer+=event.delta;}});check('native composer context transmission',contextAnswer.length>0);}
+      finally{await api.closeSession(contextSession);}
+    }finally{contextDiagnostics.dispose();}
+    const chat=observed.chatRegistration;let reply='',chatResult;
+    if(chat?.handler){
+      check('native participant registered',true);
+      const chatCancel=new vscode.CancellationTokenSource();
+      try{chatResult=await chat.handler({prompt:'Explain the attached file',references:[{value:document.uri}]},{history:[]},{markdown:delta=>{reply+=delta;},progress(){},button(){}},chatCancel.token);}
+      finally{chatCancel.dispose();}
+      check('native Chat receives unsaved file reference',reply.includes('CHAT_REFERENCE_UNSAVED_MARKER'));
+    }else{
+      check('native Chat unavailable keeps sidebar',Number(vscode.version.split('.')[1])<91&&!!observed.view.composer);
+      const handle=await api.createSession({cwd:${JSON.stringify(cwd)},userInitiated:true});
+      chatResult={metadata:{dsh:handle}};
+      await api.prompt(handle,'Explain the attached file',{userInitiated:true,attachments:[fileSnapshot],onEvent:event=>{if(event.type==='text')reply+=event.delta;}});
+      check('sidebar receives unsaved file reference',reply.includes('CHAT_REFERENCE_UNSAVED_MARKER'));
+    }
     fs.writeFileSync(${JSON.stringify(path.join(folder, 'chat-reference-result.json'))},JSON.stringify({reply,chatResult}));
-    check('native Chat receives unsaved file reference',reply.includes('CHAT_REFERENCE_UNSAVED_MARKER'));
-    await api.closeSession(chatResult.metadata.dsh);chatCancel.dispose();
+    await api.closeSession(chatResult.metadata.dsh);
     const resetReference=new vscode.WorkspaceEdit();resetReference.replace(document.uri,new vscode.Range(document.positionAt(0),document.positionAt(document.getText().length)),originalText);await vscode.workspace.applyEdit(resetReference);await document.save();
     const slashChoices=await composer.query('/','status');check('native slash commands',slashChoices.items.some(item=>item.kind==='command'&&item.id==='command:status'));
     const workflow=observed.view.workflow,tracked=await workflow.begin();fs.writeFileSync(workflowFile,'native agent content');await workflow.finish(tracked);
@@ -215,7 +248,10 @@ exports.activate = async () => {
       check('save and review uses new snapshot',verified?.status==='completed'&&verified.id!==first.id&&verified.fingerprint!==first.fingerprint&&fs.readFileSync(document.uri.fsPath,'utf8').includes('a + b'));
       panelApi.window.showQuickPick=async items=>items.find(item=>item.label==='DSH repair regression');
       const ordinaryTest=workflow.testResult;
-      const passed=await observed.nativeViews.verification.run(first);await passed.finished;
+      const verification=observed.nativeViews.verification;let verificationTimer;
+      let passed;
+      try{passed=await Promise.race([(async()=>{const result=await verification.run(first);await result.finished;return result;})(),new Promise((_,reject)=>{verificationTimer=setTimeout(()=>reject(new Error('Repair test did not finish: '+JSON.stringify({selecting:verification.selecting,current:verification.current?.status,execution:verification.execution?.task?.name,tasks:vscode.tasks.taskExecutions.map(item=>item.task.name)}))),30000);})]);}
+      finally{clearTimeout(verificationTimer);}
       check('independent repair test passes',passed.status==='passed'&&passed.exitCode===0&&passed.cwd===first.cwd&&workflow.testResult===ordinaryTest);
       check('repair and re-review share saved case',verified.caseKey===first.caseKey&&(await observed.nativeViews.reportStore.events(first.caseKey)).some(event=>event.payload.kind==='fix'));
       await observed.nativeViews.openCase(first.id);
@@ -262,6 +298,7 @@ exports.activate = async () => {
   try {
     const deadline = Date.now() + 150000;
     while (!fs.existsSync(resultFile) && Date.now() < deadline) {
+      if (child.exitCode !== null && !fs.existsSync(closingFile) && !fs.existsSync(resultFile)) throw new Error(`编辑器在验收激活前退出：${child.exitCode}；启动日志：${path.join(folder, 'editor-launch.log')}`);
       if (!reopened && fs.existsSync(closingFile) && child.exitCode !== null) { child = launch(); reopened = true; }
       await new Promise(resolve => setTimeout(resolve, 500));
     }

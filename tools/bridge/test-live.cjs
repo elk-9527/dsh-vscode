@@ -39,7 +39,9 @@ async function run() {
     const runtime = resolveRuntime({ dsh: process.argv.slice(2).find(value => !value.startsWith('--')) || '0.2.0-rc.2' }); report.runtime = runtime;
     const cwd = path.join(folder, 'workspace'); fs.mkdirSync(cwd);
     fs.writeFileSync(path.join(cwd, 'sample.js'), 'export function sum(a, b) { return a - b; }\n');
-    for (const args of [['init', '-q'], ['add', 'sample.js'], ['-c', 'user.name=Bridge test', '-c', 'user.email=bridge@example.invalid', 'commit', '-qm', 'fixture']]) locate.runDshSync({ command: 'git', args: ['-C', cwd, ...args] });
+    fs.writeFileSync(path.join(cwd, 'context-git.txt'), 'context-base\n');
+    for (const args of [['init', '-q'], ['add', 'sample.js', 'context-git.txt'], ['-c', 'user.name=Bridge test', '-c', 'user.email=bridge@example.invalid', 'commit', '-qm', 'fixture']]) locate.runDshSync({ command: 'git', args: ['-C', cwd, ...args] });
+    fs.writeFileSync(path.join(cwd, 'context-git.txt'), 'context-working\n');
     const skillDir = path.join(process.env.DSH_HOME, 'skills/bridge-fixture'); fs.mkdirSync(skillDir, { recursive: true });
     fs.writeFileSync(path.join(skillDir, 'SKILL.md'), '---\nname: bridge-fixture\ndescription: Bridge read fixture\n---\n\nBRIDGE_SKILL_CONTENT\n');
     await stage('packages', async () => {
@@ -148,6 +150,10 @@ async function run() {
       bridge.dispose(); session.dispose(); client.close();
       await new Promise(resolve => setTimeout(resolve, 200));
       await stage('packed-vsix-native-editor', () => require('./editor-check.cjs').checkEditor({ folder, cwd, port }));
+      await stage('packed-context-model-transport', () => {
+        assert(model.requests.some(request => { const body = JSON.stringify(request); return body.includes('CONTEXT_DIAGNOSTIC_MARKER') && body.includes('Git 变更补丁快照'); }), '模型服务未收到 Git 与问题诊断正文');
+        return { gitDiffAndDiagnostics: true };
+      });
       if (reuseVsix) assert.equal(sha256(vsix), suppliedVsixSha256, 'Supplied VSIX changed during native validation');
       report.artifacts.push({ kind: 'vsix', file: path.relative(ROOT, vsix).replace(/\\/g, '/'), sha256: sha256(vsix) });
     }

@@ -42,7 +42,7 @@ dsh plugin --profile <your-profile> update dsh-acp-door
 
 Restart the kernel afterwards.
 
-Compatibility: DSH `0.1.5-rc.2`, `0.2.0-rc.1`, `0.2.0-rc.2`, and preview `0.2.1-alpha.1`.
+Compatibility: DSH `0.1.5-rc.2`, `0.2.0-rc.1`, `0.2.0-rc.2`, and previews `0.2.1-alpha.1` / `0.2.1-rc.2`. DSH `0.2.1-rc.2` requires dsh-acp-door `0.5.2` or later.
 
 </details>
 
@@ -207,6 +207,7 @@ DSH 冷启动时，插件会先等待用户设置加载完成再开放端口，�
 | DSH | 历史会话 | 权限预设 |
 | --- | --- | --- |
 | `0.2.0-rc.1` / `0.2.0-rc.2` | 公开 `sessionQuery` 服务，v4 会话格式 | `catalog/current/resolve/set` |
+| `0.2.1-alpha.1` / `0.2.1-rc.2` | 公开 `sessionQuery` 服务，v4 会话格式 | `catalog/current/resolve/set` |
 | `0.1.5-rc.2` | 只读解析本机 v3 会话文件 | `selectFor/permissionState/current/set` |
 
 两条路径对外提供相同的 `dsh-door/…` 方法。接入点的状态回复会用 `historyKind`、

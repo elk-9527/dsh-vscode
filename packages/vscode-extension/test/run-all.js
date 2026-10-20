@@ -25,6 +25,8 @@ const withDsh = args.includes('--all');
 const strict = args.includes('--strict');
 
 const suites = [
+  { name: 'Git 变更与问题诊断上下文', file: 'test/workspace-context.js', always: true },
+  { name: '审查子 Agent 内核接口兼容', file: '../../tools/bridge/test-review-runtime.cjs', always: true },
   { name: '文件句柄身份与链接切换边界', file: 'test/file-state.js', always: true },
   { name: '完整报告持久化与多窗口存储边界', file: 'test/report-store.js', always: true },
   { name: '审查独立验证与多次执行记录', file: 'test/review-verification.js', always: true },

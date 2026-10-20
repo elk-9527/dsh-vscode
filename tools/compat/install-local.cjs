@@ -46,8 +46,8 @@ function install(options) {
     if (!fs.existsSync(sdkArchive)) fs.copyFileSync(source, sdkArchive);
     if (sha256(source) !== sha256(sdkArchive)) throw new Error('SDK 安装包摘要不匹配');
   }
-  const runtime = resolveRuntime({ dsh: options.dsh || '0.2.0-rc.2', command: options.command });
-  const backup = path.join(ROOT, 'backup', `compat-${new Date().toISOString().replace(/[:.]/g, '-')}`);
+  const runtime = resolveRuntime({ dsh: options.dsh, command: options.command });
+  const backup = path.join(ROOT, '.local', 'backups', `compat-${new Date().toISOString().replace(/[:.]/g, '-')}`);
   fs.mkdirSync(backup, { recursive: true });
   const record = { time: new Date().toISOString(), source: sourceState(), packages: versions(), backup: path.relative(ROOT, backup), originals: [], operations: [],
     artifacts: [{ kind: 'tgz', file: path.relative(ROOT, tgz).replace(/\\/g, '/'), sha256: sha256(tgz) }, { kind: 'vsix', file: path.relative(ROOT, vsix).replace(/\\/g, '/'), sha256: sha256(vsix) }] };

@@ -9,7 +9,7 @@ const ROOT = rootAt < 0 ? path.resolve(__dirname, '..') : path.resolve(args[root
 const staged = args.includes('--staged');
 const git = (...items) => childProcess.execFileSync('git', items, {cwd:ROOT, windowsHide:true, maxBuffer:64*1024*1024});
 const allowedDocs = new Set(['bridge-v1.md','DSH兼容维护流程.md','发布清单.md','注释与文档规范.md']);
-const localOnly = /^(?:backup\/|build\/|local-notes\/|\.workbuddy\/|AGENTS\.md$|%SystemDrive%\/|spike\/(?:capture\/|scratch\/|session-survey-report\.txt$)|compat\/evidence\/(?:local|baseline|doctor|release-check))/i;
+const localOnly = /^(?:backup\/|build\/|local-notes\/|\.local\/|\.workbuddy\/|AGENTS\.md$|%SystemDrive%\/|spike\/(?:capture\/|scratch\/|session-survey-report\.txt$)|compat\/evidence\/(?:local|baseline|doctor|release-check))/i;
 const privateScreenshots = /(?:^|\/)(?:assets|screenshots)\/panel-chat\.png$/i;
 const SEP = String.fromCharCode(92);
 const forbidden = [

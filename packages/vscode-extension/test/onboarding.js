@@ -33,8 +33,8 @@ function run(check) {
     }
   }
   const html = renderHtml({ cspSource: 'fixture:', styleUri: 'main.css', markdownUri: 'markdown.js', scriptUri: 'main.js', nonce: 'fixture' });
-  check('首屏提供项目、阶段和下一步且初始内容不为空', ['onboarding-project', 'onboarding-stage', 'onboarding-next'].every(id => new RegExp(`id="${id}"[^>]*>[^<]+<`).test(html)));
-  check('首屏阶段可以被读屏软件持续播报', /id="onboarding-stage"[^>]*role="status"[^>]*aria-live="polite"[^>]*aria-atomic="true"/.test(html));
+  check('首屏提供简短标题和下一步且初始内容不为空', ['onboarding-stage', 'onboarding-next'].every(id => new RegExp(`id="${id}"[^>]*>[^<]+<`).test(html)));
+  check('连接状态由顶栏统一向读屏软件播报', /id="status-text"[^>]*role="status"[^>]*aria-live="polite"[^>]*aria-atomic="true"/.test(html));
   check('窄栏隐藏字段标签时仍有模型与模式的可访问名称', /id="model-select"[^>]*aria-label="模型"/.test(html) && /id="preset-select"[^>]*aria-label="模式"/.test(html));
   check('设置与操作反馈可以被读屏软件播报', /id="hint"[^>]*role="status"[^>]*aria-live="polite"/.test(html));
   check('首屏不声称已验证模型凭据或可取消准备', !/模型已可用|凭据已验证|取消准备/.test(html));

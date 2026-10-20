@@ -34,7 +34,7 @@ jobs:
         shell: pwsh
         run: |
           if ('${{ github.event_name }}' -eq 'pull_request') {
-            $matrix = '{"dsh":["0.1.5-rc.2","0.2.0-rc.2","0.2.1-alpha.1"]}'
+            $matrix = '{"dsh":["0.1.5-rc.2","0.2.0-rc.2","0.2.1-alpha.1","0.2.1-rc.2"]}'
           } else {
             $matrix = node tools/compat/test.cjs --discover --matrix
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -93,7 +93,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        editor: [minimum, stable]
+        editor: [minimum, chat, stable]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -116,7 +116,7 @@ jobs:
           npm install --prefix build/editor-runtime --no-audit --no-fund @deepseek-ai/dsh@0.2.1-alpha.1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $minimumVersion = ((Get-Content -LiteralPath packages/vscode-extension/package.json -Raw | ConvertFrom-Json).engines.vscode).TrimStart('^')
-          $version = if ('${{ matrix.editor }}' -eq 'minimum') { $minimumVersion } else { 'latest' }
+          $version = if ('${{ matrix.editor }}' -eq 'minimum') { $minimumVersion } elseif ('${{ matrix.editor }}' -eq 'chat') { '1.91.1' } else { 'latest' }
           Invoke-WebRequest "https://update.code.visualstudio.com/$version/win32-x64-archive/stable" -OutFile build/vscode-minimum.zip
           Expand-Archive -LiteralPath build/vscode-minimum.zip -DestinationPath build/vscode-editor
       - run: node tools/bridge/build-pilots.cjs

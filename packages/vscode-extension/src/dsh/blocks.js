@@ -58,7 +58,7 @@ function contentText(item) {
   const content = String(item.text);
   const fence = fenceFor(content);
   const language = SAFE_LANGUAGE.test(String(item.language || '')) ? item.language : '';
-  const description = item.scope === 'file' ? '完整文件正文快照' : '附加正文快照';
+  const description = item.scope === 'file' ? '完整文件正文快照' : item.scope === 'git-diff' ? 'Git 变更补丁快照' : item.scope === 'diagnostics' ? 'VS Code 问题诊断快照' : '附加正文快照';
   return [
     `以下是${description}（${where}${snapshotDetail(item)}）：`,
     `${fence}${language}`,
