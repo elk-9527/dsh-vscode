@@ -21,10 +21,47 @@
     historyList: document.getElementById('history-list'),
     historyMeta: document.getElementById('history-meta'),
     historyClose: document.getElementById('history-close'),
+    historySearch: document.getElementById('history-search'),
+    historyProject: document.getElementById('history-project'),
+    historyPrev: document.getElementById('history-prev'),
+    historyNext: document.getElementById('history-next'),
+    historyPage: document.getElementById('history-page'),
+    historyContext: document.getElementById('history-context'),
+    historyContextText: document.getElementById('history-context-text'),
+    historyResume: document.getElementById('history-resume'),
+    historyBack: document.getElementById('history-back'),
+    queue: document.getElementById('queue'),
+    queueSummary: document.getElementById('queue-summary'),
+    queueList: document.getElementById('queue-list'),
+    queueContinue: document.getElementById('queue-continue'),
     configRow: document.getElementById('config-row'),
     modelSelect: document.getElementById('model-select'),
+    modelField: document.getElementById('model-field'),
+    reasoningField: document.getElementById('reasoning-field'),
+    reasoningSelect: document.getElementById('reasoning-select'),
+    recoverDraft: document.getElementById('recover-draft'),
+    workflow: document.getElementById('workflow'),
+    workflowSummary: document.getElementById('workflow-summary'),
+    workflowNote: document.getElementById('workflow-note'),
+    workflowFiles: document.getElementById('workflow-files'),
+    workflowTest: document.getElementById('workflow-test'),
+    workflowRunTest: document.getElementById('workflow-run-test'),
+    workflowStopTest: document.getElementById('workflow-stop-test'),
+    workflowAttachTest: document.getElementById('workflow-attach-test'),
+    workflowViewTest: document.getElementById('workflow-view-test'),
+    workflowPrepareTest: document.getElementById('workflow-prepare-test'),
+    workflowLogTest: document.getElementById('workflow-log-test'),
+    workflowTerminal: document.getElementById('workflow-terminal'),
+    testLog: document.getElementById('test-log-panel'),
+    testLogBody: document.getElementById('test-log-body'),
+    testLogNote: document.getElementById('test-log-note'),
+    testLogClose: document.getElementById('test-log-close'),
+    testLogAccept: document.getElementById('test-log-accept'),
     presetField: document.getElementById('preset-field'),
     presetSelect: document.getElementById('preset-select'),
+    presetNote: document.getElementById('preset-note'),
+    presetNoteText: document.getElementById('preset-note-text'),
+    presetNew: document.getElementById('preset-new'),
     accessField: document.getElementById('access-field'),
     accessBtn: document.getElementById('access-btn'),
     accessPop: document.getElementById('access-pop'),
@@ -38,6 +75,23 @@
     messages: document.getElementById('messages'),
     empty: document.getElementById('empty'),
     input: document.getElementById('input'),
+    composerMenu: document.getElementById('composer-menu'),
+    composerTitle: document.getElementById('composer-title'),
+    composerOptions: document.getElementById('composer-options'),
+    composerNote: document.getElementById('composer-note'),
+    contextOpen: document.getElementById('context-open'),
+    contextPanel: document.getElementById('context-panel'),
+    contextClose: document.getElementById('context-close'),
+    contextSearch: document.getElementById('context-search'),
+    contextSearchLabel: document.getElementById('context-search-label'),
+    contextOptions: document.getElementById('context-options'),
+    contextNote: document.getElementById('context-note'),
+    preview: document.getElementById('attachment-preview'),
+    previewTitle: document.getElementById('preview-title'),
+    previewClose: document.getElementById('preview-close'),
+    previewMeta: document.getElementById('preview-meta'),
+    previewNote: document.getElementById('preview-note'),
+    previewBody: document.getElementById('preview-body'),
     send: document.getElementById('send'),
     stop: document.getElementById('stop'),
     attachments: document.getElementById('attachments'),
@@ -86,11 +140,170 @@
      * @type {Array<object>}
      */
     attachments: [],
+    historyReadonly: false,
+    queue: { items: [], paused: false },
   };
 
   /** entry → 'body' | 'think'，暂存待渲染的内容。 */
   const pendingRenders = new Map();
   let flushScheduled = false;
+  let draftCwd = '', draftTrusted = true, draftEdited = false, draftSequence = 0, pendingSend;
+  const settingRequests = new Map();
+  let pendingRecovery;
+  let recoveryDrafts = [];
+  const draftsByCwd = new Map();
+  let pendingQueueEdit;
+  const sentDrafts = new Map();
+  const sendGlyph = el.send.querySelector('svg').cloneNode(true);
+  const savedDraft = typeof vscode.getState === 'function' ? vscode.getState() : undefined;
+  const draftSession = typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : String(Date.now()) + Math.random();
+  const sameDraft = (left, right) => left && right && left.text === right.text && JSON.stringify(left.attachments || []) === JSON.stringify(right.attachments || []);
+  function updateRecoveryButton() {
+    el.recoverDraft.hidden = recoveryDrafts.length === 0;
+    el.recoverDraft.disabled = Boolean(pendingSend || pendingQueueEdit || pendingChoice);
+    el.recoverDraft.textContent = recoveryDrafts.length > 1 ? `切换保留草稿（${recoveryDrafts.length} 份）` : '恢复保留草稿';
+  }
+  function currentDraft() {
+    const active = { text: el.input.value, attachments: state.attachments.slice() };
+    const recoveries = [];
+    for (const content of [pendingSend?.cwd === draftCwd ? pendingSend.draft : undefined, ...recoveryDrafts].filter(Boolean)) {
+      const held = draftTrusted ? content : { text: content.text, attachments: [] };
+      if (!sameDraft(held, active) && !recoveries.some(item => sameDraft(item, held))) recoveries.push(held);
+    }
+    return { version: 1, cwd: draftCwd, savedAt: Date.now(), ...active, recoveries };
+  }
+  function persistDraft(draft) {
+    if (new TextEncoder().encode(JSON.stringify(draft)).length > 512 * 1024 || [draft, ...(draft.recoveries || [])].some(item => item.text.length > 128 * 1024)) { showHint('草稿超过保存限制，内容仍保留在当前窗口。', true); return; }
+    if (draft.cwd !== draftCwd) { post({ type: 'draft', draft }); return; }
+    if (typeof vscode.setState === 'function') vscode.setState(draft);
+    post({ type: 'draft', draft });
+  }
+  function saveDraft() {
+    draftEdited = true;
+    updateRecoveryButton(); renderQueue();
+    if (!draftCwd) return;
+    const draft = currentDraft();
+    draftsByCwd.set(draftCwd, { draft, edited: draftEdited });
+    persistDraft(draft);
+  }
+  function switchDraftCwd(cwd, trusted) {
+    if (draftCwd && draftCwd !== cwd) {
+      const draft = currentDraft();
+      draftsByCwd.set(draftCwd, { draft, edited: draftEdited });
+      persistDraft(draft);
+      cancelContext(); closePreview(); closeCompletion(); pendingChoice = undefined;
+    }
+    const changed = draftCwd !== cwd;
+    draftCwd = cwd; draftTrusted = trusted !== false;
+    if (!changed) {
+      if (!draftTrusted) { cancelContext(); closePreview(); closeCompletion(); pendingChoice = undefined; applyDraft(currentDraft()); saveDraft(); }
+      return;
+    }
+    const cached = draftsByCwd.get(cwd);
+    draftEdited = false;
+    el.input.value = ''; state.attachments = []; recoveryDrafts = [];
+    if (cached) { applyDraft(cached.draft); draftEdited = cached.edited; }
+    updateRecoveryButton(); renderAttachments(); autoGrow(); syncComposer();
+  }
+  function restoreDraft(draft) {
+    if (!draft || draft.version !== 1 || draft.cwd !== draftCwd || !Number.isFinite(draft.savedAt) || Date.now() - draft.savedAt > 7 * 86400000 || draft.savedAt > Date.now() + 60000 || draftEdited) return;
+    if (new TextEncoder().encode(JSON.stringify(draft)).length > 512 * 1024) return;
+    if ([draft, ...(Array.isArray(draft.recoveries) ? draft.recoveries : draft.recovery ? [draft.recovery] : [])].some(item => typeof item?.text !== 'string' || item.text.length > 128 * 1024)) return;
+    applyDraft(draft);
+  }
+  function applyDraft(draft) {
+    cancelContext(); closePreview(); closeCompletion(); pendingChoice = undefined;
+    el.input.value = typeof draft.text === 'string' ? draft.text : '';
+    state.attachments = draftTrusted && Array.isArray(draft.attachments) ? draft.attachments : [];
+    recoveryDrafts = (Array.isArray(draft.recoveries) ? draft.recoveries : draft.recovery ? [draft.recovery] : []).filter(held => held && typeof held.text === 'string').map(held => ({ text: held.text, attachments: draftTrusted && Array.isArray(held.attachments) ? held.attachments : [] }));
+    if (!el.input.value && !state.attachments.length && recoveryDrafts.length) {
+      const recovered = recoveryDrafts.shift(); el.input.value = recovered.text; state.attachments = recovered.attachments;
+    }
+    updateRecoveryButton();
+    renderAttachments(); autoGrow();
+    draftsByCwd.set(draftCwd, { draft: currentDraft(), edited: draftEdited });
+  }
+
+  function keepDraft(draft, cwd = draftCwd) {
+    if (!draft || !draft.text && !draft.attachments?.length) return;
+    if (cwd !== draftCwd) {
+      const cached = draftsByCwd.get(cwd);
+      const target = cached?.draft || { version: 1, cwd, text: '', attachments: [], recoveries: [] };
+      if (!sameDraft(target, draft)) {
+        if (!target.text && !target.attachments.length) { target.text = draft.text || ''; target.attachments = draft.attachments || []; }
+        else if (!target.recoveries.some(item => sameDraft(item, draft))) target.recoveries.unshift(draft);
+      }
+      target.savedAt = Date.now(); draftsByCwd.set(cwd, { draft: target, edited: true }); persistDraft(target); return;
+    }
+    if (!draftTrusted) draft = { text: draft.text, attachments: [] };
+    if (el.input.value === draft.text && JSON.stringify(state.attachments) === JSON.stringify(draft.attachments || [])) return;
+    if (!el.input.value && !state.attachments.length) {
+      el.input.value = draft.text || ''; state.attachments = draft.attachments || []; renderAttachments(); autoGrow();
+    } else if (!recoveryDrafts.some(item => sameDraft(item, draft))) recoveryDrafts.unshift(draft);
+    updateRecoveryButton(); saveDraft();
+  }
+
+  function syncComposer() {
+    const readonly = state.historyReadonly;
+    const processing = state.busy || Boolean(state.queue.active);
+    const queueMode = processing || state.queue.paused && state.queue.items?.length;
+    // Permissions can change during a turn; only model/thinking settings block sending.
+    // Every pending setting blocks switching the session or recovering the connection.
+    const sendSettingsPending = Array.from(settingRequests.values()).some(request => request.setting !== 'permission');
+    const sessionSettingsPending = settingRequests.size > 0;
+    el.input.readOnly = readonly;
+    el.input.placeholder = readonly ? '继续此对话或返回当前对话后发送' : queueMode ? '输入下一条消息，Enter 加入队列' : '描述你要完成的任务…';
+    el.send.hidden = false;
+    el.send.disabled = Boolean(readonly || sendSettingsPending || pendingRecovery || pendingSend || pendingChoice || (state.queue.items || []).length + (state.queue.active ? 1 : 0) >= 5);
+    el.send.classList.toggle('queue-send', Boolean(queueMode));
+    el.send.replaceChildren(queueMode ? document.createTextNode('排队') : sendGlyph.cloneNode(true));
+    el.send.title = queueMode ? state.queue.paused ? '加入已暂停队列：需点击继续才会发送' : '排队下一条：当前任务结束后发送' : '发送';
+    el.send.setAttribute('aria-label', queueMode ? '排队下一条' : '发送');
+    el.modelSelect.disabled = Boolean(processing || readonly || sendSettingsPending || pendingRecovery);
+    el.reasoningSelect.disabled = Boolean(processing || readonly || sendSettingsPending || pendingRecovery);
+    el.presetSelect.disabled = Boolean(readonly || sessionSettingsPending || pendingRecovery);
+    el.accessBtn.disabled = Boolean(readonly || pendingRecovery || state.permissionUnavailable || !state.permission || Array.from(settingRequests.values()).some(request => request.setting === 'permission'));
+    if (readonly) closeAccessPop();
+    document.querySelectorAll('[data-recovery-action]').forEach(button => { button.disabled = Boolean(pendingRecovery || sessionSettingsPending || processing); });
+    el.stop.hidden = !processing || readonly;
+    el.historyResume.disabled = Boolean(!state.historyId || processing || sessionSettingsPending || pendingRecovery);
+    el.historyList.querySelectorAll('[data-history-resume]').forEach(button => { button.disabled = Boolean(processing || sessionSettingsPending || pendingRecovery); });
+    el.presetNew.disabled = Boolean(processing || readonly || pendingSend || sessionSettingsPending || pendingRecovery);
+    document.querySelectorAll('[data-context-add], #context-open').forEach(button => { button.disabled = Boolean(readonly || pendingChoice || !draftTrusted); });
+    updateRecoveryButton();
+    document.querySelectorAll('[data-composer]').forEach(button => { button.disabled = readonly; });
+    renderQueue();
+  }
+
+  function renderQueue() {
+    const queue = state.queue, items = Array.isArray(queue.items) ? queue.items : [];
+    el.queue.hidden = items.length === 0;
+    el.queueSummary.textContent = queue.paused ? `队列已暂停 · ${items.length} 条${queue.reason ? ' · ' + queue.reason : ''}` : `待发送 ${items.length} 条 · 按顺序发送`;
+    el.queueContinue.hidden = !queue.paused;
+    el.queueContinue.textContent = items.some(item => item.failed) ? '重试并继续' : '继续队列';
+    el.queueContinue.disabled = Boolean(state.busy || queue.active || state.historyReadonly || pendingRecovery || Array.from(settingRequests.values()).some(request => request.setting !== 'permission'));
+    el.queueList.textContent = '';
+    items.forEach((item, index) => {
+      const row = document.createElement('div'); row.className = 'queue-item';
+      const label = document.createElement('span'); label.className = 'queue-text';
+      label.textContent = `${index + 1}. ${item.failed ? '未完成 · ' : ''}${item.text?.trim() || '仅附件'}${item.attachmentCount ? ` · ${item.attachmentCount} 个附件` : ''}`;
+      label.title = item.text || '仅附件'; row.appendChild(label);
+      for (const [action, text] of [['edit', '取回编辑'], ['remove', '移除']]) {
+        const button = document.createElement('button'); button.type = 'button'; button.textContent = text;
+        button.dataset.action = action; button.dataset.id = item.id;
+        button.disabled = state.historyReadonly || action === 'edit' && Boolean(recoveryDrafts.length || pendingQueueEdit || pendingChoice);
+        button.addEventListener('click', () => {
+          if (action === 'edit') { if (recoveryDrafts.length || pendingQueueEdit || pendingChoice) return; cancelContext(); closePreview(); closeCompletion(); pendingQueueEdit = { id: item.id, cwd: item.cwd || draftCwd }; renderQueue(); }
+          post({ type: 'queueAction', action, id: item.id });
+        }); row.appendChild(button);
+      }
+      el.queueList.appendChild(row);
+    });
+  }
+  el.queueContinue.addEventListener('click', () => post({ type: 'queueAction', action: 'continue' }));
+  el.historyBack.addEventListener('click', () => post({ type: 'historyBack' }));
+  el.historyResume.addEventListener('click', () => { if (state.historyId) post({ type: 'historyResume', id: state.historyId }); });
+  el.presetNew.addEventListener('click', () => post({ type: 'newSession' }));
 
   // ── 与扩展通信 ──────────────────────────────────────
 
@@ -115,7 +328,80 @@
         setStatus(message.state, message.detail);
         break;
       case 'meta':
+        if (state.sessionId !== message.sessionId || draftCwd !== message.cwd || message.trusted === false) invalidateTestRequests();
+        if (state.sessionId !== message.sessionId) { cancelContext(); closePreview(); closeCompletion(); if (pendingChoice) showHint('对话已变化，请重新添加上下文。', true); pendingChoice = undefined; }
+        state.sessionId = message.sessionId;
         setWorkdir(message.cwd);
+        switchDraftCwd(message.cwd, message.trusted);
+        syncComposer();
+        break;
+      case 'draftRestore':
+        if ((message.cwd || message.draft?.cwd) !== draftCwd) break;
+        restoreDraft(savedDraft?.cwd === draftCwd && savedDraft.savedAt > (message.draft?.savedAt || 0) ? savedDraft : message.draft);
+        break;
+      case 'sendResult':
+        if (!pendingSend || pendingSend.id !== message.requestId) break;
+        const responseCwd = pendingSend.cwd;
+        if (message.success) {
+          if (message.phase === 'accepted') {
+            sentDrafts.set(message.requestId, { ...pendingSend.draft, cwd: pendingSend.cwd });
+            while (sentDrafts.size > 5) sentDrafts.delete(sentDrafts.keys().next().value);
+          }
+          // 用户可能在接收确认到达前继续编辑，确认只清空仍与提交一致的草稿。
+          if (pendingSend.cwd === draftCwd && sameDraft({ text: el.input.value, attachments: state.attachments }, pendingSend.draft)) {
+            el.input.value = ''; state.attachments = []; renderAttachments(); autoGrow();
+          } else if (pendingSend.cwd !== draftCwd) {
+            const cached = draftsByCwd.get(pendingSend.cwd);
+            if (cached) {
+              if (sameDraft(cached.draft, pendingSend.draft)) { cached.draft.text = ''; cached.draft.attachments = []; }
+              cached.draft.recoveries = (cached.draft.recoveries || []).filter(item => !sameDraft(item, pendingSend.draft));
+              cached.draft.savedAt = Date.now(); persistDraft(cached.draft);
+            }
+          }
+          showHint(message.queued ? '已加入队列，将在前一条成功结束后发送。' : '已接收。');
+        } else {
+          showHint('消息未被接收，内容已保留。', true);
+          keepDraft(pendingSend.draft, pendingSend.cwd);
+        }
+        pendingSend = undefined; updateRecoveryButton(); if (responseCwd === draftCwd) saveDraft(); syncComposer();
+        break;
+      case 'sendCompleted': {
+        const draft = sentDrafts.get(message.requestId) || { text: message.text || '', attachments: message.attachments || [] };
+        sentDrafts.delete(message.requestId);
+        if (!message.success) { showHint('任务未完成，消息已保留；队列已暂停。', true); if (!message.retained) keepDraft(draft, draft.cwd || message.cwd || draftCwd); }
+        break;
+      }
+      case 'queueState':
+        state.queue = message;
+        const liveRequests = new Set([message.active, ...(message.items || [])].filter(Boolean).map(item => item.requestId));
+        for (const requestId of sentDrafts.keys()) if (!liveRequests.has(requestId) && pendingSend?.id !== requestId) sentDrafts.delete(requestId);
+        if (message.active?.requestId) sentDrafts.set(message.active.requestId, { text: message.active.text, attachments: message.active.attachments || [], cwd: message.active.cwd || draftCwd });
+        renderQueue(); syncComposer();
+        if (workflowState) renderWorkflow(workflowState);
+        break;
+      case 'queueEdit': {
+        const cwd = message.cwd || pendingQueueEdit?.cwd || draftCwd;
+        pendingQueueEdit = undefined;
+        if (message.error) showHint(message.error, true);
+        else { showHint('已取回待发送消息，编辑后再发送。'); keepDraft({ text: message.text || '', attachments: message.attachments || [] }, cwd); }
+        syncComposer();
+        break;
+      }
+      case 'historyState':
+        invalidateTestRequests();
+        state.historyReadonly = Boolean(message.readonly); state.historyId = message.id;
+        el.historyContext.hidden = !state.historyReadonly;
+        el.historyContextText.textContent = message.reason || '正在查看历史，输入已暂停。';
+        el.historyResume.disabled = !message.id || state.busy;
+        cancelContext(); closePreview(); closeCompletion(); pendingChoice = undefined; syncComposer();
+        if (workflowState) renderWorkflow(workflowState);
+        break;
+      case 'conversationSnapshot':
+        resetTranscript();
+        for (const event of Array.isArray(message.events) ? message.events : []) {
+          if (['user', 'assistant', 'text', 'thinking', 'tool', 'done', 'notice', 'error', 'replay'].includes(event.type)) handle(event);
+        }
+        if (workflowState) renderWorkflow(workflowState);
         break;
       case 'history':
         renderHistory(message);
@@ -150,6 +436,22 @@
       case 'config':
         setConfig(message.configOptions || []);
         break;
+      case 'settingResult': {
+        if (message.phase === 'pending' && !settingRequests.has(message.requestId) && message.cwd === draftCwd && message.sessionId === state.sessionId)
+          settingRequests.set(message.requestId, { setting: message.setting, cwd: message.cwd, sessionId: message.sessionId });
+        const request = settingRequests.get(message.requestId);
+        if (message.phase === 'completed') settingRequests.delete(message.requestId);
+        syncComposer();
+        if (request && request.cwd === draftCwd && request.sessionId === state.sessionId)
+          showHint(message.phase === 'pending' ? message.text : message.success ? message.text : `设置未确认：${message.error || message.text}`, message.phase === 'completed' && !message.success);
+        break;
+      }
+      case 'recoveryResult':
+        if (!pendingRecovery && message.phase === 'pending') pendingRecovery = message.requestId || 'command-recovery';
+        if (message.requestId !== pendingRecovery && !(message.requestId === undefined && pendingRecovery === 'command-recovery')) break;
+        if (message.phase === 'completed') pendingRecovery = undefined;
+        syncComposer(); showHint(message.text || message.error, message.phase === 'completed' && !message.success);
+        break;
       case 'presets':
         setPresets(message);
         break;
@@ -172,7 +474,54 @@
         resetTranscript();
         break;
       case 'attach':
+        if (message.cwd && message.cwd !== draftCwd || message.sessionId && message.sessionId !== state.sessionId || !draftTrusted || state.historyReadonly) break;
         addAttachments(message.items);
+        break;
+      case 'composerSuggestions':
+        if (message.origin === 'context') {
+          if (!contextRequest || contextRequest.requestId !== message.requestId || contextRequest.cwd !== draftCwd || contextRequest.sessionId !== state.sessionId || message.source !== contextSource) break;
+          contextRequest.items = (Array.isArray(message.items) ? message.items : []).filter(item => item.kind !== 'command');
+          contextRequest.index = 0; contextRequest.loading = false; renderContext(message.note); break;
+        }
+        if (!completion || completion.requestId !== message.requestId) break;
+        const selectedId = completion.items[completion.index]?.id;
+        completion.items = Array.isArray(message.items) ? message.items : [];
+        completion.index = Math.max(0, completion.items.findIndex(item => item.id === selectedId && !item.disabled));
+        if (completion.items[completion.index]?.disabled) completion.index = Math.max(0, completion.items.findIndex(item => !item.disabled));
+        completion.loading = false;
+        renderCompletion(message.note);
+        break;
+      case 'composerSelected': {
+        if (!pendingChoice || pendingChoice.requestId !== message.requestId) break;
+        const choice = pendingChoice; pendingChoice = undefined;
+        syncComposer();
+        if (choice.cwd !== draftCwd || choice.sessionId !== state.sessionId || message.cwd && message.cwd !== draftCwd || message.origin && message.origin !== choice.origin || message.item && !draftTrusted || state.historyReadonly) break;
+        if (message.error) { showHint(message.error, true); break; }
+        if (!message.item && !message.command) break;
+        const others = state.attachments.filter(item => item.id !== message.item?.id);
+        if (message.item && (others.length >= 20 || others.reduce((size, item) => size + new TextEncoder().encode(item.text || '').length, new TextEncoder().encode(message.item.text || '').length) > 256 * 1024)) {
+          showHint('最多附加 20 项，正文总量不超过 256 KiB；请移除附件或选择较小选区。', true); break;
+        }
+        if (choice.origin === 'syntax' && choice.token && el.input.value.slice(0, choice.token.end) === choice.text.slice(0, choice.token.end)) {
+          const caret = el.input.selectionStart;
+          el.input.value = el.input.value.slice(0, choice.token.start) + el.input.value.slice(choice.token.end);
+          const nextCaret = caret >= choice.token.end ? caret - (choice.token.end - choice.token.start) : Math.min(caret, choice.token.start);
+          el.input.setSelectionRange(nextCaret, nextCaret); autoGrow();
+        }
+        if (message.item) addAttachments([message.item]);
+        else { saveDraft(); showHint('命令已处理。'); }
+        break;
+      }
+      case 'workflow':
+        renderWorkflow(message);
+        break;
+      case 'workflowResult':
+        receiveTestResult(message);
+        break;
+      case 'workflowFocus':
+        const latestCard = turnCards.get(workflowState?.turnId);
+        if (latestCard && !state.historyReadonly) { latestCard.open = true; latestCard.scrollIntoView({ block: 'nearest' }); latestCard.querySelector('summary').focus(); }
+        else if (!state.historyReadonly) { el.workflow.hidden = false; el.workflow.open = true; el.workflowSummary.focus(); }
         break;
       case 'hint':
         showHint(message.text, Boolean(message.error));
@@ -182,37 +531,189 @@
     }
   }
 
+  let workflowState;
+  const testRequests = new Map();
+  let testRequestSequence = 0, testLogTarget;
+  const turnCards = new Map();
+  function findTest(turnId, testId) {
+    const test = (workflowState?.turns || []).find(turn => (turn.id || turn.turnId) === turnId)?.test
+      || ((workflowState?.turnId || '') === turnId ? workflowState?.test : undefined);
+    return test?.id === testId ? test : undefined;
+  }
+  function invalidateTestRequests() { testRequests.clear(); closeTestLog(); }
+  function requestTest(action, turnId, test, trigger, extra = {}) {
+    if (state.historyReadonly || !draftTrusted || pendingRecovery || Array.from(settingRequests.values()).some(request => request.setting !== 'permission') || test?.sourceCurrent === false && action !== 'test') return;
+    const requestId = `${draftSession}:test:${++testRequestSequence}`;
+    const request = { type: 'workflowAction', action, turnId: turnId || '', testId: test?.id || '', requestId, cwd: draftCwd, sessionId: state.sessionId, ...extra };
+    if (testRequests.size >= 20) { showHint('请等已有测试操作返回后再试。', true); return; }
+    testRequests.set(requestId, { ...request, trigger }); post(request);
+  }
+  function logTest(turnId, test, trigger) {
+    closePreview(); closeContext(false); closeCompletion();
+    testLogTarget = { turnId: turnId || '', test, trigger, cwd: draftCwd, sessionId: state.sessionId };
+    el.testLogBody.value = ''; el.testLogNote.textContent = `任务：${test.label} · 执行 ${test.id}`;
+    el.testLog.hidden = false; el.testLogBody.focus();
+  }
+  function closeTestLog() {
+    if (!el.testLog || el.testLog.hidden) { testLogTarget = undefined; return; }
+    const trigger = testLogTarget?.trigger; testLogTarget = undefined; el.testLog.hidden = true; el.testLogBody.value = '';
+    (trigger?.isConnected ? trigger : el.input).focus();
+  }
+  el.testLogClose.addEventListener('click', closeTestLog);
+  el.testLogAccept.addEventListener('click', () => {
+    const target = testLogTarget, logText = el.testLogBody.value;
+    if (!target || target.cwd !== draftCwd || target.sessionId !== state.sessionId || !findTest(target.turnId, target.test.id)) { closeTestLog(); showHint('此次测试结果已失效，请重新查看。', true); return; }
+    if (!logText.trim() || new TextEncoder().encode(logText).length > 128 * 1024) { el.testLogNote.textContent = '请提供非空日志，正文最多 128 KiB（UTF-8）。'; return; }
+    closeTestLog(); requestTest('logTest', target.turnId, target.test, target.trigger, { logText });
+  });
+  function receiveTestResult(message) {
+    const request = testRequests.get(message.requestId); if (!request) return;
+    testRequests.delete(message.requestId);
+    if (request.cwd !== draftCwd || request.sessionId !== state.sessionId || message.cwd !== draftCwd || message.sessionId !== state.sessionId || request.action !== message.action || request.turnId !== message.turnId || request.testId !== message.testId || !draftTrusted || state.historyReadonly) return;
+    if (message.error) { showHint(message.error, true); return; }
+    if (request.testId && !findTest(request.turnId, request.testId)) { showHint('此次结果已被覆盖或移除，请重新查看。', true); return; }
+    const items = Array.isArray(message.items) ? message.items : [];
+    if (request.action === 'attachTest') {
+      if (testDraftFits(items, false)) addAttachments(items);
+    } else if (request.action === 'prepareTest') {
+      if (typeof message.text !== 'string' || !testDraftFits(items, true, message.text)) return;
+      const held = { text: el.input.value, attachments: state.attachments.slice() };
+      if ((held.text || held.attachments.length) && !sameDraft(held, { text: message.text, attachments: items }) && !recoveryDrafts.some(draft => sameDraft(draft, held))) recoveryDrafts.unshift(held);
+      closePreview(); closeCompletion(); cancelContext();
+      el.input.value = message.text; state.attachments = items; renderAttachments(); autoGrow(); saveDraft(); syncComposer(); el.input.focus();
+      showHint('已准备草稿，原正文和附件已保留。请检查后发送；修复完成后重新运行测试。');
+    } else if (['previewTest', 'logTest'].includes(request.action) && items.length) {
+      openPreview({ ...items[0], text: items.map(item => item.text || '').join('\n\n'), previewNote: '只读测试证据。未自动取得终端输出；补充日志由用户提供，未自动核实执行归属。准备草稿后仍需你发送，修复完成后重新验证。' }, request.trigger);
+    } else if (message.note) showHint(message.note);
+  }
+  function testDraftFits(items, preparing, text = el.input.value) {
+    if (!items.length || items.some(item => !item || typeof item.text !== 'string' || item.text.includes('\0'))) { showHint('此次证据没有有效正文，请重新查看。', true); return false; }
+    const attachments = preparing ? items : [...state.attachments.filter(held => !items.some(item => item.id === held.id)), ...items];
+    if (attachments.length > 20 || attachments.reduce((size, item) => size + new TextEncoder().encode(item.text || '').length, 0) > 256 * 1024) { showHint('最多附加 20 项，正文总量不超过 256 KiB；原草稿已保留。', true); return false; }
+    const draft = currentDraft();
+    const held = { text: el.input.value, attachments: state.attachments.slice() };
+    const recoveries = draft.recoveries.slice();
+    if (preparing && (held.text || held.attachments.length) && !sameDraft(held, { text, attachments }) && !recoveries.some(item => sameDraft(item, held))) recoveries.unshift(held);
+    const next = { ...draft, text, attachments, recoveries };
+    if (text.length > 128 * 1024 || new TextEncoder().encode(JSON.stringify(next)).length > 512 * 1024) { showHint('加入证据会超过 512 KiB 草稿保存限制；原正文和附件已保留，请先处理保留草稿。', true); return false; }
+    return true;
+  }
+  function testDescription(test) {
+    if (!test) return '未记录工作区测试结果。';
+    const labels = { running: '运行中', cancelling: '取消中', passed: '通过', failed: '失败', cancelled: '已取消', unknown: '结束状态未知', error: '启动失败' };
+    return `${test.label}：${labels[test.status] || test.status}${Number.isFinite(test.duration) ? ` · ${(test.duration / 1000).toFixed(1)} 秒` : ''}${Number.isInteger(test.exitCode) ? ` · 退出码 ${test.exitCode}` : ''}${test.message ? '\n' + test.message : ''}${test.sourceNote ? '\n' + test.sourceNote : ''}\n${test.stale ? '代码已变化，需要重新测试。' : test.freshnessNote || '内容核对未确认；结果仅代表所选任务。'}\n未自动取得终端输出。${test.userLog ? '已有用户补充日志，执行归属未自动核实。' : '可打开任务终端视图，明确复制并补充日志。'}`;
+  }
+  function resultFiles(host, files, { recording, test, turnId, allowUndo = true } = {}) {
+    host.textContent = '';
+    const running = ['running', 'cancelling'].includes(test?.status);
+    files.forEach(file => {
+      const row = document.createElement('div'); row.className = 'workflow-file';
+      const name = document.createElement('span'); name.className = 'workflow-name';
+      name.textContent = `${({ added: '新增', deleted: '删除', modified: '修改' })[file.kind] || '变化'} ${file.name}${Number.isInteger(file.added) ? ` +${file.added} −${file.removed}` : ''}${file.restored ? '（已撤销）' : ''}`;
+      row.appendChild(name);
+      for (const [label, action] of [['差异', 'preview'], ['撤销', 'undo']]) {
+        const button = document.createElement('button'); button.type = 'button'; button.textContent = label;
+        button.disabled = state.historyReadonly || action === 'undo' && (!allowUndo || !file.canUndo || state.busy || state.queue.active || running || recording);
+        button.addEventListener('click', () => post({ type: 'workflowAction', action, id: file.id, turnId })); row.appendChild(button);
+      }
+      host.appendChild(row);
+    });
+  }
+  function renderTurnCards(message) {
+    const turns = Array.isArray(message.turns) ? message.turns : [];
+    const retained = new Set(turns.map(turn => turn.id || turn.turnId));
+    for (const [id, card] of turnCards) if (!retained.has(id)) { card.remove(); turnCards.delete(id); }
+    for (const turn of turns.slice().reverse()) {
+      const id = turn.id || turn.turnId, latest = id === message.turnId;
+      if (!id) continue;
+      let card = turnCards.get(id);
+      if (!card) {
+        card = document.createElement('details'); card.className = 'turn-result workflow'; card.dataset.turn = id;
+        const summary = document.createElement('summary'); summary.tabIndex = 0; card.appendChild(summary);
+        const body = document.createElement('div'); body.className = 'workflow-body'; card.appendChild(body);
+        turnCards.set(id, card);
+      }
+      const host = state.messages.get(turn.messageId)?.node || el.messages;
+      if (card.parentNode !== host) host.appendChild(card);
+      const status = turn.finished ? ({ completed: '本轮结束', failed: '本轮失败', cancelled: '已停止' })[turn.status] || '本轮结束' : '正在处理';
+      const test = turn.test, running = ['running', 'cancelling'].includes(test?.status);
+      card.querySelector('summary').textContent = `${status} · 改动 ${(turn.files || []).length} 个文件${test ? ` · 测试${({ passed: '通过', failed: '失败', running: '运行中', cancelling: '取消中', cancelled: '已取消', unknown: '状态未知', error: '启动失败' })[test.status] || ''}${test.stale ? ' · 代码已变化需重跑' : ''}` : ' · 未记录工作区测试'}`;
+      if (test?.freshness === 'unknown' && !running) card.querySelector('summary').textContent += ' · 内容核对未确认';
+      if (test?.sourceNote) card.querySelector('summary').textContent += ` · ${test.sourceNote}`;
+      card.dataset.status = turn.status || '';
+      const signature = JSON.stringify([turn, state.busy, Boolean(state.queue.active), draftTrusted, message.recording, latest, state.historyReadonly, settingRequests.size, Boolean(pendingRecovery)]);
+      if (card._signature === signature) continue;
+      card._signature = signature;
+      const body = card.querySelector('.workflow-body'); body.textContent = '';
+      const note = document.createElement('p'); note.className = 'workflow-note'; note.textContent = turn.note || ''; body.appendChild(note);
+      const files = document.createElement('div'); files.className = 'workflow-files'; resultFiles(files, turn.files || [], { recording: latest && message.recording, test, turnId: id, allowUndo: latest }); body.appendChild(files);
+      const result = document.createElement('div'); result.className = 'workflow-test'; result.textContent = testDescription(test); body.appendChild(result);
+      if (latest || test) {
+        const actions = document.createElement('div'); actions.className = 'workflow-actions';
+        for (const [label, action, hidden] of [['运行测试', 'test', !latest], ['停止测试', 'cancelTest', !latest || !running], ['查看此次结果', 'previewTest', !test || running], ['附加测试结果', 'attachTest', !test || running], [test?.status === 'failed' ? '准备修复草稿' : '准备排查草稿', 'prepareTest', !test || running], ['补充日志', 'logTest', !test || running], ['打开任务终端视图', 'taskTerminals', !test || running]]) {
+          if (hidden) continue;
+          const button = document.createElement('button'); button.type = 'button'; button.textContent = label;
+          button.disabled = Boolean(!draftTrusted || pendingRecovery || settingRequests.size || action !== 'test' && test?.sourceCurrent === false || action === 'test' && (state.busy || state.queue.active || running || message.recording) || action === 'cancelTest' && test?.status === 'cancelling');
+          button.addEventListener('click', () => action === 'logTest' ? logTest(id, test, button) : requestTest(action, id, action === 'test' ? undefined : test, button)); actions.appendChild(button);
+        }
+        body.appendChild(actions);
+      }
+      if (turn.finished && !card._finished) { card._finished = true; card.open = Boolean(turn.files?.length || test); }
+    }
+    scrollIfPinned();
+    return turns.length > 0;
+  }
+  function renderWorkflow(message) {
+    workflowState = message;
+    for (const [id, request] of testRequests) if (request.testId && !findTest(request.turnId, request.testId)) { testRequests.delete(id); showHint('此次结果已被覆盖或移除，请重新查看。', true); }
+    if (testLogTarget && !findTest(testLogTarget.turnId, testLogTarget.test.id)) { closeTestLog(); showHint('此次结果已被覆盖或移除，请重新查看。', true); }
+    if (state.historyReadonly) {
+      el.workflow.hidden = true;
+      for (const card of turnCards.values()) { card.querySelectorAll('button').forEach(button => { button.disabled = true; }); card._signature = undefined; }
+      return;
+    }
+    const hasCards = renderTurnCards(message);
+    el.workflow.hidden = hasCards || !message.turnId && !message.test && !message.recording;
+    const files = message.files || [], running = ['running', 'cancelling'].includes(message.test?.status);
+    el.workflowSummary.textContent = message.recording ? '正在整理本轮改动…' : `本轮改动 ${files.length} 个文件${message.test ? ' · 测试' : ''}`;
+    el.workflowNote.textContent = message.note || '';
+    resultFiles(el.workflowFiles, files, message);
+    const test = message.test;
+    el.workflowTest.textContent = testDescription(test);
+    el.workflowRunTest.disabled = Boolean(state.busy || state.queue.active || running || message.recording || !draftTrusted);
+    el.workflowStopTest.hidden = !running; el.workflowStopTest.disabled = test?.status === 'cancelling' || test?.sourceCurrent === false;
+    el.workflowAttachTest.hidden = !test || running;
+    for (const button of [el.workflowAttachTest, el.workflowViewTest, el.workflowPrepareTest, el.workflowLogTest, el.workflowTerminal]) { button.hidden = !test || running; button.disabled = !draftTrusted || test?.sourceCurrent === false; }
+    el.workflowPrepareTest.textContent = test?.status === 'failed' ? '准备修复草稿' : '准备排查草稿';
+  }
+  for (const [button, action] of [[el.workflowRunTest, 'test'], [el.workflowStopTest, 'cancelTest'], [el.workflowAttachTest, 'attachTest'], [el.workflowViewTest, 'previewTest'], [el.workflowPrepareTest, 'prepareTest'], [el.workflowTerminal, 'taskTerminals']]) button.addEventListener('click', () => requestTest(action, workflowState?.turnId, action === 'test' ? undefined : workflowState?.test, button));
+  el.workflowLogTest.addEventListener('click', () => logTest(workflowState?.turnId, workflowState?.test, el.workflowLogTest));
+
   // ── 顶部状态 ────────────────────────────────────────
 
-  /**
-   * 顶栏状态只承载**短状态**：该行很窄，多出的字符会挤占其他内容。
-   *
-   * 此处设有防护：若有长文案进入 status（报错、多行诊断），
-   * 也只显示第一行并截断至 24 个字符；完整内容保留在悬浮提示中，不丢失任何字符。
-   * 报错本身应通过 `error` 消息进入对话流（对话流才是可阅读长文本的位置）。
-   */
-  function shortStatus(text) {
-    const first = String(text || '').split('\n')[0].trim();
-    if (first.length <= 24) return first;
-    return first.slice(0, 23) + '…';
-  }
-
+  /** 正常连接只显示圆点；准备、错误等必要反馈仍完整显示。 */
   function setStatus(kind, detail) {
     const text = detail || '';
+    state.connectionStage = { kind, detail: text };
+    updateOnboarding();
     el.statusDot.className = 'dot';
     if (kind === 'ready') {
       el.statusDot.classList.add('ok');
-      el.statusText.textContent = shortStatus(text) || '就绪';
+      el.statusText.textContent = '';
     } else if (kind === 'busy') {
       el.statusDot.classList.add('busy');
-      el.statusText.textContent = shortStatus(text) || '正在处理…';
+      el.statusText.textContent = text || '正在处理…';
     } else if (kind === 'error') {
       el.statusDot.classList.add('err');
-      el.statusText.textContent = shortStatus(text) || '未连接';
+      el.statusText.textContent = text || '未连接';
     } else {
-      el.statusText.textContent = shortStatus(text) || '正在连接…';
+      el.statusText.textContent = text || '正在连接…';
     }
-    el.statusText.title = text;
+    el.statusText.title = kind === 'ready'
+      ? '会话已建立；模型请求与凭据将在实际任务运行时验证。'
+      : text;
+    el.statusText.setAttribute('aria-label', kind === 'ready' ? '会话已连接' : el.statusText.textContent);
+    el.statusDot.title = el.statusText.title;
     if (kind === 'ready' || kind === 'busy') syncConfigRow();
   }
 
@@ -229,25 +730,43 @@
 
   function setBusy(busy) {
     state.busy = busy;
-    el.send.hidden = busy;
-    el.stop.hidden = !busy;
+    el.modelSelect.disabled = busy;
+    el.reasoningSelect.disabled = busy;
     el.input.disabled = false;
-    if (!busy) el.input.focus();
+    syncComposer();
+    if (!busy && !state.historyReadonly) el.input.focus();
     // 回合开始与结束驱动顶栏的时间戳与耗时显示。
     if (busy) startTurnClock();
     else stopTurnClock();
+    if (workflowState) renderWorkflow(workflowState);
   }
 
   // ── 顶栏元信息：工作目录、回合时间戳/耗时 ─────────────
 
-  /** 工作目录只显示末尾两段（过长的路径顶栏放不下），完整路径置于悬浮提示中。 */
+  /** 顶栏显示目录名，完整路径保留在悬浮提示与可访问名称中。 */
   function setWorkdir(cwd) {
     if (!cwd || typeof cwd !== 'string') return;
     const parts = cwd.split(/[\\/]/).filter(Boolean);
-    const short = parts.length > 2 ? `…/${parts.slice(-2).join('/')}` : cwd;
+    const short = parts.at(-1) || cwd;
     el.barCwd.textContent = short;
     el.barCwd.title = cwd;
+    el.barCwd.setAttribute('aria-label', `当前目录：${cwd}`);
     el.barCwd.hidden = false;
+    state.projectCwd = cwd;
+    updateOnboarding();
+  }
+
+  function updateOnboarding() {
+    const stage = document.getElementById('onboarding-stage'), next = document.getElementById('onboarding-next');
+    const status = state.connectionStage || {};
+    if (stage) stage.textContent = status.kind === 'ready' ? '开始新任务'
+      : status.kind === 'error' ? '连接暂不可用' : status.kind === 'busy' ? '任务进行中' : '连接 DSH';
+    if (next) next.hidden = status.kind === 'ready';
+    if (next) next.textContent = status.kind === 'ready' ? ''
+      : status.kind === 'error' ? '查看错误提示，修复后重新连接。'
+        : status.kind === 'busy' ? '可以在下方准备下一条消息。'
+          : /同步|准备/.test(status.detail || '') ? '请稍候，准备完成后即可开始。'
+            : '连接完成后即可开始。';
   }
 
   let turnClockTimer = 0;
@@ -301,6 +820,12 @@
    * 关闭按钮（浮层中第一个可操作元素），关闭时交回历史按钮；否则焦点会落到
    * body 上，用户将失去当前位置。
    */
+  let historyOffset = 0, historyNextOffset, historyRequestId = 0, historySearchTimer;
+  function requestHistory(offset = 0) {
+    historyOffset = offset;
+    el.historyPrev.disabled = true; el.historyNext.disabled = true;
+    post({ type: 'historyList', offset, limit: 100, query: el.historySearch.value, projectOnly: el.historyProject.checked, requestId: ++historyRequestId });
+  }
   function toggleHistory(open) {
     const show = open === undefined ? el.historyPanel.hidden : open;
     // 隐藏前先记录焦点是否位于浮层内：元素一旦 hidden，焦点会自动落到 body，
@@ -316,7 +841,7 @@
       el.historyList.appendChild(loading);
       el.historyMeta.textContent = '';
       el.historyClose.focus();
-      post({ type: 'historyList' });
+      requestHistory();
       return;
     }
     if (focusWasInside) el.historyBtn.focus();
@@ -344,8 +869,10 @@
    */
   function renderHistory(message) {
     if (el.historyPanel.hidden) return; // 用户已关闭，不再重新展开浮层
+    if (message.requestId !== undefined && message.requestId !== historyRequestId) return;
     el.historyList.textContent = '';
     if (message.error) {
+      el.historyPrev.disabled = true; el.historyNext.disabled = true;
       // 读取失败**不使用** .history-empty：该套居中灰字表达「此处无内容」，
       // 用于报错会被理解为「没有历史会话」，而这两种情况的处理方式完全不同。
       const box = document.createElement('div');
@@ -356,7 +883,15 @@
       return;
     }
     const sessions = Array.isArray(message.sessions) ? message.sessions : [];
-    if (message.skipped > 0) {
+    historyOffset = message.offset || 0; historyNextOffset = message.nextOffset;
+    el.historyPrev.disabled = historyOffset === 0;
+    el.historyNext.disabled = !Number.isInteger(historyNextOffset);
+    el.historyPage.textContent = sessions.length ? `${historyOffset + 1}–${historyOffset + sessions.length}${Number.isInteger(message.total) ? ' / ' + message.total : ''}` : '';
+    if (message.queryUnsupported) {
+      el.historyMeta.textContent = '当前接入点需更新才能搜索和翻页';
+    } else if (Number.isInteger(message.total)) {
+      el.historyMeta.textContent = `共 ${message.total} 段`;
+    } else if (message.skipped > 0) {
       el.historyMeta.textContent = `最近 ${sessions.length} 段（更早的 ${message.skipped} 段未列出）`;
     } else {
       el.historyMeta.textContent = sessions.length ? `共 ${sessions.length} 段` : '';
@@ -388,7 +923,7 @@
     const when = fmtSessionTime(card.lastTime || card.mtime);
     const bits = [
       when,
-      `${card.turns || 0} 回合`,
+      card.summaryPartial ? '' : `${card.turns || 0} 回合`,
       tailPath(card.cwd),
       card.preset && card.preset !== 'standard' ? card.preset : '',
     ].filter(Boolean);
@@ -410,12 +945,18 @@
     actions.appendChild(replayBtn);
     const resumeBtn = document.createElement('button');
     resumeBtn.type = 'button';
+    resumeBtn.dataset.historyResume = 'true';
+    resumeBtn.disabled = Boolean(state.busy || state.queue.active || pendingRecovery || settingRequests.size);
     resumeBtn.textContent = '接回';
     resumeBtn.title = '回放这段对话，并尝试接回上下文继续对话';
     resumeBtn.addEventListener('click', () => {
       post({ type: 'historyResume', id: card.id });
     });
     actions.appendChild(resumeBtn);
+    const exportBtn = document.createElement('button');
+    exportBtn.type = 'button'; exportBtn.textContent = '导出'; exportBtn.title = '导出这段对话为 Markdown';
+    exportBtn.addEventListener('click', () => post({ type: 'historyExport', id: card.id }));
+    actions.appendChild(exportBtn);
     row.appendChild(actions);
     return row;
   }
@@ -436,6 +977,7 @@
   function renderReplay(message) {
     toggleHistory(false);
     state.messages.clear();
+    turnCards.clear();
     el.messages.textContent = '';
     el.permission.hidden = true;
     el.empty.hidden = true;
@@ -444,8 +986,9 @@
 
     const card = message.card || {};
     const when = fmtSessionTime(card.lastTime || card.mtime);
-    const head = `历史回放：${card.title || card.fallbackTitle || '（无标题）'}${when ? `（${when}）` : ''}`;
-    addNotice(truncatedReplayNote(head, message.truncated === true));
+    const live = message.readonly === false;
+    const head = `${live ? '已恢复的对话' : '历史回放'}：${card.title || card.fallbackTitle || '（无标题）'}${when ? `（${when}）` : ''}`;
+    addNotice(live ? `${head}。可在下方继续对话。${message.truncated ? '部分记录已省略，可从历史中查看。' : ''}` : truncatedReplayNote(head, message.truncated === true));
 
     const entries = Array.isArray(message.entries) ? message.entries : [];
     let lastAssistantId;
@@ -498,14 +1041,14 @@
   function truncatedReplayNote(head, truncated) {
     return truncated
       ? `${head}。该转录过长，仅回放了靠前的部分 —— 以下为回放内容，非实时对话。`
-      : `${head}。以下为回放内容，非实时对话；在此输入不会接入该段上下文。`;
+      : `${head}。选择“继续此对话”恢复上下文，或返回当前对话。`;
   }
 
   // ── 转录区 ──────────────────────────────────────────
 
   function resetTranscript() {
     state.messages.clear();
-    state.attachments = [];
+    turnCards.clear();
     renderAttachments();
     el.messages.textContent = '';
     el.messages.appendChild(el.empty);
@@ -546,9 +1089,9 @@
   });
 
   function appendNode(node) {
-    el.empty.hidden = true;
+    if (node.classList.contains('msg-user') || node.classList.contains('msg-assistant')) el.empty.hidden = true;
     el.messages.appendChild(node);
-    scrollIfPinned();
+    if (el.empty.hidden) scrollIfPinned();
   }
 
   function addUser(text, attachments) {
@@ -585,26 +1128,36 @@
     if (list.length === 0) return;
     let changed = 0;
     let lastChanged;
+    let updated = false;
+    const nextList = state.attachments.slice();
     for (const item of list) {
       const id = item.id || item.uri || item.name;
       if (!id) continue;
       const next = { ...item, id };
-      const at = state.attachments.findIndex((held) => (held.id || held.uri || held.name) === id);
-      if (at >= 0) state.attachments[at] = next;
-      else state.attachments.push(next);
+      const at = nextList.findIndex((held) => (held.id || held.uri || held.name) === id);
+      if (at >= 0) { nextList[at] = next; updated = true; }
+      else nextList.push(next);
       changed += 1;
       lastChanged = next;
     }
+    if (nextList.length > 20 || nextList.reduce((size, item) => size + new TextEncoder().encode(item.text || '').length, 0) > 256 * 1024) {
+      showHint('最多附加 20 项，正文总量不超过 256 KiB；现有内容已保留。', true); return;
+    }
+    state.attachments = nextList;
+    if (!el.preview.hidden && list.some(item => (item.id || item.uri || item.name) === previewItemId)) closePreview();
     renderAttachments();
+    saveDraft();
     if (changed > 0) {
       el.input.focus();
-      showHint(`已附加：${lastChanged.detail || lastChanged.name}`, false);
+      showHint(`${updated ? '已更新快照' : '已附加快照'}：${lastChanged.name || lastChanged.detail}。发送前可点击附件预览。`, false);
     }
   }
 
   function removeAttachment(id) {
+    if (previewItemId === id) closePreview();
     state.attachments = state.attachments.filter((item) => item.id !== id);
     renderAttachments();
+    saveDraft();
   }
 
   function renderAttachments() {
@@ -629,7 +1182,7 @@
     for (const item of list) {
       const chip = document.createElement('span');
       chip.className = `chip chip-${item.kind === 'selection' ? 'sel' : 'file'}`;
-      chip.title = `${item.name || ''}${item.detail ? ` · ${item.detail}` : ''}`;
+      chip.title = item.kind === 'review' ? `${item.name || ''}${item.detail ? ` · ${item.detail}` : ''}\n${item.text || ''}` : `${item.name || ''}${item.detail ? ` · ${item.detail}` : ''}`;
 
       const icon = document.createElement('span');
       icon.className = 'chip-icon';
@@ -638,15 +1191,19 @@
       icon.setAttribute('aria-hidden', 'true');
       chip.appendChild(icon);
 
-      const label = document.createElement('span');
+      const label = document.createElement('button');
+      label.type = 'button';
       label.className = 'chip-label';
       label.textContent = item.name || item.uri || '（未知）';
+      label.title = '预览已附加的正文快照';
+      label.addEventListener('click', () => openPreview(item, label));
       chip.appendChild(label);
 
-      if (item.detail) {
+      const chipDetail = item.scope === 'selection' ? `选区 ${item.startLine || '?'}–${item.endLine || '?'} 行` : item.scope === 'file' ? `全文件${item.isDirty || item.isUntitled ? ' · 未保存' : ''}` : item.scope === 'skill' ? '技能' : item.detail;
+      if (chipDetail) {
         const detail = document.createElement('span');
         detail.className = 'chip-detail';
-        detail.textContent = item.detail;
+        detail.textContent = chipDetail;
         chip.appendChild(detail);
       }
 
@@ -664,6 +1221,36 @@
     }
     return row;
   }
+
+  let previewReturnFocus, previewItemId;
+  function openPreview(item, trigger) {
+    closeContext(false); closeCompletion();
+    previewReturnFocus = trigger;
+    previewItemId = item.id || item.uri || item.name;
+    el.previewTitle.textContent = item.name || '附件正文预览';
+    el.previewMeta.textContent = '';
+    const scope = item.scope || item.kind;
+    const range = scope === 'selection' ? `${item.startLine || '?'}–${item.endLine || '?'} 行（起点列 ${(item.startCharacter ?? 0) + 1}，末端 ${item.rangeEndLine || item.endLine || '?'}:${(item.endCharacter ?? 0) + 1}，末端不含）` : scope === 'skill' ? '技能正文' : scope === 'file' ? '全文件' : scope === 'test' ? '此次任务退出摘要与补充证据' : item.detail || '附加正文';
+    const fields = [
+      ['来源', item.sourcePath || item.sourceUri || item.uri || '未记录来源'],
+      ['范围', range],
+      ['保存状态', scope === 'git-diff' ? 'Git 输出快照' : scope === 'diagnostics' ? '诊断快照' : scope === 'test' ? '任务结果快照' : item.isUntitled ? '未命名 · 未保存' : item.isDirty === true ? '包含未保存编辑' : item.isDirty === false ? '加入时已保存' : '未记录'],
+      ['快照时间', item.snapshotAt ? new Date(item.snapshotAt).toLocaleString() : '未记录'],
+      ['正文大小', typeof item.text === 'string' ? `${new TextEncoder().encode(item.text).length.toLocaleString()} 字节（UTF-8）` : '未读取'],
+    ];
+    for (const [name, value] of fields) { const dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = name; dd.textContent = value; el.previewMeta.append(dt, dd); }
+    el.previewBody.textContent = typeof item.text === 'string' ? item.text : '';
+    el.previewBody.hidden = typeof item.text !== 'string';
+    el.previewNote.textContent = item.previewNote || (scope === 'git-diff' ? '只读 Git 补丁快照，不含未保存编辑和未跟踪文件；再次添加可更新，发送时附加此正文。' : scope === 'diagnostics' ? '只读诊断快照；没有运行测试或审查，诊断可能尚未更新。再次添加可更新，发送时附加此正文。' : typeof item.text === 'string' ? '只读快照；发送时附加此正文。原文件之后的修改不会改变它，再次添加可更新。' : '旧附件未保存正文，无法预览或发送。请移除后重新添加。');
+    el.preview.hidden = false; el.previewClose.focus();
+  }
+  function closePreview() {
+    if (el.preview.hidden) return;
+    el.preview.hidden = true; el.previewBody.textContent = '';
+    const target = previewReturnFocus; previewReturnFocus = undefined; previewItemId = undefined;
+    (target?.isConnected ? target : el.input).focus();
+  }
+  el.previewClose.addEventListener('click', closePreview);
 
   function addAssistant(id) {
     const wrap = document.createElement('div');
@@ -798,6 +1385,24 @@
       advice.className = 'err-advice';
       advice.textContent = human.advice;
       div.appendChild(advice);
+    }
+    const actions = Array.isArray(human.actions) ? human.actions : [];
+    if (actions.length) {
+      const bar = document.createElement('div'); bar.className = 'error-actions';
+      for (const action of actions) {
+        if (!['reconnect', 'settings', 'log'].includes(action.id)) continue;
+        const button = document.createElement('button'); button.type = 'button'; button.textContent = action.label || action.id;
+        if (action.id === 'reconnect') button.dataset.recoveryAction = 'reconnect';
+        button.addEventListener('click', () => {
+          if (action.id !== 'reconnect') { post({ type: 'errorAction', action: action.id }); return; }
+          if (pendingRecovery) return;
+          pendingRecovery = `recovery-${draftSession}-${++draftSequence}`;
+          showHint('正在恢复连接，请等待确认…'); syncComposer();
+          post({ type: 'errorAction', action: action.id, recoveryScope: human.recoveryScope, requestId: pendingRecovery });
+        }); bar.appendChild(button);
+      }
+      div.appendChild(bar);
+      syncComposer();
     }
     const rawText = text || human.raw || '';
     const raw = document.createElement('pre');
@@ -1000,9 +1605,22 @@
 
   function setConfig(configOptions) {
     state.configOptions = configOptions;
+    const reasoning = configOptions.find(option => option && (option.category === 'thought_level' || /reasoning|thinking|thought/i.test(option.id)) && Array.isArray(option.options));
+    el.reasoningField.hidden = !reasoning;
+    el.reasoningSelect.textContent = '';
+    if (reasoning) {
+      el.reasoningSelect.dataset.optionId = reasoning.id;
+      for (const group of reasoning.options) for (const choice of group.options || [group]) el.reasoningSelect.appendChild(optionNode(choice, reasoning.currentValue, () => {}));
+      if (!Array.from(el.reasoningSelect.options).some(choice => choice.value === reasoning.currentValue) && reasoning.currentValue) {
+        const unknown = optionNode({ value: reasoning.currentValue, name: '当前值（请重新选择）' }, reasoning.currentValue, () => {}); unknown.disabled = true; el.reasoningSelect.appendChild(unknown);
+      }
+    }
     const model = configOptions.find((option) => option && option.id === 'model');
+    el.modelField.hidden = !model;
     if (!model) {
+      el.modelSelect.textContent = '';
       syncConfigRow();
+      syncComposer();
       return;
     }
 
@@ -1028,6 +1646,7 @@
       el.modelSelect.appendChild(opt);
     }
     syncConfigRow();
+    syncComposer();
   }
 
   /**
@@ -1041,6 +1660,15 @@
     const presets = Array.isArray(message.presets) ? message.presets : [];
     state.hasPresets = presets.length > 0;
     el.presetField.hidden = !state.hasPresets;
+    state.presetCurrent = message.current;
+    const pending = message.pending;
+    const label = id => {
+      const name = presets.find(item => item.id === id)?.name;
+      return name && name !== id ? name : id === 'standard' ? '标准模式' : id;
+    };
+    el.presetNote.hidden = !pending || pending === message.current;
+    el.presetNoteText.textContent = pending ? `当前：${label(message.current) || '未确定'} · 新对话：${label(pending)}` : '';
+    el.presetSelect.title = `当前模式：${label(message.current) || '未确定'}；更换后用于新对话。`;
     if (state.hasPresets) {
       el.presetSelect.textContent = '';
       const current = message.current;
@@ -1048,7 +1676,7 @@
       for (const preset of presets) {
         const opt = document.createElement('option');
         opt.value = preset.id;
-        opt.textContent = preset.name || preset.id;
+        opt.textContent = label(preset.id);
         if (preset.description) opt.title = preset.description;
         if (preset.id === current) {
           opt.selected = true;
@@ -1060,7 +1688,7 @@
       if (!matched && current) {
         const opt = document.createElement('option');
         opt.value = current;
-        opt.textContent = current;
+        opt.textContent = label(current);
         opt.selected = true;
         el.presetSelect.appendChild(opt);
       }
@@ -1086,7 +1714,7 @@
    * 权限相关的新状态（清单 + 当前值，或一句「为什么无法切换」）。
    *
    * 关键一条：**清单并非写死**，而是由内核提供（该插件 0.0.12 转出）。
-   * 因此用户安装 Auto Approval 等插件，或在档中添加预设后，此处会随之增加，
+   * 因此 DSH 0.2 注册 Auto review、用户安装权限插件或添加预设后，此处会随之增加，
    * 与桌面端使用同一数据源。
    */
   function setPermissionState(message) {
@@ -1104,6 +1732,7 @@
       el.accessBtn.disabled = true;
       el.accessField.hidden = false;
       syncConfigRow();
+      syncComposer();
       return;
     }
     const options = Array.isArray(message.options) ? message.options : [];
@@ -1115,6 +1744,7 @@
       closeAccessPop();
       el.accessField.hidden = true;
       syncConfigRow();
+      syncComposer();
       return;
     }
     state.permission = {
@@ -1129,6 +1759,7 @@
     el.accessBtn.textContent = message.label || message.currentValue || '权限';
     el.accessBtn.title = `当前权限：${message.label || message.currentValue}`;
     if (!el.accessPop.hidden) renderAccessList();
+    syncComposer();
     syncConfigRow();
   }
 
@@ -1137,7 +1768,7 @@
    *
    * 注意：**不再写在按钮上**（该处仅容得下约 4 个字，写入即被截断），
    * 而是记录在 `data-why` 上供测试读取；用户通过悬浮提示与对话流查看完整说明。
-   * 这几个字同样不得出现「门」「档」等内部词（用户曾提出意见）。
+   * 简短说明同样不使用内部组件术语。
    */
   function shortAccessReason(kind) {
     if (kind === 'old-door') return '版本过低';
@@ -1220,8 +1851,8 @@
   /**
    * 选中一项。
    *
-   * 「完全权限」需要经过确认（文案由扩展提供，见 src/dsh/permission.js 的 CONFIRM）：
-   * 该档位会使智能体不再逐条请求确认，误操作代价较大，因此增加一步确认。
+   * 「完全权限」与实验性的 Auto review 需要经过确认（文案由扩展随选项提供）：
+   * 两者都不使用沙箱，误操作代价较大，因此增加一步确认。
    */
   function chooseAccess(option) {
     /*
@@ -1232,7 +1863,7 @@
      * （两份产物来自同一版本，混搭需通过重载窗口消除）；反方向是安全的：
      * 旧扩展不发送 selectable，新 webview 仍按可选项处理，行为与之前一致。
      */
-    if (!option || option.selectable === false) return;
+    if (!option || option.selectable === false || el.accessBtn.disabled) return;
     if (option.needsConfirm && option.confirm) {
       state.pendingAccess = option;
       el.accessList.hidden = true;
@@ -1245,7 +1876,7 @@
       positionAccessPop();
       return;
     }
-    post({ type: 'setPermission', value: option.value });
+    requestSetting('setPermission', 'permission', option.value);
     closeAccessPop();
   }
 
@@ -1292,8 +1923,8 @@
 
   el.accessConfirmAccept.addEventListener('click', () => {
     const option = state.pendingAccess;
-    if (!option) return;
-    post({ type: 'setPermission', value: option.value });
+    if (!option || el.accessBtn.disabled) return;
+    requestSetting('setPermission', 'permission', option.value);
     closeAccessPop();
   });
 
@@ -1314,7 +1945,7 @@
   });
 
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && !el.accessPop.hidden) closeAccessPop();
+    if (event.key === 'Escape' && !el.accessPop.hidden) { event.preventDefault(); closeAccessPop(); }
   });
 
   window.addEventListener('resize', () => {
@@ -1322,11 +1953,22 @@
   });
 
   el.modelSelect.addEventListener('change', () => {
-    post({ type: 'setModel', value: el.modelSelect.value });
+    requestSetting('setModel', 'model', el.modelSelect.value);
   });
+  el.reasoningSelect.addEventListener('change', () => requestSetting('setOption', el.reasoningSelect.dataset.optionId, el.reasoningSelect.value));
+
+  function requestSetting(type, setting, value) {
+    const requestId = `setting-${draftSession}-${++draftSequence}`;
+    if (state.historyReadonly || pendingRecovery || (setting === 'permission' ? el.accessBtn.disabled : el.modelSelect.disabled)) { setConfig(state.configOptions); return; }
+    settingRequests.set(requestId, { setting, cwd: draftCwd, sessionId: state.sessionId });
+    // A native select changes immediately; restore the last confirmed selection while waiting.
+    setConfig(state.configOptions); showHint('正在等待内核确认设置…'); syncComposer();
+    post({ type, id: setting, value, requestId, cwd: draftCwd, sessionId: state.sessionId });
+  }
 
   el.presetSelect.addEventListener('change', () => {
-    post({ type: 'setPreset', value: el.presetSelect.value });
+    post({ type: 'setPreset', value: el.presetSelect.value, cwd: draftCwd, sessionId: state.sessionId });
+    if (state.presetCurrent) el.presetSelect.value = state.presetCurrent;
   });
 
   // ── 权限询问 ────────────────────────────────────────
@@ -1369,13 +2011,166 @@
 
   // ── 输入 ────────────────────────────────────────────
 
+  let completion, completionTimer, completionSequence = 0, pendingChoice, composing = false;
+  let contextRequest, contextTimer, contextSource = 'search', contextReturnFocus;
+  function closeContext(restoreFocus = true) {
+    clearTimeout(contextTimer); contextRequest = undefined;
+    const wasOpen = !el.contextPanel.hidden;
+    el.contextPanel.hidden = true; el.contextOpen.setAttribute('aria-expanded', 'false');
+    el.contextSearch.removeAttribute('aria-activedescendant');
+    if (wasOpen) post({ type: 'composerCancel' });
+    if (wasOpen && restoreFocus) (contextReturnFocus?.isConnected ? contextReturnFocus : el.contextOpen).focus();
+  }
+  function cancelContext() { closeContext(false); }
+  function openContext(trigger) {
+    if (pendingChoice || state.historyReadonly || !draftTrusted) return;
+    closeCompletion(); closePreview(); contextReturnFocus = trigger;
+    el.contextPanel.hidden = false; el.contextOpen.setAttribute('aria-expanded', 'true');
+    el.contextSearch.focus(); queryContext();
+  }
+  function queryContext() {
+    if (el.contextPanel.hidden || pendingChoice) return;
+    clearTimeout(contextTimer); post({ type: 'composerCancel' });
+    const request = { requestId: ++completionSequence, cwd: draftCwd, sessionId: state.sessionId, items: [], index: 0, loading: true };
+    contextRequest = request; renderContext();
+    contextTimer = setTimeout(() => { if (contextRequest === request) post({ type: 'composerQuery', requestId: request.requestId, trigger: contextSource === 'skill' ? '/' : '@', query: el.contextSearch.value, origin: 'context', source: contextSource, cwd: draftCwd }); }, 120);
+  }
+  function renderContext(note) {
+    if (!contextRequest) return;
+    el.contextOptions.textContent = '';
+    contextRequest.items.forEach((item, index) => {
+      const button = document.createElement('button'); button.type = 'button'; button.className = 'composer-option';
+      button.id = `context-option-${index}`; button.setAttribute('role', 'option'); button.setAttribute('aria-selected', String(index === contextRequest.index)); button.disabled = Boolean(item.disabled);
+      const label = document.createElement('span'); label.textContent = item.label; button.appendChild(label);
+      if (item.description) { const detail = document.createElement('small'); detail.textContent = item.description; button.appendChild(detail); }
+      button.addEventListener('click', () => chooseContext(index)); el.contextOptions.appendChild(button);
+    });
+    el.contextNote.textContent = contextRequest.loading ? '正在查找…' : `${contextRequest.items.length ? '↑↓ 选择 · Enter 添加 · Esc 关闭。' : '没有匹配项。'} ${note || ''}`;
+    if (contextRequest.items.length) { el.contextSearch.setAttribute('aria-activedescendant', `context-option-${contextRequest.index}`); el.contextOptions.children[contextRequest.index]?.scrollIntoView({ block: 'nearest' }); }
+    else el.contextSearch.removeAttribute('aria-activedescendant');
+  }
+  function chooseContext(index) {
+    const item = contextRequest?.items[index];
+    if (!item || item.disabled || item.kind === 'command' || pendingChoice) return;
+    const queryRequestId = contextRequest.requestId;
+    pendingChoice = { requestId: ++completionSequence, origin: 'context', source: contextSource, cwd: draftCwd, sessionId: state.sessionId };
+    closeContext(); syncComposer(); showHint('正在读取上下文快照…');
+    post({ type: 'composerSelect', requestId: pendingChoice.requestId, queryRequestId, id: item.id, origin: 'context', source: contextSource, cwd: draftCwd });
+  }
+  function addEditorContext(source) {
+    if (pendingChoice || state.historyReadonly || !draftTrusted) return;
+    closeContext(); closeCompletion();
+    pendingChoice = { requestId: ++completionSequence, origin: 'context', source, cwd: draftCwd, sessionId: state.sessionId };
+    syncComposer(); showHint('正在读取编辑器快照…');
+    post({ type: 'contextAdd', source, origin: 'context', requestId: pendingChoice.requestId, cwd: draftCwd });
+  }
+  el.contextOpen.addEventListener('click', () => openContext(el.contextOpen));
+  el.contextClose.addEventListener('click', () => closeContext());
+  document.querySelectorAll('[data-context-add]').forEach(button => button.addEventListener('click', () => addEditorContext(button.dataset.contextAdd)));
+  document.querySelectorAll('[data-context-source]').forEach(button => button.addEventListener('click', () => {
+    contextSource = button.dataset.contextSource;
+    document.querySelectorAll('[data-context-source]').forEach(candidate => candidate.setAttribute('aria-pressed', String(candidate === button)));
+    el.contextSearchLabel.textContent = contextSource === 'skill' ? '搜索随消息使用的技能' : contextSource === 'diff' ? '按文件名筛选 Git 变更' : contextSource === 'diagnostics' ? '按文件名筛选问题诊断' : '搜索本次对话目录中的文件';
+    el.contextSearch.value = ''; el.contextSearch.focus(); queryContext();
+  }));
+  el.contextSearch.addEventListener('input', queryContext);
+  el.contextSearch.addEventListener('keydown', event => {
+    if (event.isComposing || event.keyCode === 229) return;
+    if (['ArrowDown', 'ArrowUp'].includes(event.key) && contextRequest?.items.length) {
+      event.preventDefault(); contextRequest.index = (contextRequest.index + (event.key === 'ArrowDown' ? 1 : -1) + contextRequest.items.length) % contextRequest.items.length; renderContext();
+    } else if (event.key === 'Enter') { event.preventDefault(); chooseContext(contextRequest?.index || 0); }
+  });
+  function completionToken() {
+    if (composing || el.input.selectionStart !== el.input.selectionEnd) return;
+    const end = el.input.selectionStart;
+    const before = el.input.value.slice(0, end);
+    const match = /(^|\s)([@/#])([^@#\r\n]*)$/.exec(before);
+    if (!match || match[3].length > 128) return;
+    return { trigger: match[2], query: match[3], start: end - match[3].length - 1, end };
+  }
+  function closeCompletion() {
+    const hadCompletion = Boolean(completion);
+    clearTimeout(completionTimer); completion = undefined;
+    el.composerMenu.hidden = true; el.input.setAttribute('aria-expanded', 'false');
+    el.input.removeAttribute('aria-activedescendant'); if (hadCompletion) post({ type: 'composerCancel' });
+  }
+  function updateCompletion() {
+    const token = completionToken();
+    if (!token || pendingChoice) { closeCompletion(); return; }
+    if (completion && completion.token.start === token.start && completion.token.end === token.end && completion.token.query === token.query && completion.token.trigger === token.trigger) return;
+    closeCompletion();
+    completion = { token, requestId: ++completionSequence, items: [], index: 0, loading: true };
+    renderCompletion();
+    const request = completion;
+    completionTimer = setTimeout(() => {
+      if (completion === request) post({ type: 'composerQuery', requestId: request.requestId, trigger: token.trigger, query: token.query, origin: 'syntax', cwd: draftCwd, sessionId: state.sessionId });
+    }, 120);
+  }
+  function renderCompletion(note) {
+    if (!completion) return;
+    el.composerMenu.hidden = false; el.input.setAttribute('aria-expanded', 'true');
+    el.composerTitle.textContent = ({ '@': '引用工作区文件', '/': '执行命令或调用技能', '#': '引用编辑器上下文和文件' })[completion.token.trigger];
+    el.composerOptions.textContent = '';
+    completion.items.forEach((item, index) => {
+      const row = document.createElement('button'); row.type = 'button'; row.tabIndex = -1;
+      row.className = 'composer-option'; row.id = `composer-option-${index}`;
+      row.disabled = Boolean(item.disabled);
+      row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(index === completion.index));
+      const label = document.createElement('span'); label.textContent = item.label; row.appendChild(label);
+      if (item.description) { const detail = document.createElement('small'); detail.textContent = item.description; row.appendChild(detail); }
+      row.addEventListener('mousedown', event => event.preventDefault());
+      row.addEventListener('click', () => chooseCompletion(index)); el.composerOptions.appendChild(row);
+    });
+    el.composerNote.textContent = completion.loading ? '正在查找…' : (completion.items.length ? '↑↓ 选择 · Enter / Tab 执行或添加 · Esc 关闭' : '没有匹配项。') + (note ? ' ' + note : '');
+    if (completion.items.length) {
+      el.input.setAttribute('aria-activedescendant', `composer-option-${completion.index}`);
+      el.composerOptions.children[completion.index]?.scrollIntoView({ block: 'nearest' });
+    } else el.input.removeAttribute('aria-activedescendant');
+  }
+  function chooseCompletion(index) {
+    if (!completion || pendingChoice) return;
+    const item = completion.items[index]; if (!item || item.disabled) return;
+    const queryRequestId = completion.requestId;
+    pendingChoice = { requestId: ++completionSequence, origin: 'syntax', token: completion.token, text: el.input.value, cwd: draftCwd, sessionId: state.sessionId };
+    syncComposer();
+    closeCompletion(); showHint(item.kind === 'command' ? '正在执行命令…' : '正在附加…');
+    post({ type: item.kind === 'command' ? 'composerCommand' : 'composerSelect', requestId: pendingChoice.requestId, queryRequestId, id: item.id, origin: 'syntax', cwd: draftCwd, sessionId: state.sessionId });
+  }
+  function openCompletion(trigger) {
+    if (composing || pendingChoice || state.historyReadonly) return;
+    el.input.focus();
+    const start = el.input.selectionStart, prefix = start && !/\s/.test(el.input.value[start - 1]) ? ' ' : '';
+    el.input.setRangeText(prefix + trigger, start, el.input.selectionEnd, 'end');
+    autoGrow(); saveDraft(); updateCompletion();
+  }
+  document.querySelectorAll('[data-composer]').forEach(button => button.addEventListener('click', () => openCompletion(button.dataset.composer)));
+
   function autoGrow() {
     el.input.style.height = 'auto';
     el.input.style.height = `${Math.min(el.input.scrollHeight, 180)}px`;
   }
 
-  el.input.addEventListener('input', autoGrow);
+  el.input.addEventListener('input', () => { autoGrow(); saveDraft(); updateCompletion(); });
+  el.input.addEventListener('compositionstart', () => { composing = true; closeCompletion(); });
+  el.input.addEventListener('compositionend', () => { composing = false; updateCompletion(); });
+  el.input.addEventListener('click', updateCompletion);
+  el.input.addEventListener('keyup', event => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) updateCompletion(); });
+  el.input.addEventListener('blur', closeCompletion);
   el.input.addEventListener('keydown', (event) => {
+    if (event.isComposing || composing || event.keyCode === 229) return;
+    if (event.key === ' ' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); if (completionToken()) updateCompletion(); else openCompletion('@'); return; }
+    if (completion && !event.shiftKey) {
+      if (event.key === 'Escape') { event.preventDefault(); closeCompletion(); return; }
+      if (['ArrowDown', 'ArrowUp'].includes(event.key)) {
+        event.preventDefault();
+        if (completion.items.length) {
+          for (let steps = 0; steps < completion.items.length; steps++) { completion.index = (completion.index + (event.key === 'ArrowDown' ? 1 : -1) + completion.items.length) % completion.items.length; if (!completion.items[completion.index].disabled) break; }
+          renderCompletion();
+        }
+        return;
+      }
+      if (event.key === 'Enter' || event.key === 'Tab' && completion.items.length) { event.preventDefault(); chooseCompletion(completion.index); return; }
+    }
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       submit();
@@ -1386,28 +2181,49 @@
     const text = el.input.value;
     const attachments = state.attachments.slice();
     // 只有上下文、没有文字时也允许发送：用户可能希望直接提供内容供查看。
-    if ((!text.trim() && attachments.length === 0) || state.busy) return;
-    el.input.value = '';
-    state.attachments = [];
-    renderAttachments();
-    autoGrow();
-    showHint('');
-    post({ type: 'send', text, attachments });
+    if ((!text.trim() && attachments.length === 0) || state.historyReadonly || pendingRecovery || Array.from(settingRequests.values()).some(request => request.setting !== 'permission') || pendingSend || pendingChoice || (state.queue.items || []).length + (state.queue.active ? 1 : 0) >= 5) return;
+    closeCompletion();
+    pendingSend = { id: `${draftSession}:${++draftSequence}`, cwd: draftCwd, draft: { text, attachments } };
+    showHint('正在接收消息…');
+    saveDraft();
+    syncComposer();
+    post({ type: 'send', text, attachments, requestId: pendingSend.id });
   }
+  el.recoverDraft.addEventListener('click', () => {
+    if (!recoveryDrafts.length || pendingSend || pendingQueueEdit || pendingChoice) return;
+    cancelContext(); closePreview(); closeCompletion();
+    const current = { text: el.input.value, attachments: state.attachments.slice() };
+    const recovered = recoveryDrafts.shift();
+    el.input.value = recovered.text || ''; state.attachments = recovered.attachments || [];
+    if ((current.text || current.attachments.length) && !recoveryDrafts.some(item => sameDraft(item, current))) recoveryDrafts.push(current);
+    updateRecoveryButton(); renderAttachments(); autoGrow(); saveDraft();
+    syncComposer();
+  });
 
   el.send.addEventListener('click', submit);
   el.stop.addEventListener('click', () => post({ type: 'stop' }));
   el.historyBtn.addEventListener('click', () => toggleHistory());
   el.historyClose.addEventListener('click', () => toggleHistory(false));
+  el.historySearch.addEventListener('input', () => { clearTimeout(historySearchTimer); historySearchTimer = setTimeout(() => requestHistory(), 250); });
+  el.historyProject.addEventListener('change', () => requestHistory());
+  el.historyPrev.addEventListener('click', () => requestHistory(Math.max(0, historyOffset - 100)));
+  el.historyNext.addEventListener('click', () => { if (Number.isInteger(historyNextOffset)) requestHistory(historyNextOffset); });
 
-  // Esc 关闭历史浮层。该浮层覆盖整个面板，而「按 Esc 退出」是浮层的通用约定；
-  // 缺少该处理时，使用键盘的用户只能通过 Tab 定位到右上角关闭按钮才能退出。
-  // 仅在浮层打开时处理，不拦截其他位置的 Esc（例如输入框内），
-  // 避免占用 VS Code 的默认行为。
+  // Esc 优先关闭浮层或候选；没有浮层时停止当前任务并保留草稿。
   document.addEventListener('keydown', (event) => {
-    if (event.key !== 'Escape' || el.historyPanel.hidden) return;
-    event.preventDefault();
-    toggleHistory(false);
+    const modal = !el.testLog.hidden ? el.testLog : !el.preview.hidden ? el.preview : !el.contextPanel.hidden ? el.contextPanel : undefined;
+    if (modal && event.key === 'Tab') {
+      const targets = [...modal.querySelectorAll('button:not(:disabled), input, textarea, [tabindex="0"]')].filter(node => !node.hidden && node.getClientRects().length);
+      const first = targets[0], last = targets[targets.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    }
+    if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || composing || event.keyCode === 229) return;
+    if (!el.testLog.hidden) { event.preventDefault(); event.stopPropagation(); closeTestLog(); return; }
+    if (!el.preview.hidden) { event.preventDefault(); event.stopPropagation(); closePreview(); return; }
+    if (!el.contextPanel.hidden) { event.preventDefault(); event.stopPropagation(); closeContext(); return; }
+    if (!el.historyPanel.hidden) { event.preventDefault(); toggleHistory(false); return; }
+    if ((state.busy || state.queue.active) && !state.historyReadonly) { event.preventDefault(); post({ type: 'stop' }); }
   });
 
   // 链接点击交由扩展打开外部浏览器（webview 内点击链接默认无响应）。

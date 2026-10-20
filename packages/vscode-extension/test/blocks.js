@@ -184,6 +184,7 @@ section('9. 未保存或已修改文件使用编辑器当前快照');
 {
   const current = {
     kind: 'content',
+    scope: 'file',
     name: 'src/dirty.js',
     text: 'const disk = 1;\nconst editor = 2;',
     language: 'javascript',
@@ -196,9 +197,61 @@ section('9. 未保存或已修改文件使用编辑器当前快照');
     blocks[0].text);
   check('快照没有伪造 resource_link', !blocks.some((item) => item.type === 'resource_link'), JSON.stringify(blocks));
   check('快照使用安全的语言围栏', contentText(current).includes('```javascript'));
+  check('内核拼接正文后围栏与提问仍分行', blocks.map(block => block.text || '').join('').includes('```\n\n以哪个值为准？'));
 
   const empty = buildPromptBlocks('', [{ kind: 'content', name: 'Untitled-1', text: '', language: 'plaintext' }]);
   check('空的未保存文件也保留一段明确上下文', empty.length === 2 && /Untitled-1/.test(empty[0].text), JSON.stringify(empty));
+}
+
+section('10. 审查报告仅作为显式附件正文发送');
+{
+  const report = { kind: 'review', name: '代码审查报告', text: '# 代码审查\n\n## [P1] 加法错误\n\n计算 sample.js:1', finishedAt: '2026-10-05T12:00:00Z', uri: 'dsh-result:/review/fixture.md' };
+  const blocks = buildPromptBlocks('解释这个问题', [report]);
+  check('报告全文与提问保持顺序', blocks.length === 2 && blocks[0].text.includes(report.text) && blocks[1].text === '解释这个问题', JSON.stringify(blocks));
+  check('报告说明历史快照与审查时间', blocks[0].text.includes('代码快照') && blocks[0].text.includes(report.finishedAt));
+  check('虚拟报告地址不作为文件读取链接', !blocks.some(item => item.type === 'resource_link'));
+  const removed = buildPromptBlocks('不发送报告', []);
+  check('移除附件后没有报告内容', removed.length === 1 && !removed[0].text.includes('加法错误'));
+}
+
+section('11. 正文快照逐字保留且不会重新读源文件');
+{
+  const raw = '首行\r\n```\r\n尾部  \r\n\r\n';
+  const captured = { kind: 'content', name: 'saved.md', sourcePath: 'C:/project/saved.md', uri: 'file:///saved.md', text: raw,
+    snapshotAt: '2026-10-12T00:00:00.000Z', isDirty: false, scope: 'file', language: 'markdown' };
+  const blocks = buildPromptBlocks('使用这份正文', [captured]);
+  check('正文 CRLF 和尾部空白逐字保留', blocks[0].text.includes(raw + '\n````'));
+  check('完整文件、实际路径和保存状态明确', /完整文件正文快照/.test(blocks[0].text) && blocks[0].text.includes(captured.sourcePath) && blocks[0].text.includes('加入时已保存'));
+  check('加入时间保留在发送上下文', blocks[0].text.includes(captured.snapshotAt));
+  check('带来源 uri 的快照也不触发延后文件读取', blocks.length === 2 && !blocks.some(block => block.type === 'resource_link'));
+  const spaces = { ...captured, kind: 'selection', text: ' \t\r\n', startLine: 2, endLine: 2, isDirty: true };
+  const selection = buildPromptBlocks('保留空白选区', [spaces]);
+  check('空白选区快照正文不被省略或修剪', selection.length === 2 && selection[0].text.includes(spaces.text));
+  check('选区显示实际范围和未保存状态', selection[0].text.includes('2–2 行') && selection[0].text.includes('含未保存修改'));
+  const untitled = buildPromptBlocks('', [{ ...captured, isUntitled: true, sourcePath: 'Untitled-1', text: '' }]);
+  check('未保存空文件的事实与正文保留', untitled.length === 2 && untitled[0].text.includes('未保存文件'));
+}
+
+section('12. 附加正文仅按明确来源范围描述');
+{
+  const body = '退出码：1\r\n失败证据：```\r\n保留尾部空白  \r\n';
+  for (const scope of ['test', 'test-log', undefined]) {
+    const attachment = { kind: 'content', scope, name: '测试摘要', sourcePath: '执行 test-7', text: body,
+      snapshotAt: '2026-10-12T00:00:00.000Z', language: 'plaintext' };
+    const blocks = buildPromptBlocks('准备修复', [attachment]);
+    const heading = blocks[0].text.split('\n')[0];
+    check(`范围 ${String(scope)} 不被称为完整文件或选区`, !/完整文件|编辑器里选中/.test(heading), heading);
+    check(`范围 ${String(scope)} 保留中性来源、时间和逐字正文`,
+      heading === `以下是附加正文快照（执行 test-7，快照时间 ${attachment.snapshotAt}）：` && blocks[0].text.includes(body));
+    check(`范围 ${String(scope)} 保留提问并使用成对安全围栏`,
+      blocks.length === 2 && blocks[1].text === '准备修复' && blocks[0].text.split('````').length === 3);
+  }
+  const selection = contentText({ kind: 'content', scope: 'selection', sourcePath: 'src/app.js', text: body,
+    startLine: 3, endLine: 5, isDirty: true, language: 'javascript' });
+  check('content 选区按真实选区描述范围与保存状态', selection.startsWith('以下是在编辑器里选中的代码快照（src/app.js，3–5 行，含未保存修改）：'));
+  check('content 选区保留正文且不声称完整文件', selection.includes(body) && !selection.includes('完整文件正文快照'));
+  const unnamed = contentText({ kind: 'content', text: '证据' });
+  check('缺失来源使用未知来源，不虚构文件', unnamed.startsWith('以下是附加正文快照（（未知来源））：'));
 }
 
 console.log('\n════════════════════════════════════════════════════════');

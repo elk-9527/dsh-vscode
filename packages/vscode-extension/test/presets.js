@@ -24,18 +24,20 @@ const {
   syncDoor,
   inspectDoor,
   isMissingModelCredentials,
+  createTestWorkspace,
   PORT,
   PROFILE,
   TEST_PROFILE,
 } = require('./helpers/door');
 
 const ROOT = path.resolve(__dirname, '..');
-const BUILD = path.join(ROOT, 'build');
+const BUILD = process.env.DSH_PANEL_TEST_WORK ? path.resolve(process.env.DSH_PANEL_TEST_WORK) : path.join(ROOT, 'build');
 const DIAG = path.join(BUILD, 'presets-diag.log');
 const OVERLAY = path.join(BUILD, 'presets-overlay.yml');
 
 let passed = 0;
 let failed = 0;
+let modelSkipped = false;
 
 function section(title) {
   console.log(`\n── ${title} ──`);
@@ -67,7 +69,7 @@ function freePort() {
  * 生成一份「把该插件指向指定端口、并开启诊断日志」的覆盖文件。
  *
  * 采用 --patch 覆盖而不修改 profile 的原因：不得为运行测试而改动用户的档。
- * 覆盖是整体替换该插件的配置（实测：只写 port 会使 preset 被清除），
+ * 覆盖会整体替换该插件的配置，只写 port 会使 preset 被清除，
  * 因此此处写出该测试需要的全部键。provider/model 刻意不写：0.0.14 起生产默认
  * 就是读取 DSH 当前默认模型，真实测试必须覆盖这条路径，不能重新塞回固定值绕过它。
  */
@@ -113,13 +115,8 @@ async function main() {
   console.log(`\n用 profile=${PROFILE}、端口 ${port}、覆盖文件 ${path.relative(ROOT, overlay)}`);
   console.log(`（这样无需占用 ${PORT}，也不会碰桌面端那一个）`);
 
-  // 已安装的该插件必须与源码一致 —— 否则该套件测试的是旧代码（pnpm 对
-  // `file:` 依赖存在缓存，修改源码后可能不会重新安装，实测已出现）。
-  //
-  // 仅测试档会自动重新安装。使用 `DSH_PANEL_PROFILE=desktop` 运行该套件
-  // 是为了在生产档上验证真实路径；此时不得改动用户的档，
-  // 只检查、只报告。（该规则来自实际经验：早期实现会向 desktop 安装，
-  // 却按 dshdoor 的路径比对，导致生产档的依赖形态被改变。）
+  // 已安装内容必须与源码一致，不能依赖 file: 缓存或版本号判断。
+  // 仅专用测试配置允许自动同步；其他配置只检查、只报告。
   if (PROFILE === TEST_PROFILE) {
     const sync = syncDoor({ log: (level, text) => console.log(`  [${level}] ${text}`) });
     check('测试档里装的该插件与源码一致（不一致时自动重新安装）', sync.drift.length === 0 || sync.synced, sync.drift.join('、'));
@@ -138,7 +135,7 @@ async function main() {
     log: (level, message) => console.log(`  [${level}] ${message}`),
   });
 
-  const cwd = ROOT;
+  const cwd = createTestWorkspace('presets');
   let client;
   try {
     section('1. 握手');
@@ -221,16 +218,15 @@ async function main() {
     check('没有把不存在的预设当成成功挂上去', !diagAll.includes('preset=no-such-preset'));
 
     section('7. 真跑一个回合：极简模式下同样可调用工具（预设确实生效）');
-    // 采用「回合中是否实际调用工具」作为证据，而不读取会话记录：
-    // 实测确认，内核仅在桌面端的会话建立方式下才会把 agentPreset 写入
-    // 会话记录；经 ACP 接入点插件建立的会话，记录中不含该字段（建立后读取、
-    // 运行回合后读取均如此）。因此记录不能作为证据，行为可以。
+    // 通过实际工具调用验证预设挂载。不同入口可能以不同的时机写入
+    // agentPreset 元数据，不能仅用持久化字段推断会话是否拥有工具。
     // 预设的意义在于「该会话可使用哪些工具」—— 极简模式同样包含 shell，
     // 因此必须能够调用工具。模型在无工具时会把工具调用作为文本输出
     // （`<｜｜DSML｜｜invoke …>`），该现象正是本检查要捕获的症状。
     const turn = await runTurn(client, minimal.sessionId, '用 shell 跑一下 echo dsh-door-minimal，把输出原样告我，别做别的。');
     if (isMissingModelCredentials(turn.error)) {
-      console.log('  ⏭  本机没有当前模型的凭据；预设挂载已验证，跳过真实工具回合。');
+      modelSkipped = true;
+      console.log('  ⏭  测试环境没有当前模型的凭据；预设挂载已验证，跳过真实工具回合。');
     } else {
       check('极简模式下的回合跑通了', turn.ok, turn.error ?? '');
       check('回合里真的调了工具（不是只会说话）', turn.tools.length > 0, `工具调用 ${turn.tools.length} 次`);
@@ -241,15 +237,13 @@ async function main() {
       );
     }
 
-    section('8. 断线接回：预设要补回来，手不能丢（这里真出过 bug）');
-    // 本条为回归保护措施。实测捕获的缺陷：resume 得到的会话不含任何工具，
-    // 模型只能把工具调用作为文本输出。原因是恢复时 agent 的作用域被重新组装，
-    // 而内核仅在会话记录中识别预设 —— 经该插件建立的会话记录中没有该字段（见第 7 节的说明）。
-    // 该插件当前的做法是：select 被锁定时改用 mount()（工厂期的入口，不检查锁）。
+    section('8. 断线接回：恢复预设与工具挂载');
+    // resume 会重新组装 agent 作用域，必须补挂预设以恢复工具。
+    // select 被锁定时改用工厂期的 mount() 入口。
     //
     // 此处故意复用第 7 节中已运行过回合的会话：只有运行过回合的会话，
     // select 才会被内核锁定，从而真正进入 mount 路径。刚建立且未发送消息的会话
-    // 走的是 select，无法覆盖该缺陷（第一版即如此编写，测试通过但未验证任何内容）。
+    // 走的是 select，不能覆盖锁定后的 mount 路径。
     const resumeId = minimal.sessionId;
     const diagBeforeResume = readDiag().length;
     client.close();
@@ -303,12 +297,12 @@ async function main() {
   }
 
   console.log(`\n${'═'.repeat(56)}`);
-  if (failed === 0) {
+  if (failed === 0 && !modelSkipped) {
     console.log(`✅ 全部通过：${passed} 项检查`);
     process.exit(0);
   }
-  console.log(`❌ 通过 ${passed} 项，失败 ${failed} 项`);
-  process.exit(1);
+  console.log(`${failed ? '❌' : '⏭'} 通过 ${passed} 项，失败 ${failed} 项${modelSkipped ? '；真实模型回合未验收' : ''}`);
+  process.exit(failed ? 1 : 2);
 }
 
 /**

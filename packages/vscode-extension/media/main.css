@@ -62,7 +62,7 @@ body {
 .bar {
   flex: 0 0 auto;
   border-bottom: 1px solid var(--vscode-panel-border);
-  padding: 4px var(--dsh-pad);
+  padding: 8px var(--dsh-pad);
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -114,9 +114,37 @@ body {
 .status {
   color: var(--vscode-descriptionForeground);
   font-size: var(--dsh-fs-s);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  flex: 1 1 100px;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+
+/* 空白页只保留标题和下一步；连接详情由顶栏统一呈现。 */
+.onboarding {
+  margin: 0;
+  padding: clamp(32px, 12vh, 96px) 12px 32px;
+  text-align: center;
+  min-width: 0;
+}
+
+.onboarding h1 {
+  margin: 0 0 8px;
+  font-size: 1em;
+  font-weight: 600;
+}
+
+.onboarding p {
+  margin: 8px 0;
+  line-height: 1.55;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.onboarding-next {
+  color: var(--vscode-descriptionForeground);
+  font-size: var(--dsh-fs-s);
 }
 
 /* 顶栏右侧的元信息：工作目录、回合时间戳/耗时 */
@@ -140,20 +168,8 @@ body {
 }
 
 /*
- * ── 顶栏配置行的宽度分配（2026-09-19 根据用户反馈确定）─────────────
- *
- * 用户反馈的问题：「文字被挤在一起了，模型的占地有点大，其他两点有点小」。
- * 实测得到的原因：三个字段都是 `flex: 1 1 auto`，而**基准宽度取的是内容宽度** ——
- * 模型 <select> 的基准宽度为其最长选项（`DeepSeek-V4-Flash-Vision-Exp` 这类
- * 名称），因此该项独占整行，模式与权限被压缩到 40~60px，"工作区内修改"直接被
- * 截断（实测 320px 时权限按钮只有 53px）。
- *
- * 现按「满足需要即可」分配：`flex-basis: 0` + 比例 4:3:3（模型占比较宽但不独占），
- * 每项再给定一个**下限**（可容纳两个汉字与标签）。下限之和（96+88+108=292）
- * 在 320px 宽的面板中可以容纳，连同标签与间隔仍有余量。
- *
- * 更窄（<320px）时使用 `flex-wrap` 换行 —— 允许多出一行，不压缩文字：
- * 用量条（`.meter`）排在最末，最窄时其自行换到第二行，符合预期。
+ * 顶栏以零基准宽度分配空间，避免较长的模型选项挤压模式与权限控件。
+ * 各控件保留可读的最小宽度；空间不足时换行，用量条排在最末。
  */
 #config-row {
   flex-wrap: wrap;
@@ -161,20 +177,14 @@ body {
 }
 
 /*
- * ⚠️ 下面这几条必须写成 `#config-row > #xxx-field`（两个 id）：只写 `#xxx-field`
- * 会被上面那条 `.field`/`#config-row > .field` 的简写覆盖（实测出现过：
- * 测得宽度与面板宽度完全无关，三个字段各自按内容宽度挤压，变窄时直接溢出）。
+ * 具体控件规则使用两个 id，确保优先级高于 `#config-row > .field` 的 flex 简写。
  */
 #config-row > .field {
   min-width: 0;
 }
 
 /*
- * 下限取「**视觉上不拥挤**」的宽度，而非「勉强能够容纳」的宽度：
- * 96/88/108 这类恰好放入 320px 的下限，在用量条同时存在时（四项同处一行）
- * 会将权限按钮压缩到 73px —— 文字被截断，用户反馈的正是该问题（实测）。
- * 因此下限取值从宽（116+96+108=320），**容纳不下时由用量条自行换行**：
- * 顶栏多出一行 12px 的条，也不截断文字。
+ * 三个控件最小宽度之和为 320px。用量条容纳不下时自行换行，保持文字可读。
  */
 #config-row > #model-field {
   flex: 7 1 0;
@@ -184,6 +194,10 @@ body {
 #config-row > #preset-field {
   flex: 6 1 0;
   min-width: 96px;
+}
+#config-row > #reasoning-field {
+  flex: 5 1 0;
+  min-width: 100px;
 }
 
 #config-row > #access-field {
@@ -229,14 +243,26 @@ body {
   flex: 1 1 auto;
   min-width: 0;
   color: var(--vscode-dropdown-foreground);
-  background: var(--vscode-dropdown-background);
-  border: 1px solid var(--vscode-dropdown-border, transparent);
+  background: transparent;
+  border: 1px solid transparent;
   border-radius: var(--dsh-radius-s);
-  padding: 2px 4px;
+  min-height: 26px;
+  padding: 2px 6px;
   font-family: inherit;
   font-size: var(--dsh-fs-s);
   /* 模型 id 通常长于该格宽度：使用省略号，避免文字被截断且无法察觉。 */
   text-overflow: ellipsis;
+}
+
+.select:hover {
+  background: var(--vscode-list-hoverBackground);
+  border-color: var(--vscode-dropdown-border, transparent);
+}
+
+.select option,
+.select optgroup {
+  background: var(--vscode-dropdown-background);
+  color: var(--vscode-dropdown-foreground);
 }
 
 .select:focus {
@@ -271,11 +297,12 @@ body {
 .access-btn {
   flex: 1 1 auto;
   min-width: 0;
+  min-height: 26px;
   color: var(--vscode-dropdown-foreground);
-  background: var(--vscode-dropdown-background);
-  border: 1px solid var(--vscode-dropdown-border, transparent);
+  background: transparent;
+  border: 1px solid transparent;
   border-radius: var(--dsh-radius-s);
-  padding: 2px 4px;
+  padding: 2px 6px;
   font-family: inherit;
   font-size: var(--dsh-fs-s);
   text-align: left;
@@ -287,6 +314,25 @@ body {
 
 .access-btn:hover {
   background: var(--vscode-list-hoverBackground);
+  border-color: var(--vscode-dropdown-border, transparent);
+}
+
+/* 窄栏四项配置保持两列；模型名称获得更多空间。 */
+@media (max-width: 480px) {
+  #config-row .field-label { display: none; }
+  #config-row:has(#reasoning-field:not([hidden])) {
+    display: grid;
+    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  }
+  #config-row:has(#reasoning-field:not([hidden])) > .field { min-width: 0; }
+  #config-row:has(#reasoning-field:not([hidden])) > .meter { grid-column: 1 / -1; }
+}
+
+body.vscode-high-contrast .select,
+body.vscode-high-contrast .access-btn,
+body.vscode-high-contrast-light .select,
+body.vscode-high-contrast-light .access-btn {
+  border-color: var(--vscode-contrastBorder, var(--vscode-dropdown-border));
 }
 
 .access-btn:focus-visible {
@@ -956,6 +1002,7 @@ body {
 /* ── 输入区 ─────────────────────────────────────────── */
 
 .composer {
+  position: relative;
   flex: 0 0 auto;
   border-top: 1px solid var(--vscode-panel-border);
   padding: 8px var(--dsh-pad) 4px;
@@ -963,6 +1010,72 @@ body {
   flex-direction: column;
   gap: 4px;
 }
+
+.composer-menu[hidden] { display: none !important; }
+.composer-menu {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: var(--dsh-pad);
+  right: var(--dsh-pad);
+  z-index: 20;
+  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+  border-radius: var(--dsh-radius);
+  background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
+  color: var(--vscode-foreground);
+  box-shadow: 0 4px 12px var(--vscode-widget-shadow, transparent);
+  overflow: hidden;
+}
+.composer-title, .composer-note { padding: 6px 8px; font-size: var(--dsh-fs-s); overflow-wrap: anywhere; }
+.composer-note { color: var(--vscode-descriptionForeground); border-top: 1px solid var(--vscode-panel-border); }
+.composer-options { max-height: min(260px, 40vh); overflow-y: auto; }
+.composer-option {
+  display: flex; flex-direction: column; gap: 2px; width: 100%; min-height: 32px;
+  padding: 6px 8px; border: 0; text-align: left; color: inherit; background: transparent;
+  cursor: pointer; font: inherit; overflow-wrap: anywhere;
+}
+.composer-option:hover, .composer-option[aria-selected="true"] {
+  background: var(--vscode-list-activeSelectionBackground, var(--vscode-list-hoverBackground));
+  color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground));
+}
+.composer-option small { font-size: var(--dsh-fs-s); opacity: .85; }
+.composer-shortcuts { display: flex; flex-wrap: wrap; gap: 4px; }
+.composer-shortcuts button {
+  min-height: 24px; padding: 2px 6px; border: 0; border-radius: var(--dsh-radius-s);
+  font: inherit; font-size: var(--dsh-fs-s); cursor: pointer;
+  color: var(--vscode-descriptionForeground); background: transparent;
+}
+.composer-shortcuts button:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
+.composer-shortcuts button:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
+
+.context-panel, .attachment-preview, .test-log-panel {
+  position: fixed; inset: 8px; z-index: 35; display: flex; flex-direction: column;
+  padding: 12px; gap: 10px; min-width: 0; overflow: hidden;
+  background: var(--vscode-sideBar-background); color: var(--vscode-foreground);
+  border: 1px solid var(--vscode-widget-border); box-shadow: 0 4px 20px var(--vscode-widget-shadow, transparent);
+}
+.context-panel[hidden], .attachment-preview[hidden], .test-log-panel[hidden] { display: none !important; }
+.context-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.context-head strong { min-width: 0; overflow-wrap: anywhere; }
+.context-head button, .context-actions button {
+  padding: 5px 8px; border: 1px solid var(--vscode-widget-border); cursor: pointer;
+  background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground);
+}
+.context-head button { flex-shrink: 0; }
+.context-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.context-actions [aria-pressed="true"] { outline: 1px solid var(--vscode-focusBorder); }
+.context-help { margin: 0; font-size: 12px; line-height: 1.6; color: var(--vscode-descriptionForeground); overflow-wrap: anywhere; }
+.context-options { flex: 1; min-height: 0; overflow-y: auto; }
+#context-search, #preview-body {
+  min-width: 0; width: 100%; box-sizing: border-box; color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-widget-border)); padding: 8px;
+}
+#preview-body { flex: 1; min-height: 90px; margin: 0; white-space: pre; overflow: auto; font-family: var(--vscode-editor-font-family); font-size: 12px; line-height: 1.6; }
+#test-log-body { flex: 1; min-height: 90px; min-width: 0; width: 100%; box-sizing: border-box; resize: none; padding: 8px; font: 12px/1.6 var(--vscode-editor-font-family); color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-widget-border)); }
+.test-log-panel button:focus-visible, #test-log-body:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
+.preview-meta { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 5px 10px; margin: 0; font-size: 12px; max-height: 38%; overflow-y: auto; }
+.preview-meta dt { color: var(--vscode-descriptionForeground); }
+.preview-meta dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.context-panel button:focus-visible, .attachment-preview button:focus-visible, #context-search:focus-visible, #preview-body:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
 
 /* ── 挂在输入框上面的上下文（当前文件 / 选中的代码）─────── */
 
@@ -1013,6 +1126,12 @@ body {
 }
 
 .chip-label {
+  min-height: 20px;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1021,9 +1140,15 @@ body {
   text-align: left;
   font-family: var(--vscode-editor-font-family, monospace);
 }
+.chip-label:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
 
 .chip-detail {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   opacity: 0.7;
 }
 
@@ -1130,9 +1255,14 @@ body {
 
 .composer-foot {
   display: flex;
-  align-items: center;
+  flex-wrap: wrap;
+  align-items: flex-start;
   gap: 8px;
   min-height: 14px;
+}
+
+.composer-foot:has(#hint:empty):has(#usage-inline:empty):has(#recover-draft[hidden]) {
+  display: none;
 }
 
 .hint {
@@ -1145,6 +1275,21 @@ body {
 
 .hint.error {
   color: var(--vscode-testing-iconFailed, var(--vscode-charts-red));
+}
+
+/* 操作等待、失败和下一步不能只依靠悬浮提示或单行省略。 */
+#hint,
+#workflow-note {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  overflow: visible;
+  text-overflow: clip;
+  line-height: 1.45;
+}
+
+#hint {
+  flex: 1 1 160px;
 }
 
 .mono {
@@ -1251,3 +1396,43 @@ body {
     transition-duration: 0.01ms !important;
   }
 }
+.history-filters, .history-pages { display: flex; align-items: center; gap: 8px; padding: 8px 12px; flex-wrap: wrap; }
+.history-filters input[type="search"] { flex: 1; min-width: 100px; width: 100px; padding: 5px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); }
+.history-filters label { font-size: 12px; white-space: nowrap; }
+.history-pages { justify-content: space-between; }
+.history-pages button { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); border: 1px solid var(--vscode-contrastBorder, transparent); padding: 4px 8px; cursor: pointer; }
+.history-pages button:disabled { opacity: .5; cursor: default; }
+.history-pages button:focus-visible, .history-filters input:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
+.workflow { flex-shrink: 0; border-top: 1px solid var(--vscode-panel-border); font-size: 12px; }
+.workflow summary { padding: 6px 12px; cursor: pointer; }
+.workflow-body { max-height: 28vh; overflow: auto; padding: 0 12px 8px; }
+.workflow-files { display: grid; gap: 5px; }
+.workflow-file { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.workflow-name { flex: 1 1 120px; overflow-wrap: anywhere; }
+.workflow-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.workflow button { cursor: pointer; font: inherit; color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); border: 1px solid transparent; border-radius: 3px; padding: 3px 6px; }
+.workflow button:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
+.workflow-test { margin-top: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.composer-option:disabled { opacity: .6; cursor: default; }
+
+.context-bar, .queue { font-size: var(--dsh-fs-s); }
+.context-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px var(--dsh-pad); border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background)); }
+.context-bar span { flex: 1 1 160px; overflow-wrap: anywhere; }
+#preset-note { padding: 4px 0; border: 0; background: transparent; }
+.context-bar button, .queue button, .error-actions button { font: inherit; color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground)); background: var(--vscode-button-secondaryBackground, var(--vscode-button-background)); border: 1px solid var(--vscode-button-border, transparent); border-radius: var(--dsh-radius-s); padding: 4px 6px; cursor: pointer; }
+.context-bar button:focus-visible, .queue button:focus-visible, .error-actions button:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
+button:disabled { cursor: default; opacity: .6; }
+.queue { border-bottom: 1px solid var(--vscode-panel-border); padding-bottom: 6px; }
+.queue-head { display: flex; align-items: center; gap: 6px; }
+.queue-head span { flex: 1; overflow-wrap: anywhere; }
+.queue-list { display: grid; gap: 4px; max-height: 100px; overflow-y: auto; margin-top: 4px; }
+.queue-item { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.queue-text { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.queue-item button { flex-shrink: 0; font-size: var(--dsh-fs-xs); }
+.send.queue-send { width: auto; min-width: 38px; padding: 0 6px; font: inherit; white-space: nowrap; }
+.input:read-only { color: var(--vscode-descriptionForeground); }
+.turn-result { margin: 8px 0 4px; border: 1px solid var(--vscode-panel-border); border-radius: var(--dsh-radius); width: 100%; }
+.turn-result summary { overflow-wrap: anywhere; line-height: 1.45; }
+.turn-result .workflow-body { max-height: none; }
+.workflow-note { margin: 4px 0 8px; color: var(--vscode-descriptionForeground); font-size: var(--dsh-fs-xs); overflow-wrap: anywhere; }
+.error-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }

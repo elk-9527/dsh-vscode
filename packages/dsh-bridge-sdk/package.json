@@ -1,0 +1,41 @@
+{
+  "name": "dsh-ide-bridge-sdk",
+  "version": "0.1.0",
+  "description": "Typed provider registration and contract validation for DSH IDE Bridge v1.",
+  "license": "MIT",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "require": "./lib/index.js",
+      "default": "./lib/index.js"
+    },
+    "./skill-files": {
+      "types": "./lib/skill-files.d.ts",
+      "require": "./lib/skill-files.js",
+      "default": "./lib/skill-files.js"
+    }
+  },
+  "files": [
+    "lib",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/elk-9527/dsh-vscode.git",
+    "directory": "packages/dsh-bridge-sdk"
+  },
+  "scripts": {
+    "test": "node test/contracts.js"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  }
+}

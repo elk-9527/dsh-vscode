@@ -1,0 +1,309 @@
+{
+  "schemaVersion": 1,
+  "status": "passed",
+  "platform": "win32",
+  "editor": "1.91.1",
+  "defaultLaunch": true,
+  "source": {
+    "commit": "e0f4725012f35c2db896872a0e3d17e74ba485eb",
+    "fingerprint": "84eb86728cf3abf56e32c128bd595a018a9a6d30402e6403145e0d3157ffdd04"
+  },
+  "packages": {
+    "panel": "0.17.0",
+    "door": "0.5.2"
+  },
+  "vsixSha256": "04bdaf0645a8451ea7dba8a75d13960a7864254a84e9a42537bde0eabdb805a6",
+  "capabilities": {
+    "nativeChat": true
+  },
+  "checks": [
+    {
+      "name": "extension activation",
+      "status": "passed"
+    },
+    {
+      "name": "isolated observation loaded",
+      "status": "passed"
+    },
+    {
+      "name": "native commands",
+      "status": "passed"
+    },
+    {
+      "name": "runtime providers",
+      "status": "passed"
+    },
+    {
+      "name": "one shared connection",
+      "status": "passed"
+    },
+    {
+      "name": "isolated endpoint home",
+      "status": "passed"
+    },
+    {
+      "name": "native configuration diagnosis",
+      "status": "passed"
+    },
+    {
+      "name": "diagnosis clipboard",
+      "status": "passed"
+    },
+    {
+      "name": "native theme 1",
+      "status": "passed"
+    },
+    {
+      "name": "native theme 2",
+      "status": "passed"
+    },
+    {
+      "name": "native theme 3",
+      "status": "passed"
+    },
+    {
+      "name": "native keyboard navigation commands",
+      "status": "passed"
+    },
+    {
+      "name": "reduced motion setting",
+      "status": "passed"
+    },
+    {
+      "name": "Problems finding",
+      "status": "passed"
+    },
+    {
+      "name": "native full report",
+      "status": "passed"
+    },
+    {
+      "name": "run view",
+      "status": "passed"
+    },
+    {
+      "name": "reference document is unsaved",
+      "status": "passed"
+    },
+    {
+      "name": "native participant registered",
+      "status": "passed"
+    },
+    {
+      "name": "native Chat receives unsaved file reference",
+      "status": "passed"
+    },
+    {
+      "name": "native history pagination",
+      "status": "passed"
+    },
+    {
+      "name": "native history search",
+      "status": "passed"
+    },
+    {
+      "name": "native Markdown export",
+      "status": "passed"
+    },
+    {
+      "name": "finding quick fix action",
+      "status": "passed"
+    },
+    {
+      "name": "fix preview without source mutation",
+      "status": "passed"
+    },
+    {
+      "name": "native diff preview",
+      "status": "passed"
+    },
+    {
+      "name": "approved single fix stays unsaved",
+      "status": "passed"
+    },
+    {
+      "name": "save and review uses new snapshot",
+      "status": "passed"
+    },
+    {
+      "name": "stale diagnostics removed",
+      "status": "passed"
+    },
+    {
+      "name": "explicit retry new identity",
+      "status": "passed"
+    },
+    {
+      "name": "cleanup preserves referenced case and newer findings",
+      "status": "passed"
+    },
+    {
+      "name": "finished cleanup protects open evidence",
+      "status": "passed"
+    },
+    {
+      "name": "window reopen restores review",
+      "status": "passed"
+    },
+    {
+      "name": "native model configuration diagnosis",
+      "status": "passed"
+    },
+    {
+      "name": "native draft persistence",
+      "status": "passed"
+    },
+    {
+      "name": "window reopen restores draft",
+      "status": "passed"
+    },
+    {
+      "name": "native composer workspace file search",
+      "status": "passed"
+    },
+    {
+      "name": "native composer unsaved file snapshot",
+      "status": "passed"
+    },
+    {
+      "name": "native composer selection snapshot",
+      "status": "passed"
+    },
+    {
+      "name": "native composer manual skill attachment",
+      "status": "passed"
+    },
+    {
+      "name": "native composer offline project skill search",
+      "status": "passed"
+    },
+    {
+      "name": "native composer offline project skill body",
+      "status": "passed"
+    },
+    {
+      "name": "native composer Git diff snapshot",
+      "status": "passed"
+    },
+    {
+      "name": "native composer Problems snapshot",
+      "status": "passed"
+    },
+    {
+      "name": "native composer immutable context",
+      "status": "passed"
+    },
+    {
+      "name": "native composer context queue",
+      "status": "passed"
+    },
+    {
+      "name": "native composer context transmission",
+      "status": "passed"
+    },
+    {
+      "name": "native slash commands",
+      "status": "passed"
+    },
+    {
+      "name": "native workflow baseline",
+      "status": "passed"
+    },
+    {
+      "name": "native workflow diff",
+      "status": "passed"
+    },
+    {
+      "name": "native workflow undo",
+      "status": "passed"
+    },
+    {
+      "name": "native workflow undo conflict",
+      "status": "passed"
+    },
+    {
+      "name": "native test task pass",
+      "status": "passed"
+    },
+    {
+      "name": "native test task fail",
+      "status": "passed"
+    },
+    {
+      "name": "native test result attachment",
+      "status": "passed"
+    },
+    {
+      "name": "native test task cancellation",
+      "status": "passed"
+    },
+    {
+      "name": "native session switch blocks undo",
+      "status": "passed"
+    },
+    {
+      "name": "native test blocks history switch",
+      "status": "passed"
+    },
+    {
+      "name": "native test blocks session adoption",
+      "status": "passed"
+    },
+    {
+      "name": "native model picker rechecks running task",
+      "status": "passed"
+    },
+    {
+      "name": "native history clears workflow records",
+      "status": "passed"
+    },
+    {
+      "name": "no editor completion commands",
+      "status": "passed"
+    },
+    {
+      "name": "no editor completion payload",
+      "status": "passed"
+    },
+    {
+      "name": "no code completion capability",
+      "status": "passed"
+    },
+    {
+      "name": "review baseline has no chat turn",
+      "status": "passed"
+    },
+    {
+      "name": "real repair baseline test fails",
+      "status": "passed"
+    },
+    {
+      "name": "independent repair test passes",
+      "status": "passed"
+    },
+    {
+      "name": "repair and re-review share saved case",
+      "status": "passed"
+    },
+    {
+      "name": "native durable case report",
+      "status": "passed"
+    },
+    {
+      "name": "window reopen keeps complete saved report",
+      "status": "passed"
+    },
+    {
+      "name": "offline saved repair and test history",
+      "status": "passed"
+    },
+    {
+      "name": "native file editor opens",
+      "status": "passed"
+    },
+    {
+      "name": "composer captures opened editor",
+      "status": "passed"
+    }
+  ]
+}

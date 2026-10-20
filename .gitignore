@@ -11,6 +11,9 @@ out/
 /.workbuddy/
 /AGENTS.md
 /local-notes/
+/.local/
+/tools/bridge/round2-baseline.cjs
+/tools/bridge/round2-matrix.cjs
 /%SystemDrive%/
 packages/vscode-extension/build*/
 packages/vscode-extension/shots/
@@ -33,3 +36,5 @@ spike/session-survey-report.txt
 /compat/evidence/*log.txt
 /compat/evidence/doctor*
 /compat/evidence/release-check*
+/compat/evidence/**
+!/compat/evidence/public-*.json

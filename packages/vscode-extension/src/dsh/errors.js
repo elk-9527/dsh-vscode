@@ -36,6 +36,12 @@ function resetHint(text) {
  */
 const RULES = [
   {
+    kind: 'reasoning',
+    test: /模型不支持该思考强度|(?:unsupported|invalid|not supported)[^\n]*reasoning|reasoning[^\n]*(?:unsupported|invalid|not supported)/i,
+    title: '当前模型不支持所选思考强度。',
+    advice: () => '在顶部「思考」中选择内核提供的值后重试；若没有可选项，请在 DSH 中调整模型配置或更换模型。',
+  },
+  {
     kind: 'usage-limit',
     test: /GoUsageLimitError|usage limit|rate ?limit|too many requests|\b429\b|quota|insufficient (?:balance|credit|quota)|额度|频率限制|限流|余额不足/i,
     title: '额度或频率已达上限，本回合未完成。',
@@ -46,11 +52,23 @@ const RULES = [
     },
   },
   {
+    kind: 'access-auth',
+    test: /无法确认本机接入点身份|连接身份不可变更|插件操作尚未授权或授权已过期|(?:bridge|接入点|插件)[^\n]*(?:unauthorized|forbidden|authentication|鉴权|身份验证|未授权|授权已过期)|(?:unauthorized|forbidden|authentication)[^\n]*(?:bridge|接入点|插件)/i,
+    title: '连接身份或插件授权未通过验证。',
+    advice: () => '查看日志确认身份与授权来源；任务结束后可重新连接，再检查插件授权。',
+  },
+  {
     kind: 'auth',
-    test: /\b401\b|\b403\b|unauthorized|forbidden|invalid[ _-]?api[ _-]?key|incorrect api key|authentication|鉴权|未授权/i,
-    title: '服务商拒绝请求：密钥无效或权限不足。',
+    test: /invalid[ _-]?api[ _-]?key|incorrect api key|(?:no|missing|requires?)[^\n]*api[ _-]?key|api[ _-]?key[^\n]*(?:invalid|incorrect|missing|not (?:set|configured))|(?:模型服务商|model provider|provider|openai|anthropic|deepseek)[^\n]*(?:\b401\b|\b403\b|unauthorized|forbidden|authentication|鉴权|未授权)/i,
+    title: '模型服务商的凭据或访问权限未通过验证。',
     advice: () =>
-      '确认该服务商的密钥已配置（设置项或对应环境变量）；更换密钥后需重启 DSH。',
+      '在 DSH 核对服务商密钥与权限；扩展模型选择只指定路由，凭据生效方式以 DSH 说明为准。',
+  },
+  {
+    kind: 'auth-unknown',
+    test: /\b401\b|\b403\b|unauthorized|forbidden|authentication|鉴权|未授权/i,
+    title: '请求被拒绝，身份或访问权限需要核对。',
+    advice: () => '无法确定拒绝来源。请展开原文并查看日志，核对模型凭据、连接身份或插件授权。',
   },
   {
     kind: 'port',

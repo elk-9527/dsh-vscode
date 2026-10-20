@@ -48,7 +48,7 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
   <header class="bar">
     <div class="bar-row">
       <span id="status-dot" class="dot" aria-hidden="true"></span>
-      <span id="status-text" class="status">正在连接…</span>
+      <span id="status-text" class="status" role="status" aria-live="polite" aria-atomic="true">正在连接…</span>
       <span class="spacer"></span>
       <span id="bar-cwd" class="bar-meta" hidden></span>
       <span id="bar-clock" class="bar-meta" hidden></span>
@@ -59,11 +59,15 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
     <div class="bar-row" id="config-row" hidden>
       <label class="field" id="model-field">
         <span class="field-label">模型</span>
-        <select id="model-select" class="select"></select>
+        <select id="model-select" class="select" aria-label="模型"></select>
+      </label>
+      <label class="field" id="reasoning-field" hidden>
+        <span class="field-label">思考</span>
+        <select id="reasoning-select" class="select" aria-label="思考强度"></select>
       </label>
       <label class="field" id="preset-field" hidden>
         <span class="field-label">模式</span>
-        <select id="preset-select" class="select" title="换模式需在新建对话时进行（会话进行中无法更换）"></select>
+        <select id="preset-select" class="select" aria-label="模式" title="当前对话的模式；更换后用于新对话"></select>
       </label>
       <div class="field" id="access-field" hidden>
         <span class="field-label">权限</span>
@@ -74,11 +78,34 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
         <span class="meter-text" id="meter-text"></span>
       </div>
     </div>
+    <div id="preset-note" class="context-bar" hidden>
+      <span id="preset-note-text"></span>
+      <button id="preset-new" type="button">用此模式新建对话</button>
+    </div>
   </header>
 
+  <div id="history-context" class="context-bar" role="status" hidden>
+    <span id="history-context-text">正在查看历史，输入已暂停。</span>
+    <button id="history-resume" type="button">继续此对话</button>
+    <button id="history-back" type="button">返回当前对话</button>
+  </div>
+
   <main id="messages" class="messages" tabindex="0" aria-live="polite">
-    <div id="empty"></div>
+    <section id="empty" class="onboarding" aria-label="开始对话">
+      <h1 id="onboarding-stage">连接 DSH</h1>
+      <p id="onboarding-next" class="onboarding-next">连接完成后即可开始。</p>
+    </section>
   </main>
+
+  <details id="workflow" class="workflow" hidden>
+    <summary id="workflow-summary">本轮改动与测试</summary>
+    <div class="workflow-body">
+      <p id="workflow-note" class="hint"></p>
+      <div id="workflow-files" class="workflow-files"></div>
+      <div id="workflow-test" class="workflow-test" role="status" aria-live="polite"></div>
+      <div class="workflow-actions"><button id="workflow-run-test" type="button">运行测试</button><button id="workflow-stop-test" type="button" hidden>停止测试</button><button id="workflow-view-test" type="button" hidden>查看此次结果</button><button id="workflow-attach-test" type="button" hidden>附加测试结果</button><button id="workflow-prepare-test" type="button" hidden>准备修复草稿</button><button id="workflow-log-test" type="button" hidden>补充日志</button><button id="workflow-terminal" type="button" hidden>打开任务终端视图</button></div>
+    </div>
+  </details>
 
   <!-- 历史会话浮层：覆盖整个面板；列表内容由 main.js 填充。
        role/aria-modal：该浮层覆盖其下方的全部内容（不仅是视觉层面），
@@ -92,25 +119,78 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
         <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M3.7 3 3 3.7 7.3 8 3 12.3l.7.7L8 8.7l4.3 4.3.7-.7L8.7 8 13 3.7l-.7-.7L8 7.3Z"/></svg>
       </button>
     </div>
+    <div class="history-filters">
+      <input id="history-search" type="search" placeholder="搜索标题、目录或会话 ID" aria-label="搜索历史会话" maxlength="256">
+      <label><input id="history-project" type="checkbox">仅当前项目</label>
+    </div>
     <div id="history-list" class="history-list"></div>
+    <div class="history-pages">
+      <button id="history-prev" type="button" disabled>上一页</button>
+      <span id="history-page" aria-live="polite"></span>
+      <button id="history-next" type="button" disabled>下一页</button>
+    </div>
   </div>
 
   <footer class="composer">
+    <section id="queue" class="queue" aria-label="待发送消息" hidden>
+      <div class="queue-head"><span id="queue-summary" role="status"></span><button id="queue-continue" type="button" hidden>继续队列</button></div>
+      <div id="queue-list" class="queue-list"></div>
+    </section>
+    <div id="composer-menu" class="composer-menu" hidden>
+      <div id="composer-title" class="composer-title"></div>
+      <div id="composer-options" class="composer-options" role="listbox" aria-label="文件与技能候选"></div>
+      <div id="composer-note" class="composer-note" role="status" aria-live="polite"></div>
+    </div>
     <div class="attachments" id="attachments" hidden></div>
     <div class="composer-box">
-      <textarea id="input" class="input" rows="1" placeholder="向 DSH 发送消息…（Enter 发送，Shift+Enter 换行）"></textarea>
+      <textarea id="input" class="input" rows="1" aria-label="消息输入" aria-autocomplete="list" aria-haspopup="listbox" aria-controls="composer-options" aria-expanded="false" placeholder="描述你要完成的任务…" title="@ 文件 · / 技能 · # 上下文"></textarea>
       <button id="send" class="send" type="button" title="发送" aria-label="发送">
         <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M2.2 7.3 13 2.2c.5-.2 1 .2.8.7l-5.1 10.8c-.2.5-1 .5-1.2 0L6 10.4a.8.8 0 0 0-.4-.4L2.2 8.5c-.5-.2-.5-1 0-1.2Z"/></svg>
       </button>
-      <button id="stop" class="send stop" type="button" title="中断当前回合" aria-label="中断" hidden>
+      <button id="stop" class="send stop" type="button" title="停止当前任务并暂停队列（Esc）" aria-label="停止当前任务" hidden>
         <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.4" fill="currentColor"/></svg>
       </button>
     </div>
     <div class="composer-foot">
-      <span id="hint" class="hint"></span>
+      <span id="hint" class="hint" role="status" aria-live="polite" aria-atomic="true"></span>
+      <button id="recover-draft" type="button" hidden>恢复上次发送</button>
       <span id="usage-inline" class="hint mono"></span>
     </div>
+    <div class="composer-shortcuts" aria-label="添加文件、技能或上下文">
+      <button id="context-open" type="button" title="添加上下文" aria-label="添加上下文" aria-haspopup="dialog" aria-expanded="false">＋ 上下文</button>
+      <button type="button" data-context-add="file" title="添加当前文件">当前文件</button>
+      <button type="button" data-context-add="selection" title="添加当前选区" aria-label="添加当前选区">选区</button>
+      <button type="button" data-composer="/" title="执行命令或选择技能">/ 命令</button>
+    </div>
   </footer>
+
+  <div id="context-panel" class="context-panel" role="dialog" aria-modal="true" aria-label="添加上下文" hidden>
+    <div class="context-head"><strong>添加上下文</strong><button id="context-close" type="button" aria-label="关闭添加上下文">关闭</button></div>
+    <p class="context-help">附加加入时的正文快照，发送前可预览。DSH 也能按任务需要自主读取工作区。</p>
+    <div class="context-actions">
+      <button type="button" data-context-add="file">加入当前全文件</button><button type="button" data-context-add="selection">加入当前选区</button>
+      <button type="button" data-context-source="search" aria-pressed="true">搜索文件</button><button type="button" data-context-source="skill" aria-pressed="false">选择技能</button>
+      <button type="button" data-context-source="diff" aria-pressed="false">Git 变更</button><button type="button" data-context-source="diagnostics" aria-pressed="false">问题诊断</button>
+    </div>
+    <label for="context-search" id="context-search-label">搜索本次对话目录中的文件</label>
+    <input id="context-search" type="search" maxlength="128" aria-controls="context-options" aria-autocomplete="list" placeholder="输入名称或路径">
+    <div id="context-options" class="context-options" role="listbox" aria-label="上下文候选"></div>
+    <p id="context-note" class="context-help" role="status" aria-live="polite"></p>
+  </div>
+  <div id="attachment-preview" class="attachment-preview" role="dialog" aria-modal="true" aria-label="附件正文预览" hidden>
+    <div class="context-head"><strong id="preview-title">附件正文预览</strong><button id="preview-close" type="button">关闭预览</button></div>
+    <dl id="preview-meta" class="preview-meta"></dl>
+    <p id="preview-note" class="context-help"></p>
+    <pre id="preview-body" tabindex="0" aria-label="只读附件快照正文"></pre>
+  </div>
+  <div id="test-log-panel" class="test-log-panel" role="dialog" aria-modal="true" aria-label="补充此次测试日志" hidden>
+    <div class="context-head"><strong>补充此次测试日志</strong><button id="test-log-close" type="button">取消</button></div>
+    <p class="context-help">从任务终端明确复制日志后粘贴。日志标记为用户提供，未自动核实属于此次执行；最多 128 KiB，控制字符会清理。</p>
+    <label for="test-log-body">日志正文</label>
+    <textarea id="test-log-body" maxlength="131072" spellcheck="false"></textarea>
+    <p id="test-log-note" class="context-help" role="status"></p>
+    <div class="context-actions"><button id="test-log-accept" type="button">保存并查看证据</button></div>
+  </div>
 
   <!-- 权限选择器：点击顶栏「权限」按钮后弹出的卡片。
        清单与当前值均由内核提供（dsh-door/permission/*，需要该插件 0.0.12 及以上版本），

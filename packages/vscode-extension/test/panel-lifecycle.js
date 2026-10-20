@@ -5,6 +5,8 @@
 const Module = require('node:module');
 const { EventEmitter } = require('node:events');
 const net = require('node:net');
+const path = require('node:path'), os = require('node:os');
+const { pathToFileURL } = require('node:url');
 
 const config = {
   host: '127.0.0.1',
@@ -110,12 +112,41 @@ function fakeSession(id = 's-1') {
 
 function fakeClient() {
   const client = new EventEmitter();
+  client.isConnected = true;
   client.closeSession = async () => ({});
   client.close = () => client.emit('close', '客户端主动断开');
   return client;
 }
 
 console.log('DSH Panel · 面板生命周期');
+
+section('0. 已打开编辑器时初始化面板');
+{
+  const previousWindow = mockVscode.window, previousTrusted = mockVscode.workspace.isTrusted, previousCwd = config.cwd;
+  const cwd = require('node:path').join(require('node:os').tmpdir(), 'dsh-panel-startup-fixture');
+  config.cwd = cwd;
+  mockVscode.workspace.isTrusted = true;
+  try {
+    for (const scheme of ['file', 'untitled']) {
+      const document = { uri: { scheme, fsPath: require('node:path').join(cwd, 'startup.js') }, version: 1, isClosed: false };
+      mockVscode.window = { activeTextEditor: { document, selection: { isEmpty: true } } };
+      let panel, failure;
+      try { panel = new DshPanelView({ extensionUri: { fsPath: 'D:/extension' }, log: () => {}, kernels: fakeKernels() }); }
+      catch (error) { failure = error; }
+      check(`${scheme} 编辑器已打开时面板初始化成功`, Boolean(panel), failure?.message);
+      if (!panel) continue;
+      try {
+        check(`${scheme} 编辑器上下文保留正确目录`, panel.composer.recentEditor?.document === document && panel.composer.recentEditor.cwd === cwd);
+        const view = fakeView(); panel.resolveWebviewView(view);
+        check(`${scheme} 编辑器已打开时仍渲染输入框`, /id="input"/.test(view.webview.html));
+      } finally { panel.dispose(); }
+    }
+  } finally {
+    if (previousWindow === undefined) delete mockVscode.window; else mockVscode.window = previousWindow;
+    if (previousTrusted === undefined) delete mockVscode.workspace.isTrusted; else mockVscode.workspace.isTrusted = previousTrusted;
+    if (previousCwd === undefined) delete config.cwd; else config.cwd = previousCwd;
+  }
+}
 
 section('1. 视图销毁释放引用；宽限期内重开重新取得引用');
 {
@@ -281,8 +312,8 @@ section('6. 忙碌时不得用历史回放或新会话覆盖当前回答');
   check('忙碌时新建不会清空当前转录', !posted.some((item) => item.type === 'reset'), JSON.stringify(posted));
 }
 
-section('7. 旁路操作失败时保持真实的忙碌状态');
-{
+async function checkSettingBusyState() {
+  section('7. 旁路操作失败时保持真实的忙碌状态');
   const panel = new DshPanelView({ extensionUri: { fsPath: 'D:/extension' }, log: () => {}, kernels: fakeKernels() });
   const session = fakeSession('busy-error');
   const posted = [];
@@ -291,10 +322,9 @@ section('7. 旁路操作失败时保持真实的忙碌状态');
   panel.post = (message) => posted.push(message);
   panel.setModel = () => { throw new Error('切换失败'); };
 
-  void panel.onWebviewMessage({ type: 'setModel', value: 'bad' });
-  const busy = posted.filter((item) => item.type === 'busy').at(-1);
-  check('旁路错误仍会展示为错误卡片', posted.some((item) => item.type === 'error'));
-  check('模型回合仍在执行时停止按钮不会被误关', busy && busy.busy === true, JSON.stringify(posted));
+  await panel.onWebviewMessage({ type: 'setModel', value: 'bad', requestId: 'busy-setting' });
+  check('旁路错误给出明确设置失败回执', posted.some((item) => item.type === 'settingResult' && item.requestId === 'busy-setting' && item.success === false));
+  check('模型回合仍在执行时停止按钮不会被误关', session.busy && !posted.some(item => item.type === 'busy' && !item.busy), JSON.stringify(posted));
 }
 
 section('8. 编辑器附件区分磁盘文件与未保存内容');
@@ -309,7 +339,7 @@ section('8. 编辑器附件区分磁盘文件与未保存内容');
         uri: {
           scheme,
           fsPath: scheme === 'untitled' ? '' : fileName,
-          toString: () => (scheme === 'file' ? `file:///${fileName.replace(/\\/g, '/')}` : `${scheme}:${fileName}`),
+          toString: () => (scheme === 'file' ? pathToFileURL(fileName).href : `${scheme}:${fileName}`),
         },
         getText: (selection) => (selection ? selected : content),
       },
@@ -319,28 +349,30 @@ section('8. 编辑器附件区分磁盘文件与未保存内容');
     };
   }
 
+  const workspace = path.join(os.tmpdir(), 'dsh-panel-lifecycle-workspace');
+  const outsideFile = path.join(workspace + '-other', 'app.js');
   const clean = DshPanelView.attachmentFromEditor(
-    editor({ fileName: 'D:\\workspace\\src\\app.js' }),
-    'D:\\workspace',
+    editor({ fileName: path.join(workspace, 'src', 'app.js') }),
+    workspace,
   );
-  check('已保存文件仍使用按需读取链接', clean.kind === 'file' && clean.uri.startsWith('file:///'), JSON.stringify(clean));
+  check('已保存文件在加入时就携带全文快照', clean.kind === 'content' && typeof clean.text === 'string' && clean.scope === 'file', JSON.stringify(clean));
   check('工作区内文件显示相对路径', clean.name === 'src/app.js', clean.name);
 
   const dotted = DshPanelView.attachmentFromEditor(
-    editor({ fileName: 'D:\\workspace\\..cache\\app.js' }),
-    'D:\\workspace',
+    editor({ fileName: path.join(workspace, '..cache', 'app.js') }),
+    workspace,
   );
   check('以两个点开头的子目录不会被误判为工作区外', dotted.name === '..cache/app.js', dotted.name);
 
   const outside = DshPanelView.attachmentFromEditor(
-    editor({ fileName: 'D:\\workspace-other\\app.js' }),
-    'D:\\workspace',
+    editor({ fileName: outsideFile }),
+    workspace,
   );
-  check('相邻目录不会被误判为工作区内', outside.name === 'D:\\workspace-other\\app.js', outside.name);
+  check('相邻目录不会被误判为工作区内', outside.name === outsideFile, outside.name);
 
   const dirty = DshPanelView.attachmentFromEditor(
-    editor({ fileName: 'D:\\workspace\\src\\dirty.js', dirty: true, content: 'const unsaved = 42;' }),
-    'D:\\workspace',
+    editor({ fileName: path.join(workspace, 'src', 'dirty.js'), dirty: true, content: 'const unsaved = 42;' }),
+    workspace,
   );
   check('有未保存修改时改带编辑器快照', dirty.kind === 'content' && dirty.text === 'const unsaved = 42;', JSON.stringify(dirty));
   check('有未保存修改时不附带可能过期的磁盘链接', dirty.uri === undefined, JSON.stringify(dirty));
@@ -348,18 +380,27 @@ section('8. 编辑器附件区分磁盘文件与未保存内容');
 
   const untitled = DshPanelView.attachmentFromEditor(
     editor({ fileName: 'Untitled-1', scheme: 'untitled', dirty: true, untitled: true, content: '临时内容' }),
-    'D:\\workspace',
+    workspace,
   );
   check('未保存的新文件直接带正文', untitled.kind === 'content' && untitled.text === '临时内容', JSON.stringify(untitled));
   check('未保存的新文件不伪造可读取链接', untitled.uri === undefined && untitled.detail === '未保存文件', JSON.stringify(untitled));
 
   const dirtySelection = DshPanelView.attachmentFromEditor(
-    editor({ fileName: 'D:\\workspace\\src\\dirty.js', dirty: true, selected: 'unsaved();' }),
-    'D:\\workspace',
+    editor({ fileName: path.join(workspace, 'src', 'dirty.js'), dirty: true, selected: 'unsaved();' }),
+    workspace,
+    'selection',
   );
   check('脏文件选区正文照常携带且不附旧磁盘链接',
     dirtySelection.kind === 'selection' && dirtySelection.text === 'unsaved();' && dirtySelection.uri === undefined,
     JSON.stringify(dirtySelection));
+  const wholeWithSelection = DshPanelView.attachmentFromEditor(editor({ fileName: path.join(workspace, 'src', 'app.js'), selected: 'selectionOnly();', content: 'wholeFile();' }), workspace, 'file');
+  check('全文件命令存在选区时仍加入全文', wholeWithSelection.text === 'wholeFile();' && wholeWithSelection.scope === 'file');
+  const blankSelection = editor({ fileName: path.join(workspace, 'src', 'blank.js'), selected: '   ' });
+  blankSelection.selection.end = { line: 3, character: 0 };
+  blankSelection.selection.start = { line: 2, character: 0 };
+  const exact = DshPanelView.attachmentFromEditor(blankSelection, workspace, 'selection');
+  check('空白选区不替换为全文；尾端零列不多报一行', exact.kind === 'selection' && exact.text === '   ' && exact.startLine === 3 && exact.endLine === 3);
+  check('快照包含保存状态、时间和 UTF-8 大小', dirty.isDirty && !dirty.isUntitled && Number.isFinite(Date.parse(dirty.snapshotAt)) && dirty.byteLength === Buffer.byteLength(dirty.text));
 }
 
 /** ACP 已握手但 session/new 失败：不得把未初始化会话留给下一次发送。 */
@@ -419,12 +460,12 @@ async function checkFailedSessionStart() {
   config.autoStart = false;
   try {
     const panel = new DshPanelView({ extensionUri: { fsPath: 'D:/extension' }, log: () => {}, kernels: fakeKernels() });
-    panel.post = () => {};
+    const setupErrors = []; panel.post = message => { if (message.type === 'error') setupErrors.push(message.message); };
     const first = await panel.ensureConnection();
     check('建会话失败会向调用方返回未连接', first === undefined);
     check('失败后不保留未初始化的会话和客户端', panel.session === undefined && panel.client === undefined);
     await panel.ensureConnection();
-    check('下一次操作会重新建连并再次尝试 session/new', newAttempts === 2, String(newAttempts));
+    check('下一次操作会重新建连并再次尝试 session/new', newAttempts === 2, JSON.stringify({ newAttempts, setupErrors, port, configuredPort: panel.config().port, listening: server.listening }));
     panel.teardown();
 
     const disconnected = new DshPanelView({ extensionUri: { fsPath: 'D:/extension' }, log: () => {}, kernels: fakeKernels() });
@@ -545,6 +586,7 @@ async function checkConcurrentNewSession() {
   sendSession.send = async () => { sent = true; };
   sendPanel.session = sendSession;
   sendPanel.client = sendClient;
+  sendPanel.connections.client = sendClient;
   sendPanel.post = () => {};
   const changing = sendPanel.newSession();
   await Promise.resolve();
@@ -555,6 +597,26 @@ async function checkConcurrentNewSession() {
   releaseStart();
   await Promise.all([changing, sending]);
   check('新会话建好后等待中的消息正常发出', startFinished && sent);
+
+  const historyPanel = new DshPanelView({ extensionUri: { fsPath: 'D:/extension' }, log: () => {}, kernels: fakeKernels() });
+  const historySession = fakeSession('before-history'), historyClient = fakeClient();
+  historySession.client = historyClient; historySession.busy = false;
+  historyPanel.session = historySession; historyPanel.client = historyClient; historyPanel.connections.client = historyClient;
+  historyPanel.post = () => {}; historyPanel.sendHistoryReplay = async () => {};
+  let finishResume, sentTo;
+  historySession.resume = async id => { await new Promise(resolve => { finishResume = resolve; }); historySession.sessionId = id; };
+  historySession.send = async () => { sentTo = historySession.sessionId; };
+  const restoring = historyPanel.resumeHistory('history');
+  check('重复恢复同一历史共用一次切换', restoring === historyPanel.resumeHistory('history'));
+  await Promise.resolve(); const historySend = historyPanel.send('after restore'); await Promise.resolve();
+  check('历史恢复尚未结束时不会发送到旧会话', sentTo === undefined);
+  finishResume(); await Promise.all([restoring, historySend]);
+  check('恢复结束后发送到指定历史会话', sentTo === 'history');
+  historyPanel.connections.turns.set('history', Promise.resolve());
+  let replayed = false; historyPanel.sendHistoryReplay = async () => { replayed = true; };
+  await historyPanel.resumeHistory('other');
+  check('已有排队回合时不会覆盖对话', replayed === false);
+  historyPanel.connections.turns.clear();
 
   const presetPanel = new DshPanelView({ extensionUri: { fsPath: 'D:/extension' }, log: () => {}, kernels: fakeKernels() });
   const presetSession = fakeSession('preset-old');
@@ -589,9 +651,81 @@ function finish() {
 }
 
 async function runAsyncChecks() {
+  await checkSettingBusyState();
   await checkFailedSessionStart();
   await checkExplicitNewSessionFailure();
   await checkConcurrentNewSession();
+  await checkWorkflowSessionChanges();
+  const panel = new DshPanelView({ extensionUri: { fsPath: 'D:/extension' }, log: () => {}, kernels: fakeKernels() }), sent = [], stored = new Map();
+  panel.post = message => sent.push(message); panel.ensureConnection = async () => null;
+  await panel.onWebviewMessage({ type: 'send', text: 'unsent', requestId: 'failed-connect' });
+  check('连接失败明确保留发送草稿', sent.some(message => message.type === 'sendResult' && message.requestId === 'failed-connect' && !message.success));
+  panel.workspaceState = { get: key => stored.get(key), update: async (key, value) => stored.set(key, value) };
+  const cwd = panel.workdir();
+  await panel.onWebviewMessage({ type: 'draft', draft: { version: 1, cwd, savedAt: Date.now(), text: 'restore me', attachments: [] } }); await panel.draftWrites;
+  await panel.onWebviewMessage({ type: 'ready' });
+  check('重新加载从工作区状态恢复草稿', sent.some(message => message.type === 'draftRestore' && message.draft?.text === 'restore me'));
+}
+
+async function checkWorkflowSessionChanges() {
+  section('12. 改动和测试记录只属于当前会话；切换期间不能启动文件操作');
+  const panel = new DshPanelView({ extensionUri: { fsPath: 'D:/extension' }, log: () => {}, kernels: fakeKernels() });
+  const session = fakeSession('workflow-old'), client = fakeClient(), posted = [];
+  session.busy = false; session.client = client; session.messages = new Map();
+  session.configOptions = [{ id: 'model', options: [{ value: 'next-model', name: 'Next model' }] }];
+  panel.session = session; panel.client = client; panel.connections.client = client;
+  panel.post = message => posted.push(message);
+  let replayed = 0, resumed = 0, resets = 0, modelChanges = 0;
+  panel.sendHistoryReplay = async () => { replayed++; };
+  session.resume = async id => { resumed++; session.sessionId = id; };
+  session.setModel = async () => { modelChanges++; };
+  panel.workflow = { reset() { resets++; }, publish() {}, activeTest: true };
+  await panel.resumeHistory('other-history');
+  check('测试运行中恢复历史不替换转录或会话', replayed === 0 && resumed === 0 && resets === 0);
+  panel.workflow.activeTest = false; panel.workflow.undoing = true;
+  await panel.resumeHistory('other-history');
+  check('撤销确认期间恢复历史不替换转录或会话', replayed === 0 && resumed === 0 && resets === 0);
+  panel.workflow.undoing = false; panel.workflow.recording = true;
+  await panel.resumeHistory('other-history');
+  check('快照整理期间恢复历史不替换转录或会话', replayed === 0 && resumed === 0 && resets === 0);
+  panel.workflow.recording = false;
+  await panel.resumeHistory('other-history');
+  check('恢复历史清除上一会话的改动和测试记录', replayed === 1 && resumed === 1 && resets === 1);
+
+  const previousTrusted = mockVscode.workspace.isTrusted, previousFolder = mockVscode.workspace.getWorkspaceFolder;
+  mockVscode.workspace.isTrusted = true; mockVscode.Uri.file = fsPath => ({ fsPath });
+  mockVscode.workspace.getWorkspaceFolder = () => ({ uri: { fsPath: 'D:/project' } });
+  mockVscode.window = { showQuickPick: async () => { session.busy = true; return { value: 'next-model' }; } };
+  try {
+    panel.workflow.activeTest = true;
+    const beforeResets = resets, beforeCwd = panel.sessionCwd;
+    let refused = false;
+    try { await panel.adoptSession(session, { cwd: 'D:/project' }); } catch { refused = true; }
+    check('测试运行中不能接入其他会话', refused && resets === beforeResets && panel.sessionCwd === beforeCwd);
+    panel.workflow.activeTest = false;
+    panel.connections.turns.set(session.sessionId, Promise.resolve());
+    refused = false;
+    try { await panel.adoptSession(session, { cwd: 'D:/project' }); } catch { refused = true; }
+    check('会话已有排队回合时不能接入或替换面板', refused && resets === beforeResets);
+    panel.connections.turns.clear();
+    refused = false;
+    try { await panel.executeComposerCommand('command:model'); } catch { refused = true; }
+    check('模型选择框等待期间开始回合不会中途切换模型', refused && modelChanges === 0);
+    session.busy = false;
+    mockVscode.window.showQuickPick = async () => { session.sessionId = 'changed-during-picker'; return { value: 'next-model' }; };
+    refused = false;
+    try { await panel.executeComposerCommand('command:model'); } catch { refused = true; }
+    check('模型选择框等待期间切换会话不会应用旧选择', refused && modelChanges === 0);
+    let finishReplay;
+    panel.sendHistoryReplay = async () => new Promise(resolve => { finishReplay = resolve; });
+    const adopting = panel.adoptSession(session, { cwd: 'D:/project' });
+    check('接入会话期间保留切换锁直到回放结束', Boolean(panel.newSessionPending));
+    finishReplay(); await adopting;
+    check('接入会话完成后释放切换锁', panel.newSessionPending === null);
+  } finally {
+    mockVscode.workspace.isTrusted = previousTrusted; mockVscode.workspace.getWorkspaceFolder = previousFolder;
+    delete mockVscode.Uri.file; delete mockVscode.window;
+  }
 }
 
 runAsyncChecks().then(finish, (error) => {

@@ -1,6 +1,11 @@
 packages:
   - packages/*
 
+# Pin the MCP client security fix without changing the supported DSH releases.
+# GHSA-6qxp-vccf-f47h affects the 2.0.0 client in the DSH development dependency.
+overrides:
+  '@deepseek-ai/dsh-mcp-client>@modelcontextprotocol/client': 2.2.0
+
 # DSH 0.2 compatibility intentionally tracks the official prerelease packages.
 # Keep pnpm's release-age protection for every other dependency.
 minimumReleaseAgeExclude:
