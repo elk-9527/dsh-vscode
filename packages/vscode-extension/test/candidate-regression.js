@@ -54,10 +54,14 @@ try {
   assert.equal(isolated.DSH_HOME, targetHome);
   for (const value of Object.values(isolated)) assert(value.startsWith(targetHome + path.sep) || value === targetHome);
   assert.throws(() => dedicatedHome(path.join(root, '.local', 'not-a-test-home')), /build/);
-  const outside = path.join(directory, 'external'); fs.mkdirSync(outside);
-  const link = path.join(directory, 'linked'); fs.symlinkSync(path.join(root, '.local'), link, process.platform === 'win32' ? 'junction' : 'dir');
-  assert.throws(() => dedicatedHome(path.join(link, 'must-not-create')), /链接/);
-  assert(!fs.existsSync(path.join(root, '.local', 'must-not-create')));
+  const link = path.join(directory, 'linked'), escaped = path.basename(directory) + '-must-not-create';
+  fs.symlinkSync(root, link, process.platform === 'win32' ? 'junction' : 'dir');
+  assert.throws(() => dedicatedHome(path.join(link, escaped)), /链接/);
+  assert(!fs.existsSync(path.join(root, escaped)));
+  const dangling = path.join(directory, 'dangling'), absent = path.join(directory, 'absent');
+  fs.symlinkSync(absent, dangling, process.platform === 'win32' ? 'junction' : 'dir');
+  assert.throws(() => dedicatedHome(path.join(dangling, 'must-not-create')), /失效链接/);
+  assert(!fs.existsSync(absent));
   const tgz = packages.packDoor(directory);
   const vsix = require('../tools/build-vsix.js').buildVsix(['--out', path.join(directory, 'candidate.vsix')]);
   const candidates = {tgz:packages.verifyCandidate(tgz, 'tgz'), vsix:packages.verifyCandidate(vsix, 'vsix')};

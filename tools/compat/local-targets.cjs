@@ -10,8 +10,13 @@ function dedicatedHome(value) {
   assert.equal(typeof value, 'string', '隔离验收需要明确的 DSH_HOME');
   const home = path.resolve(value), build = fs.realpathSync(path.join(ROOT, 'build'));
   assert(inside(home, build) && home !== build, '隔离验收 DSH_HOME 必须位于本项目 build 子目录');
-  const resolve = file => fs.existsSync(file) ? fs.realpathSync(file) : path.join(resolve(path.dirname(file)), path.basename(file));
-  assert(inside(resolve(home), build) && resolve(home) !== build, '隔离验收 DSH_HOME 不能通过链接指向其他位置');
+  const resolve = file => {
+    if (fs.existsSync(file)) return fs.realpathSync(file);
+    assert(!fs.lstatSync(file, {throwIfNoEntry: false})?.isSymbolicLink(), '隔离验收 DSH_HOME 不能经过失效链接');
+    return path.join(resolve(path.dirname(file)), path.basename(file));
+  };
+  const resolved = resolve(home);
+  assert(inside(resolved, build) && resolved !== build, '隔离验收 DSH_HOME 不能通过链接指向其他位置');
   fs.mkdirSync(home, {recursive: true});
   const actual = fs.realpathSync(home);
   assert(inside(actual, build) && actual !== build, '隔离验收 DSH_HOME 不能通过链接指向其他位置');

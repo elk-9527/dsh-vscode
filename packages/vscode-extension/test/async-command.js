@@ -74,27 +74,31 @@ function windowsProcessIdentity(pid) {
 async function realExitedLaunchers(script, unrelated) {
   if (process.platform !== 'win32') return;
   for (const mode of ['timeout', 'cancel']) {
-    let launcher, orphanPid, identity, launches = 0;
+    let launcher, orphanPid, identity, deadline, launches = 0;
     const abort = new AbortController();
-    const runner = loadProcessRunner({ spawn(...args) { launches++; const child = spawn(...args); launcher ||= child; return child; } });
+    const runner = loadProcessRunner({ spawn(...args) { launches++; const child = spawn(...args); launcher ||= child; return child; },
+      // Exercise the real inherited pipes after an explicit exit barrier. Slow
+      // Windows process identity queries must not race the command deadline.
+      schedule(callback, delay) { if (delay === 2000) { deadline = callback; return undefined; } return setTimeout(callback, delay); } });
     let ready;
     const readyPromise = new Promise(resolve => { ready = resolve; });
     const running = runner.runCommand({ file: process.execPath, args: [script, 'orphan'], signal: abort.signal,
-      timeoutMs: mode === 'timeout' ? 2000 : 10000, onOutput: ({ text }) => {
+      timeoutMs: mode === 'timeout' ? 2000 : 0, onOutput: ({ text }) => {
         if (text.startsWith('orphan=')) { orphanPid = Number(text.slice(7)); ready(); }
       } });
     const outcome = running.then(() => ({ error: undefined }), error => ({ error }));
     const exited = once(launcher, 'exit');
     try {
       await within(readyPromise, 5000, 'Descendant fixture did not become ready');
+      assert.deepEqual(await within(exited, 5000, 'Launcher did not exit'), [0, null], 'Launcher exits before the inherited-pipe deadline');
       identity = windowsProcessIdentity(orphanPid);
       assert(identity && identity.path.toLowerCase() === process.execPath.toLowerCase()
         && identity.commandLine.includes(script) && identity.commandLine.includes('orphan-child'));
-      assert.deepEqual(await exited, [0, null], 'Launcher exits before the inherited-pipe deadline');
       await wait(20);
       assert(!launcher.stdout.destroyed && !launcher.stderr.destroyed, 'The detached descendant retains the inherited pipes');
       const stoppedAt = Date.now();
       if (mode === 'cancel') abort.abort();
+      else { assert.equal(typeof deadline, 'function'); deadline(); }
       const result = await within(outcome, 4000, 'Exited launcher exceeded its stop bound');
       assert.equal(result.error?.code, mode === 'timeout' ? 'ETIMEDOUT' : 'ECANCELLED');
       if (mode === 'cancel') assert(Date.now() - stoppedAt < 1000, 'Cancellation does not wait for descendant exit');
@@ -141,7 +145,7 @@ async function realExitedLaunchers(script, unrelated) {
       require('node:child_process').spawn(process.execPath, [__filename, 'orphan-child'], { detached: true, windowsHide: true, stdio: ['ignore', process.stdout, process.stderr] });
       setTimeout(() => process.exit(0), 100);
     }
-    else if (mode === 'orphan-child') { process.stdout.write('orphan=' + process.pid + '\\n'); setTimeout(() => process.exit(0), 10000); }
+    else if (mode === 'orphan-child') { process.stdout.write('orphan=' + process.pid + '\\n'); setTimeout(() => process.exit(0), 30000); }
     else if (mode === 'tree') {
       const child = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
       process.stdout.write('child=' + child.pid + '\\n'); setInterval(() => {}, 1000);
