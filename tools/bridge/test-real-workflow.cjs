@@ -110,13 +110,15 @@ async function runRealWorkflow({ cwd, folder, client, bridge, session, operation
   const fixes = new ReviewFixes({ vscode, context, views });
   const verifier = new ReviewTests({ vscode, views, workflow });
   let repairPermission, repairTools = 0;
-  fixes.api = { ...api.exports, prompt: async (handle, prompt, options) => {
+  fixes.api = { ...api.exports, generateText: async (handle, prompt, options) => {
     repairPermission = await client.permissionGet(handle.sessionId);
     assert.equal(repairPermission.currentValue, 'read-only');
-    return api.exports.prompt(handle, prompt, { ...options, signal: AbortSignal.any([options.signal, AbortSignal.timeout(120000)]), onEvent: event => {
-      if (event.type === 'tool') repairTools += 1;
-      options.onEvent(event);
-    } });
+    const receive = (method, params) => { if (method === 'session/update' && params?.sessionId === handle.sessionId && /tool_call/.test(params.update?.sessionUpdate || '')) repairTools++; };
+    client.on('notification', receive);
+    try {
+      const result = await api.exports.generateText(handle, prompt, { ...options, signal: AbortSignal.any([options.signal, AbortSignal.timeout(120000)]) });
+      assert.equal(result.path, 'llm-direct-v1'); assert.equal(result.tools, false); return result;
+    } finally { client.off('notification', receive); }
   } };
   try {
     await saveReport(op);
@@ -128,7 +130,7 @@ async function runRealWorkflow({ cwd, folder, client, bridge, session, operation
     assert(plan?.edits.length); assert.equal(repairTools, 0); assert.equal(document.isDirty, false);
     assert.equal((await repositorySnapshot(cwd)).fingerprint, fingerprint); assert.equal(text, fs.readFileSync(file, 'utf8'));
     fs.writeFileSync(path.join(folder, 'repair-suggestion.json'), JSON.stringify(safeObject(plan.edits), null, 2) + '\n');
-    check('real-model-read-only-repair-suggestion', { permission: repairPermission.currentValue, edits: plan.edits.length, toolEvents: repairTools, workspaceUnchanged: true });
+    check('real-model-read-only-repair-suggestion', { permission: repairPermission.currentValue, generationPath: 'llm-direct-v1', toolsEnabled: false, edits: plan.edits.length, toolEvents: repairTools, workspaceUnchanged: true });
     allowSelection = true;
     for (let index = 0; index < plan.edits.length; index++) await fixes.apply(planId);
     assert(diffShown && plan.edits.every(edit => edit.applied)); assert.equal(document.isDirty, true);

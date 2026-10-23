@@ -8,6 +8,27 @@ const LOCAL = ['desktop-attach', 'desktop-closed-self-start', 'configuration-inh
 const FINGERPRINTS = ['fingerprint', 'toolFingerprint', 'lockFingerprint'];
 const RELEASE_CHECKS = ['candidates', 'kernel-matrix', 'editors', 'local', 'quick-ui', 'contracts', 'strict-regression', 'real-workflow'];
 const STRICT_COMMAND = 'node test/run-all.js --all --strict';
+const PREFLIGHT_COMMANDS = { 'quick-ui': ['packages/vscode-extension/test/run-all.js', '--ui', '--strict'], contracts: ['tools/compat/contracts.cjs'] };
+function preflightSummary(name, stdout) {
+  return name === 'quick-ui' ? strictSummary(stdout) : { complete: String(stdout).trimEnd().split(/\r?\n/).at(-1) === 'PASS 兼容声明、预发布范围、脱敏、报告漂移、必测跳过与矩阵契约' };
+}
+function validatePreflight(name, report, reference, digests, summary, current, state, platform) {
+  const issues = [...validateIdentity(report, current, state, platform), ...required(report?.checks, [name], '预检')];
+  if (!reference?.file || !digest(reference.sha256) || digests?.[reference.file] !== reference.sha256) issues.push('预检原始报告缺失或摘要不同');
+  if (report?.status !== 'passed' || report?.evidenceVersion !== 1) issues.push('预检报告未通过或缺少当前原始证据格式');
+  const checks = Array.isArray(report?.checks) ? report.checks : [];
+  if (checks.length !== 1) issues.push('预检存在额外、重复或跳过检查');
+  const check = checks[0];
+  if (JSON.stringify(check?.command) !== JSON.stringify(PREFLIGHT_COMMANDS[name]) || check?.exitCode !== 0 || check?.stable !== true || check?.error) issues.push('预检命令、退出码或输入稳定性无效');
+  const logs = Array.isArray(check?.logs) ? check.logs : [];
+  if (logs.length !== 2) issues.push('预检必须保留 stdout 与 stderr');
+  for (const stream of ['stdout', 'stderr']) {
+    const matches = logs.filter(item => item?.stream === stream);
+    if (matches.length !== 1 || !matches[0].file || !digest(matches[0].sha256) || digests?.[matches[0].file] !== matches[0].sha256) issues.push(`预检 ${stream} 日志缺失、重复或摘要不同`);
+  }
+  if (!summary?.complete || JSON.stringify(check?.summary) !== JSON.stringify(summary)) issues.push('预检总运行器实际汇总无效');
+  return issues;
+}
 const REAL_WORKFLOW = ['real-runtime-catalog', 'real-session-start', 'real-permission-catalog', 'real-permission-selection',
   'real-model-native-review', 'review-keeps-workspace', 'real-independent-regression-before-fix', 'real-model-read-only-repair-suggestion',
   'real-repair-editor-application', 'real-independent-regression-after-fix', 'real-model-re-review', 'real-workflow-durable-offline-read',
@@ -96,7 +117,7 @@ function validateRealWorkflow(report, reference, digests, current, state, platfo
   const before = evidence('real-independent-regression-before-fix'), after = evidence('real-independent-regression-after-fix');
   expect('real-independent-regression-before-fix', before.exitCode === 1 && typeof before.executionId === 'string' && before.executionId.length && before.cwd === 'generated-fixture' && before.interface === 'mock-vscode-task-adapter');
   const repair = evidence('real-model-read-only-repair-suggestion');
-  expect('real-model-read-only-repair-suggestion', repair.permission === 'read-only' && Number.isSafeInteger(repair.edits) && repair.edits > 0 && repair.toolEvents === 0 && repair.workspaceUnchanged === true);
+  expect('real-model-read-only-repair-suggestion', repair.permission === 'read-only' && repair.generationPath === 'llm-direct-v1' && repair.toolsEnabled === false && Number.isSafeInteger(repair.edits) && repair.edits > 0 && repair.toolEvents === 0 && repair.workspaceUnchanged === true);
   const applied = evidence('real-repair-editor-application'); expect('real-repair-editor-application', applied.interface === 'mock-vscode-editor-adapter' && applied.previewed === true && applied.saved === false && applied.diskUnchanged === true);
   expect('real-independent-regression-after-fix', after.exitCode === 0 && typeof after.executionId === 'string' && after.executionId.length && after.executionId !== before.executionId && after.separateFromChat === true && after.distinctExecution === true);
   const again = evidence('real-model-re-review'); expect('real-model-re-review', again.findings === 0 && again.sameCase === true && again.distinctOperation === true && again.workspaceUnchanged === true);
@@ -156,7 +177,7 @@ function validateReleaseApproval(report, { kind, sha256: archive, current, state
   if (artifacts.length !== 1 || !digest(archive) || artifacts[0]?.sha256 !== archive) issues.push(`待发布 ${kind} 与已验收文件摘要不一致`);
   if (!report?.validation) issues.push('缺少可重新验证的原始验收输入');
   else {
-    const fresh = evaluateRelease({ ...report.validation, ...requirements, current, state, platform });
+    const fresh = evaluateRelease({ ...report.validation, ...requirements, current, state, platform, inputIssues: [...(report.validation.inputIssues || []), ...(requirements?.inputIssues || []), ...(requirements?.preflightInputIssues || []), ...(requirements?.reportInputIssues || [])] });
     if (!fresh.releaseReady) issues.push(...fresh.issues.map(issue => `重新验证：${issue}`));
     if (JSON.stringify(report.artifacts) !== JSON.stringify(fresh.artifacts)) issues.push('发布摘要与重新验证的候选清单不同');
   }
@@ -169,12 +190,16 @@ function readReleaseApproval(candidateFile, reportFile, kind) {
   const requirements = releaseRequirements(matrix, editors);
   requirements.artifacts = (report.validation?.artifacts || []).map(item => ({ ...item, sha256: typeof item.file === 'string' && fs.existsSync(path.resolve(ROOT, item.file)) ? sha256(path.resolve(ROOT, item.file)) : undefined }));
   requirements.localLogDigests = localLogs(report.validation?.localReport);
-  Object.assign(requirements, readWorkflowInputs(report.validation || {}));
+  Object.assign(requirements, readWorkflowInputs(report.validation || {}), readPreflightInputs(report.validation || {}), readReportInputs(report.validation || {}, { current: versions(), state: sourceState(), platform: process.platform }));
   const issues = validateReleaseApproval(report, { kind, sha256: sha256(path.resolve(candidateFile)), current: versions(), state: sourceState(), platform: process.platform, requirements });
   if (issues.length) throw new Error(`发布被阻止：${issues.join('；')}`);
   return report;
 }
-function evaluateRelease({ current, state, platform, kernelReports, combinations, editorReports, minimum, chatBaseline = '1.91.1', editorVersions = [], localReport, localLogDigests = {}, artifacts = [], candidateManifest, preflight,
+function validateReportReferences(references, count, digests, label) {
+  const list = Array.isArray(references) ? references : references ? [references] : [];
+  return list.length !== count || new Set(list.map(item => item?.file)).size !== list.length || list.some(item => !item?.file || !digest(item.sha256) || digests?.[item.file] !== item.sha256) ? [`${label}原始报告引用缺失、重复或摘要不同`] : [];
+}
+function evaluateRelease({ current, state, platform, kernelReports, combinations, editorReports, minimum, chatBaseline = '1.91.1', editorVersions = [], localReport, localLogDigests = {}, artifacts = [], candidateManifest, preflight, preflightEvidence, preflightDigests = {}, preflightSummaries = {}, reportEvidence = {}, reportDigests = {},
   strictRegression, realWorkflow, workflowEvidence = {}, workflowDigests = {}, strictLogSummary, inputIssues = [] }) {
   const issues = [], checks = [];
   const reasons = report => !report ? ['missing'] : [
@@ -183,7 +208,7 @@ function evaluateRelease({ current, state, platform, kernelReports, combinations
   const stage = (name, errors, causes = []) => { checks.push({ name, status: errors.length ? 'failed' : 'passed', ...(errors.length ? { reasons: [...new Set(causes.length ? causes : ['invalid'])] } : {}) }); issues.push(...errors); };
   const artifact = kind => artifacts.find(item => item.kind === kind)?.sha256;
   const candidateIssues = candidateManifest ? validateIdentity({ ...candidateManifest, source: candidateManifest.sourceEnd }, current, state, platform) : ['候选清单缺失'];
-  candidateIssues.push(...inputIssues);
+  candidateIssues.push(...inputIssues, ...validateReportReferences(reportEvidence.candidateManifest, 1, reportDigests, '候选清单'));
   for (const kind of ['tgz', 'vsix', 'sdk']) {
     if (artifacts.filter(item => item.kind === kind).length !== 1 || !digest(artifact(kind))) candidateIssues.push(`候选 ${kind} 缺失、重复或摘要无效`);
     const matches = (Array.isArray(candidateManifest?.artifacts) ? candidateManifest.artifacts : []).filter(item => item?.kind === kind);
@@ -198,6 +223,7 @@ function evaluateRelease({ current, state, platform, kernelReports, combinations
     if (matches.length !== 1) { kernelIssues.push(`${entry.dsh}/${entry.distribution}/${targetPlatform} 当前证据${matches.length ? '重复' : '缺失'}`); kernelReasons.push(matches.length ? 'invalid' : 'missing'); }
     else { kernelIssues.push(...validateReport(matches[0], current, state, { platform: targetPlatform, dsh: entry.dsh, distribution: entry.distribution, tgzSha256: artifact('tgz') })); kernelReasons.push(...reasons(matches[0])); }
   }
+  kernelIssues.push(...validateReportReferences(reportEvidence.kernelReports, (kernelReports || []).length, reportDigests, '内核'));
   stage('kernel-matrix', kernelIssues, kernelReasons);
   const editorIssues = [];
   if (!(editorReports || []).some(report => report.editor === minimum)) editorIssues.push('最低编辑器缺少当前证据');
@@ -206,6 +232,7 @@ function evaluateRelease({ current, state, platform, kernelReports, combinations
   for (const editor of editorVersions) if ((editorReports || []).filter(report => report.editor === editor).length !== 1) editorIssues.push(`${editor} 编辑器证据缺失或重复`);
   if (new Set((editorReports || []).map(report => report.editor)).size !== (editorReports || []).length) editorIssues.push('编辑器版本证据重复');
   for (const report of editorReports || []) editorIssues.push(...validateEditorEvidence(report, artifact('vsix'), current, state, platform));
+  editorIssues.push(...validateReportReferences(reportEvidence.editorReports, (editorReports || []).length, reportDigests, '编辑器'));
   const editorMissing = new Set((editorReports || []).map(report => report.editor)).size < 3 || [minimum, chatBaseline, ...editorVersions].some(editor => !(editorReports || []).some(report => report.editor === editor));
   stage('editors', editorIssues, [...(editorMissing ? ['missing'] : []), ...(editorReports || []).flatMap(reasons)]);
   const localIssues = localReport ? validateIdentity(localReport, current, state, platform) : ['本机报告缺失'];
@@ -221,14 +248,15 @@ function evaluateRelease({ current, state, platform, kernelReports, combinations
     if (!Array.isArray(editorPaths) || editorPaths.length !== 2 || !['attach', 'self'].every(mode => editorPaths.filter(item => item?.mode === mode && item.exitCode === 0 && item.vsixSha256 === artifact('vsix')).length === 1)) localIssues.push('本机 VSIX 缺少同一候选的双路径编辑器验收');
     for (const item of Array.isArray(editorPaths) ? editorPaths : []) if (!item?.log || !digest(item.logSha256) || localLogDigests[item.log] !== item.logSha256) localIssues.push('本机编辑器验收日志缺失或摘要不同');
   }
+  localIssues.push(...validateReportReferences(reportEvidence.localReport, 1, reportDigests, '本机'));
   stage('local', localIssues, reasons(localReport));
   for (const name of ['quick-ui', 'contracts']) {
     const report = preflight?.[name];
-    stage(name, report ? [...validateIdentity(report, current, state, platform), ...required(report.checks, [name], '预检'), ...(report.status === 'passed' ? [] : ['预检报告未通过'])] : [`${name} 预检报告缺失`], reasons(report));
+    stage(name, report ? validatePreflight(name, report, preflightEvidence, preflightDigests, preflightSummaries[name], current, state, platform) : [`${name} 预检报告缺失`], reasons(report));
   }
   stage('strict-regression', validateStrictRegression(strictRegression, workflowEvidence.strictRegression, workflowDigests, strictLogSummary, current, state, platform, artifacts), reasons(strictRegression));
   stage('real-workflow', validateRealWorkflow(realWorkflow, workflowEvidence.realWorkflow, workflowDigests, current, state, platform, artifacts), reasons(realWorkflow));
-  const validation = { kernelReports, combinations, editorReports, minimum, chatBaseline, editorVersions, localReport, localLogDigests, artifacts, candidateManifest, preflight,
+  const validation = { kernelReports, combinations, editorReports, minimum, chatBaseline, editorVersions, localReport, localLogDigests, artifacts, candidateManifest, preflight, preflightEvidence, preflightDigests, preflightSummaries, reportEvidence, reportDigests,
     strictRegression, realWorkflow, workflowEvidence, workflowDigests, strictLogSummary, inputIssues };
   return { schemaVersion: 2, scope: 'release', status: issues.length ? 'pending' : 'passed', releaseReady: !issues.length, platform, packages: current, source: state, sourceStart: state, sourceEnd: state, artifacts, issues, checks, validation };
 }
@@ -270,6 +298,47 @@ function readWorkflowInputs(validation) {
   const log = (Array.isArray(workflowEvidence.strictRegression?.logs) ? workflowEvidence.strictRegression.logs : []).find(item => item?.name === 'full-suite.log');
   try { if (typeof log?.file === 'string') summary = strictSummary(fs.readFileSync(path.resolve(ROOT, log.file), 'utf8')); } catch { /* Missing log remains an explicit failed gate. */ }
   return { strictRegression: reports.strictRegression, realWorkflow: reports.realWorkflow, workflowDigests, strictLogSummary: summary, inputIssues };
+}
+/** Reopen the original preflight container and both output streams at the I/O boundary. */
+function readPreflightInputs(validation) {
+  const preflightDigests = {}, preflightSummaries = {}, inputIssues = [];
+  const preflightEvidence = validation.preflightEvidence;
+  let preflight;
+  if (preflightEvidence?.file) {
+    preflightDigests[preflightEvidence.file] = fileDigest(preflightEvidence.file);
+    try {
+      preflight = json(path.resolve(ROOT, preflightEvidence.file));
+      if (!preflight || typeof preflight !== 'object' || Array.isArray(preflight)) throw new Error('invalid preflight');
+      if (JSON.stringify(preflight) !== JSON.stringify(validation.preflight)) inputIssues.push('预检原始报告与汇总中的内容不同');
+      for (const name of Object.keys(PREFLIGHT_COMMANDS)) {
+        const logs = preflight[name]?.checks?.[0]?.logs;
+        for (const item of Array.isArray(logs) ? logs : []) if (typeof item?.file === 'string') preflightDigests[item.file] = fileDigest(item.file);
+        const stdout = Array.isArray(logs) && logs.find(item => item?.stream === 'stdout');
+        if (stdout?.file && preflightDigests[stdout.file]) preflightSummaries[name] = preflightSummary(name, fs.readFileSync(path.resolve(ROOT, stdout.file), 'utf8'));
+      }
+    } catch { inputIssues.push('预检原始报告或日志缺失或无效'); }
+  }
+  return { preflight, preflightEvidence, preflightDigests, preflightSummaries, preflightInputIssues: inputIssues };
+}
+function reportReference(file) { return typeof file === 'string' ? { file: fileName(file), sha256: fileDigest(file) } : undefined; }
+/** Candidates, kernel/editor observations and local installation reports retain their original identities too. */
+function readReportInputs(validation, { current, state, platform }) {
+  const reportEvidence = validation.reportEvidence || {}, reportDigests = {}, reportInputIssues = [], values = {};
+  for (const key of ['candidateManifest', 'localReport', 'kernelReports', 'editorReports']) {
+    const multiple = key.endsWith('Reports'), refs = multiple ? reportEvidence[key] || [] : [reportEvidence[key]].filter(Boolean);
+    const loaded = [];
+    for (const reference of Array.isArray(refs) ? refs : []) {
+      try {
+        reportDigests[reference.file] = fileDigest(reference.file);
+        let value = json(path.resolve(ROOT, reference.file));
+        if (key === 'editorReports' && !value.editor) value = require('./editor-evidence.cjs').editorEvidence(value, state, current, { supported: true, vsix: validation.artifacts?.find(item => item.kind === 'vsix')?.file, platform });
+        loaded.push(value);
+      } catch { reportInputIssues.push(key + ' 原始报告缺失或无效'); }
+    }
+    values[key] = multiple ? loaded : loaded[0];
+    if (JSON.stringify(values[key]) !== JSON.stringify(validation[key])) reportInputIssues.push(key + ' 原始报告与汇总中的内容不同');
+  }
+  return { ...values, reportEvidence, reportDigests, reportInputIssues };
 }
 function releaseCheck(options, context = {}) {
   const matrix = context.matrix || json(path.join(ROOT, 'compat/versions.json'));
@@ -333,9 +402,14 @@ function releaseCheck(options, context = {}) {
   const realWorkflow = realFile ? read(realFile, '真实工作流报告') : undefined;
   const workflowEvidence = { strictRegression: workflowReference(strictFile, 'strictRegression'), realWorkflow: workflowReference(realFile, 'realWorkflow') };
   const workflowInputs = readWorkflowInputs({ strictRegression, realWorkflow, workflowEvidence, inputIssues });
+  const preflight = preflightFile ? read(preflightFile, '预检报告') : undefined;
+  const preflightInputs = readPreflightInputs({ preflight, preflightEvidence: preflightFile ? { file: fileName(preflightFile), sha256: fileDigest(preflightFile) } : undefined });
+  const reportEvidence = { candidateManifest: reportReference(candidateFile), localReport: reportReference(localFile),
+    kernelReports: (explicitKernels ? kernelFiles : registeredKernels).map(reportReference), editorReports: (explicitEditors ? editorFiles : registeredEditors).map(reportReference) };
+  const reportInputs = readReportInputs({ candidateManifest, localReport, kernelReports: unique(kernelReports), editorReports: unique(editorReports), artifacts, reportEvidence }, { current, state, platform });
   const result = evaluateRelease({ current, state, platform, kernelReports: unique(kernelReports), ...releaseRequirements(matrix, editors), editorReports: unique(editorReports),
-    localReport, localLogDigests: localLogs(localReport), artifacts, candidateManifest, preflight: preflightFile ? read(preflightFile, '预检报告') : undefined,
-    workflowEvidence, ...workflowInputs, inputIssues: [...workflowInputs.inputIssues, ...inputIssues.filter(issue => !workflowInputs.inputIssues.includes(issue))] });
+    localReport, localLogDigests: localLogs(localReport), artifacts, candidateManifest, ...preflightInputs,
+    workflowEvidence, ...workflowInputs, ...reportInputs, inputIssues: [...workflowInputs.inputIssues, ...preflightInputs.preflightInputIssues, ...reportInputs.reportInputIssues, ...inputIssues.filter(issue => !workflowInputs.inputIssues.includes(issue))] });
   return result;
 }
 if (require.main === module) {
@@ -343,4 +417,4 @@ if (require.main === module) {
   catch (error) { console.error(error.message); process.exitCode = 1; }
 }
 module.exports = { validateReport, validateHistoricalReport, validateHistoricalEditor, validateEditorEvidence, validateIdentity, validateReleaseApproval, readReleaseApproval, evaluateRelease, releaseCheck, releaseRequirements,
-  strictSummary, validateStrictRegression, validateRealWorkflow, REQUIRED, LOCAL, FINGERPRINTS, REAL_WORKFLOW, REAL_LOGS, STRICT_COMMAND };
+  PREFLIGHT_COMMANDS, preflightSummary, validatePreflight, readPreflightInputs, strictSummary, validateStrictRegression, validateRealWorkflow, REQUIRED, LOCAL, FINGERPRINTS, REAL_WORKFLOW, REAL_LOGS, STRICT_COMMAND };

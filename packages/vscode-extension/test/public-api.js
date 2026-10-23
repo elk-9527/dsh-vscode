@@ -28,11 +28,19 @@ const panel = { config: () => ({}), wantedPreset: () => 'standard', workdir: () 
 const views = { refresh: async () => catalog, reviewRequest: async value => value, operations: new Map(), retain() {}, release() {} };
 const context = { subscriptions: [] }, service = new PublicApi({ vscode, context, connections, panel, views }), api = service.exports;
 (async () => {
-  assert.equal(api.apiVersion, 1); assert.equal(api.apiRevision, 2); assert(Object.isFrozen(api));
+  assert.equal(api.apiVersion, 1); assert.equal(api.apiRevision, 3); assert(Object.isFrozen(api));
   const status = await api.getConnectionStatus(); assert.equal(status.model.ready, true); assert.equal(status.capabilities.history, true); assert.equal(status.runtime.acpVersion, 'fixture'); assert.equal(status.bootstrapSecret, undefined, 'Connection metadata preserves v1 fields without exporting transport fields');
   await assert.rejects(api.createSession({ cwd }), error => error.code === -32044);
   await assert.rejects(api.createSession({ cwd: path.dirname(cwd), userInitiated: true }));
   const handle = await api.createSession({ cwd, userInitiated: true }); assert(Object.isFrozen(handle)); assert(!('client' in handle));
+  await assert.rejects(api.generateText(handle, 'repair', { userInitiated: true }), error => error.code === -32042);
+  const originalStatus = client.doorStatus;
+  client.doorStatus = async () => ({ capabilities: { textGeneration: { path: 'llm-direct-v1', tools: false } } });
+  client.request = async (method, params) => { assert.equal(method, 'dsh-door/text/generate'); assert.equal(params.sessionId, handle.sessionId); return { text: 'repair', path: 'llm-direct-v1', tools: false }; };
+  assert.equal((await api.generateText(handle, 'repair', { userInitiated: true })).text, 'repair');
+  await assert.rejects(api.generateText(handle, 'repair', {}), error => error.code === -32044);
+  const cancelledText = new AbortController(); cancelledText.abort(); await assert.rejects(api.generateText(handle, 'repair', { userInitiated: true, signal: cancelledText.signal }));
+  client.doorStatus = originalStatus;
   let resumes = 0;
   const resume = client.resumeSession;
   client.resumeSession = async (...args) => { resumes++; await new Promise(resolve => setImmediate(resolve)); return resume(...args); };

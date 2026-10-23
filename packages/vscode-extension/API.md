@@ -1,6 +1,6 @@
-# Extension API v1, revision 2
+# Extension API v1, revision 3
 
-Other VS Code extensions can depend on `Elk-ydy.dsh-acp-panel` and call `activate()` to obtain the API. Feature-detect `apiRevision` or `features`; revision 2 retains the original catalog, connection status and review methods. Type declarations ship at `src/api/index.d.ts`.
+Other VS Code extensions can depend on `Elk-ydy.dsh-acp-panel` and call `activate()` to obtain the API. Feature-detect `apiRevision` or `features`; revision 3 adds direct text generation and retains the original catalog, connection status and review methods. Type declarations ship at `src/api/index.d.ts`.
 
 ```js
 const extension = vscode.extensions.getExtension('Elk-ydy.dsh-acp-panel');
@@ -29,6 +29,7 @@ Session handles contain opaque IDs, workspace directory, DSH session ID, preset 
 | `createSession({cwd,preset?,userInitiated:true})` | Create a DSH session. |
 | `restoreSession({cwd,sessionId,preset?,userInitiated:true})` | Resume DSH history using a new handle. |
 | `getPanelSession()` | Obtain a handle for the current panel session. |
+| `generateText(handle,text,{userInitiated:true,signal})` | Generate text through the kernel LLM service with an empty tool set and no Agent tool dispatcher. Requires advertised `textGeneration.path=llm-direct-v1`; returns `{text,path,tools:false}`. Does not append an Agent conversation turn. Unsupported kernels fail explicitly. |
 | `prompt(handle,text,options)` | Stream text, thinking, tool, usage and done events; resolve with the stop reason and session metadata. |
 | `closeSession(handle)` | Release an idle handle; preserve a session currently displayed in the panel. |
 | `openPanel(handle)` | Continue the same idle session in the panel within its workspace. |

@@ -5,13 +5,14 @@ export interface PromptEvent { type: 'text' | 'thinking' | 'tool' | 'usage' | 'd
 export interface PromptOptions { userInitiated: true; signal?: AbortSignal; attachments?: object[]; onEvent?(event: PromptEvent): void; onPermission?(request: { options: Array<{ optionId: string; name: string }>; [key: string]: unknown }): Promise<string | undefined> | string | undefined }
 export interface CapabilityRequest { cwd: string; capabilityId: string; input?: unknown; session?: SessionHandle; userInitiated?: boolean; approved?: boolean }
 export interface DshPanelApi {
-  readonly apiVersion: 1; readonly apiRevision: 2; readonly features: readonly string[];
+  readonly apiVersion: 1; readonly apiRevision: 3; readonly features: readonly string[];
   listCapabilities(): Promise<{ capabilities: Array<{ id: string; title: string; riskTier: string; [key: string]: unknown }> }>;
   getConnectionStatus(): Promise<{ connected: boolean; supported: boolean; authorized: boolean; state: string; connectionCount?: number; version?: string; model?: { ready: boolean; source: string; provider?: string; model?: string }; capabilities?: object; runtime?: { acpVersion: string } }>;
   review(request: SessionRequest & { input: { mode: 'worktree' | 'base' | 'commit' | 'custom'; ref?: string; instructions?: string }; signal?: AbortSignal }): Promise<unknown>;
   createSession(request: SessionRequest): Promise<SessionHandle>;
   restoreSession(request: SessionRequest & { sessionId: string }): Promise<SessionHandle>;
   getPanelSession(): Promise<SessionHandle>;
+  generateText(session: SessionHandle, text: string, options: { userInitiated: true; signal?: AbortSignal }): Promise<{ text: string; path: 'llm-direct-v1'; tools: false }>;
   prompt(session: SessionHandle, text: string, options: PromptOptions): Promise<{ stopReason: string; session: SessionHandle }>;
   closeSession(session: SessionHandle): Promise<boolean>;
   invokeCapability(request: CapabilityRequest): Promise<{ mode: 'immediate'; value: unknown } | { mode: 'operation'; operationId: string }>;

@@ -29,7 +29,7 @@ async function editor(report, options, folder) {
   const gui = require('./lib.cjs').desktopGuiProcessIds();
   assert(mode === 'attach' ? gui.length > 0 : gui.length === 0, 'Desktop GUI 状态不符合测试路径');
   const file = options.candidates.vsix.file;
-  const destination = path.join(folder, 'vsix');
+  const destination = path.join(options.work, 'vsix');
   const quote = (text) => `'${text.replace(/'/g, "''")}'`;
   execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory(${quote(file)}, ${quote(destination)})`], { windowsHide: true, timeout: 10000 });
   const port = options.port ? Number(options.port) : mode === 'attach' ? 47821 : await freePort();
@@ -82,14 +82,16 @@ async function local(options) {
   if (isolatedHome) report.scope = 'isolated-local';
   for (const artifact of artifacts) assert.equal(report.artifacts?.find(item => item.kind === artifact.kind)?.sha256, artifact.sha256, '本机各路径必须使用同一份候选包');
   let kernel, client, session, port, succeeded = false;
-  let environmentBefore;
+  const resources = require('../run-resources.cjs').createRunResources({ folder, label: 'work', keep: Boolean(options['keep-work']) });
+  resources.override(resources.childEnv());
+  resources.defer('kernel', () => kernel?.dispose());
+  resources.defer('connections', () => { session?.dispose(); client?.close(); });
   try {
     if (isolatedHome) {
-      const overrides = require('./local-targets.cjs').isolatedEnvironment(isolatedHome);
-      environmentBefore = Object.fromEntries(Object.keys(overrides).map(key => [key, process.env[key]]));
-      Object.assign(process.env, overrides);
+      const overrides = require('./local-targets.cjs').isolatedEnvironment(isolatedHome, path.join(resources.work, 'cache'));
+      resources.override(overrides);
     }
-    if (options.mode === 'editor') { await editor(report, options, folder); succeeded = true; return report; }
+    if (options.mode === 'editor') { await resources.guard(() => editor(report, { ...options, work: resources.work }, folder)); succeeded = true; return report; }
     if (options.mode === 'installed') { installed(report, options); succeeded = true; return report; }
     port = Number(options.port || 47821);
     if (options.mode !== 'attach') {
@@ -123,7 +125,7 @@ async function local(options) {
     assert.equal(status.version, versions().door);
     assert.equal(status.runtime?.acpVersion, options.dsh || '0.2.0-rc.2');
     assert(status.model.ready);
-    const cwd = path.join(folder, 'workspace'); fs.mkdirSync(cwd);
+    const cwd = path.join(resources.work, 'workspace'); fs.mkdirSync(cwd);
     session = new DshSession({ client }); await session.start({ cwd, preset: 'standard' });
     const flat = (items) => (items || []).flatMap((item) => item.options ? flat(item.options) : [item]);
     const readCatalog = () => flat(session.configOptions.find((item) => item.id === 'model')?.options).map((item) => item.value).sort();
@@ -163,12 +165,13 @@ async function local(options) {
   finally {
     try {
     if (session?.sessionId && client) { try { await client.closeSession(session.sessionId); } catch {} }
-    session?.dispose(); client?.close(); kernel?.dispose();
+    report.resources = await resources.close();
     let cleanupError;
     if (kernel) {
       try { await waitFor(async () => !await locate.probePort('127.0.0.1', port), 10000); check(report, 'local-kernel-cleanup', { portClosed: true }); }
       catch (error) { cleanupError = error; report.checks.push({ name: 'local-kernel-cleanup', status: 'failed', evidence: error.message }); }
     }
+    if (report.resources.status !== 'passed' || report.resources.abort) { cleanupError ||= new Error(report.resources.abort || report.resources.errors.join('; ')); report.checks.push({ name: 'resources-cleanup', status: 'failed', evidence: cleanupError.message }); }
     if (succeeded && !cleanupError) completeAttempt(report, options.mode);
     report.finishedAt = new Date().toISOString();
     const required = require('./release-check.cjs').LOCAL;
@@ -176,9 +179,9 @@ async function local(options) {
     require('../bridge/packages.cjs').finishEvidence(report);
     fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, `${JSON.stringify(safeObject(report), null, 2)}\n`);
     console.log(`本机验收记录：${file}`);
-    if (cleanupError) throw cleanupError;
+    if (cleanupError && succeeded) throw cleanupError;
     } finally {
-      for (const [key, value] of Object.entries(environmentBefore || {})) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+      await resources.close();
     }
   }
   return report;

@@ -160,6 +160,7 @@ function resolveRuntime(options = {}) {
 }
 function runDir(label = 'run') {
   const base = path.join(ROOT, 'build/compat');
+  require('../run-resources.cjs').plainParents(base);
   fs.mkdirSync(base, { recursive: true });
   const name = String(label).replace(/[^A-Za-z0-9._-]/g, '-');
   return fs.mkdtempSync(path.join(base, `${new Date().toISOString().replace(/[:.]/g, '-')}-${name}-`));
@@ -174,18 +175,27 @@ async function fetchJson(url) {
   if (!response.ok) throw new Error(`${response.status} ${url}`);
   return response.json();
 }
+function supportedMatrix(matrix = json(path.join(ROOT, 'compat/versions.json')), operatingSystems = ['windows-latest', 'ubuntu-latest']) {
+  const declared = [...new Map(matrix.versions.map(item => [item.distribution + ':' + item.dsh, { dsh: item.dsh, distribution: item.distribution }])).values()];
+  return { matrix: { include: declared.filter(item => item.distribution === 'npm').flatMap(item => operatingSystems.map(os => ({ ...item, os }))) },
+    desktop: declared.filter(item => item.distribution === 'desktop') };
+}
+function discoveryResult(matrix, npm, releases, issues = []) {
+  const supported = supportedMatrix(matrix), declared = new Set(matrix.versions.map(item => item.distribution + ':' + item.dsh));
+  const available = Object.keys(npm?.versions || {}).filter(version => semver.valid(version)).sort(semver.rcompare);
+  const stable = available.find(version => !semver.prerelease(version)), prerelease = available.find(version => semver.prerelease(version));
+  const upstream = (Array.isArray(releases) ? releases : []).filter(release => !release.draft).map(release => release.tag_name?.replace(/^dsh-v/, '')).filter(version => semver.valid(version)).sort(semver.rcompare)[0];
+  const npmVersions = [...new Set([stable, prerelease, available.includes(upstream) && upstream].filter(Boolean))].filter(version => !declared.has('npm:' + version));
+  return { ...supported, stable, prerelease, upstream, acquisitionIssues: issues,
+    probes: { include: npmVersions.flatMap(dsh => ['windows-latest', 'ubuntu-latest'].map(os => ({ dsh, os, distribution: 'npm' }))) },
+    desktopProbes: upstream && !available.includes(upstream) && !declared.has('desktop:' + upstream) ? [{ dsh: upstream, distribution: 'desktop', status: 'manual-environment-required' }] : [] };
+}
 async function discover() {
   const matrix = json(path.join(ROOT, 'compat/versions.json'));
-  const [npm, releases] = await Promise.all([
-    fetchJson(`${matrix.sources.registry}/@deepseek-ai%2Fdsh`), fetchJson(`${matrix.sources.releases}?per_page=30`),
-  ]);
-  const published = Object.keys(npm.versions).filter((version) => semver.valid(version));
-  const available = published.sort(semver.rcompare);
-  const stable = available.find((version) => !semver.prerelease(version));
-  const prerelease = available.find((version) => semver.prerelease(version));
-  const upstream = releases.filter((release) => !release.draft)
-    .map((release) => release.tag_name.replace(/^dsh-v/, '')).filter((version) => semver.valid(version)).sort(semver.rcompare)[0];
-  const all = [...new Set([...matrix.versions.map((item) => item.dsh), stable, prerelease, upstream].filter(Boolean))];
-  return { stable, prerelease, upstream, versions: all, matrix: { dsh: all } };
+  const results = await Promise.allSettled([fetchJson(matrix.sources.registry + '/@deepseek-ai%2Fdsh'), fetchJson(matrix.sources.releases + '?per_page=30')]);
+  return discoveryResult(matrix, results[0].status === 'fulfilled' ? results[0].value : undefined,
+    results[1].status === 'fulfilled' ? results[1].value : undefined,
+    results.flatMap((result, index) => result.status === 'rejected' ? [{ source: index ? 'upstream' : 'registry', status: 'acquisition-failed', error: redact(result.reason.message) }] : []));
 }
-module.exports = { ROOT, locate, json, sha256, contentSha256, argsOf, redact, safeObject, sourceState, versions, readAsar, desktopInfo, desktopGuiProcessIds, candidates, resolveRuntime, runDir, writeReport, fetchJson, discover, semver };
+
+module.exports = { ROOT, locate, json, sha256, contentSha256, argsOf, redact, safeObject, sourceState, versions, readAsar, desktopInfo, desktopGuiProcessIds, candidates, resolveRuntime, runDir, writeReport, fetchJson, supportedMatrix, discoveryResult, discover, semver };

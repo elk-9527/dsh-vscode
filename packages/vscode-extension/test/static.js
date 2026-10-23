@@ -148,11 +148,12 @@ console.log(`     main.js 用到 ${usedClasses.length} 个类，样式表里有 
 section('4. 其它不该犯的错');
 
 // 所有 innerHTML 赋值都必须经过「先转义」的渲染函数 —— 这是防注入的最后一道防线。
+check('流式 HTML 来自受转义的 Markdown 渲染器', webviewJs.includes('const patch = entry.markdown.render(entry.text)') && webviewJs.includes('entry.markdown ||= markdown.createStreamingRenderer()') && read('media/markdown.js').includes('appendHtml = renderMarkdown(text.slice(committed, end))') && read('media/markdown.js').includes('tailHtml: renderMarkdown(text.slice(end))'));
 const innerHtmlAssignments = [...webviewJs.matchAll(/\.innerHTML\s*=\s*([^;]+);/g)].map((match) =>
   match[1].trim(),
 );
 const unsafeInnerHtml = innerHtmlAssignments.filter(
-  (right) => right !== "''" && !/^(renderMarkdown|renderToolBody|caret)\(/.test(right),
+  (right) => right !== "''" && !/^(renderMarkdown|renderToolBody|caret)\(/.test(right) && !["patch.appendHtml", "patch.tailHtml + (finished ? '' : caret())"].includes(right),
 );
 check(
   '所有 innerHTML 赋值都走转义函数',

@@ -20,7 +20,7 @@ try {
         }
       }, probePort: async () => false, spawnBackgroundDsh() {}, dshCommandCandidates: () => ['fixture'], runningDesktopExecutables: () => [],
     };
-    if (parent?.filename === helperPath && request === '../../../../tools/bridge/packages.cjs') return { verifyCandidate: file => ({ file, sha256: digest() }) };
+    if (parent?.filename === helperPath && request === '../../../../tools/bridge/packages.cjs') return { verifyCandidate: file => ({ file, kind: 'tgz', sha256: digest() }), verifyInstalledCandidate: () => { assert.deepEqual(helper.doorDrift(), []); } };
     return oldLoad.call(this, request, parent, ...rest);
   };
   delete require.cache[helperPath]; helper = require('./helpers/door');

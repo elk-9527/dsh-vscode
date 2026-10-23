@@ -33,6 +33,9 @@ jobs:
     timeout-minutes: 10
     outputs:
       matrix: ${{ steps.versions.outputs.matrix }}
+      probes: ${{ steps.versions.outputs.probes }}
+      probe_count: ${{ steps.versions.outputs.probe_count }}
+      acquisition_failed: ${{ steps.versions.outputs.acquisition_failed }}
       manifest_sha256: ${{ steps.panel.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v4
@@ -46,12 +49,11 @@ jobs:
         shell: pwsh
         run: |
           if ('${{ github.event_name }}' -eq 'pull_request') {
-            $matrix = '{"dsh":["0.1.5-rc.2","0.2.0-rc.2","0.2.1-alpha.1","0.2.1-rc.2"]}'
+            node tools/compat/discovery.cjs --offline
           } else {
-            $matrix = node tools/compat/test.cjs --discover --matrix
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            node tools/compat/discovery.cjs
           }
-          "matrix=$matrix" >> $env:GITHUB_OUTPUT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: 构建供全部任务共同验收的唯一候选包
         run: node tools/bridge/packages.cjs --out build/candidates
       - id: panel
@@ -72,8 +74,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dsh: ${{ fromJson(needs.discover.outputs.matrix).dsh }}
-        os: [windows-latest, ubuntu-latest]
+        include: ${{ fromJson(needs.discover.outputs.matrix).include }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -113,6 +114,57 @@ jobs:
           name: compat-${{ matrix.os }}-${{ matrix.dsh }}
           path: |
             build/compat/**/public-validation.json
+
+  discovery-health:
+    needs: discover
+    if: needs.discover.outputs.acquisition_failed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'Candidate discovery could not acquire all upstream sources. Supported regression results are reported by kernel jobs.' && exit 1
+
+  candidate-probe:
+    needs: discover
+    if: needs.discover.outputs.probe_count != '0'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.probes).include }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-candidates
+          path: build/candidates
+      - name: 核对候选并单独探测未声明版本
+        shell: pwsh
+        run: |
+          if ((Get-FileHash -LiteralPath build/candidates/manifest.json -Algorithm SHA256).Hash.ToLowerInvariant() -ne '${{ needs.discover.outputs.manifest_sha256 }}') { throw 'Candidate manifest digest mismatch' }
+          $manifest = Get-Content -LiteralPath build/candidates/manifest.json -Raw | ConvertFrom-Json
+          foreach ($artifact in $manifest.artifacts) {
+            if ((Get-FileHash -LiteralPath $artifact.file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $artifact.sha256) { throw 'Candidate archive digest mismatch' }
+          }
+          node tools/compat/probe.cjs --dsh ${{ matrix.dsh }} --tgz ($manifest.artifacts | Where-Object kind -eq 'tgz').file
+      - name: 探测分类摘要
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath build/probes/probe-result.json) {
+            $probe = Get-Content -LiteralPath build/probes/probe-result.json -Raw | ConvertFrom-Json
+            "Candidate $($probe.dsh): $($probe.status). Declared support is unchanged." >> $env:GITHUB_STEP_SUMMARY
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: probe-${{ matrix.os }}-${{ matrix.dsh }}
+          path: build/probes/probe-result.json
+          if-no-files-found: warn
 
   minimum-editor:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.editor_checks }}

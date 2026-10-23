@@ -1425,11 +1425,31 @@
     for (const [entry, parts] of pendingRenders) {
       // 已结束的条目不再补充渲染，否则会重新绘制光标。
       if (entry.finished) continue;
-      if (parts & 1) entry.body.innerHTML = renderMarkdown(entry.text) + caret();
+      if (parts & 1) renderAssistantBody(entry, false);
       if (parts & 2) entry.thinkBody.textContent = entry.thinkText;
     }
     pendingRenders.clear();
     scrollIfPinned();
+  }
+
+  function renderAssistantBody(entry, finished) {
+    if (!markdown?.createStreamingRenderer) { entry.body.textContent = entry.text; return; }
+    entry.markdown ||= markdown.createStreamingRenderer();
+    const patch = entry.markdown.render(entry.text);
+    if (patch.reset) entry.stableNodes = 0;
+    const committed = document.createElement('template'); committed.innerHTML = patch.appendHtml;
+    const count = committed.content.childNodes.length;
+    const tail = document.createElement('template'); tail.innerHTML = patch.tailHtml + (finished ? '' : caret());
+    committed.content.appendChild(tail.content);
+    let old = entry.body.childNodes[entry.stableNodes || 0], next = committed.content.firstChild;
+    // Reuse equal tail blocks too, including the final render that only removes the caret.
+    while (old && next && old.isEqualNode(next)) {
+      const following = old.nextSibling; committed.content.removeChild(next); old = following; next = committed.content.firstChild;
+    }
+    while (old) { const following = old.nextSibling; entry.body.removeChild(old); old = following; }
+    entry.body.appendChild(committed.content);
+    entry.stableNodes = (entry.stableNodes || 0) + count;
+    if (finished) { entry.markdown.clear(); entry.markdown = undefined; }
   }
 
   function caret() {
@@ -1442,7 +1462,7 @@
     entry.finished = true;
     pendingRenders.delete(entry);
     if (!pendingRenders.size) cancelRenderFlush();
-    entry.body.innerHTML = renderMarkdown(entry.text);
+    renderAssistantBody(entry, true);
     entry.thinkBody.textContent = entry.thinkText;
     if (status === 'cancelled') {
       entry.node.appendChild(note('（已中断）'));

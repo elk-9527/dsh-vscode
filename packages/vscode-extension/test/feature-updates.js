@@ -95,7 +95,7 @@ const disposable = { dispose() {} };
   const views = { operations: new Map([[op.id, op]]), connections: { client: { permissionSet: async (_id, value) => { permission = value; return { currentValue: value }; } } }, document: (_name, content) => ({ content }), reviewRequest: async () => { reviewCalls++; return { id: 'fresh-review' }; } };
   const fixes = new ReviewFixes({ vscode, views, context: { subscriptions: [] } });
   fixes.api = { createSession: async options => { assert.equal(options.preset, 'minimal'); return { sessionId: 'fix-session' }; },
-    closeSession: async () => { apiClosed++; }, prompt: async (_handle, prompt, options) => { prompts++; assert(prompt.includes(original.trim())); assert.equal(await options.onPermission({}), undefined); options.onEvent({ type: 'text', delta: JSON.stringify({ edits: [{ before: 'a - b', after: 'a + b' }] }) }); } };
+    closeSession: async () => { apiClosed++; }, generateText: async (_handle, prompt) => { prompts++; assert(prompt.includes(original.trim())); return { path: 'llm-direct-v1', tools: false, text: JSON.stringify({ edits: [{ before: 'a - b', after: 'a + b' }] }) }; } };
   let finishOpen;
   workspace.openTextDocument = () => new Promise(resolve => { finishOpen = () => resolve(document); });
   const generating = fixes.generate(op.id, 0);
@@ -130,11 +130,11 @@ const disposable = { dispose() {} };
   await assert.rejects(fixes.generate(op.id, 0), /只读权限/);
   assert.equal(apiClosed, 2); assert.equal(prompts, 1); assert.equal(fixes.pending.size, 0);
   views.connections.client.permissionSet = setPermission;
-  const prompt = fixes.api.prompt;
-  fixes.api.prompt = async () => { throw new Error('provider unavailable'); };
+  const prompt = fixes.api.generateText;
+  fixes.api.generateText = async () => { throw new Error('provider unavailable'); };
   await assert.rejects(fixes.generate(op.id, 0), /provider unavailable/);
   assert.equal(apiClosed, 3); assert.equal(fixes.pending.size, 0); assert.equal(text, original);
-  fixes.api.prompt = prompt;
+  fixes.api.generateText = prompt;
   const stalePlan = await fixes.generate(op.id, 0), info = vscode.window.showInformationMessage;
   vscode.window.showInformationMessage = async (_message, options) => {
     if (options?.modal) { text += '// changed while preview open\n'; dirty = true; return '应用此项'; }

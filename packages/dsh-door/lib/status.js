@@ -17,6 +17,7 @@ export function isDoorStatusRequest(frame) {
  */
 export function doorStatusPayload({
   model,
+  textGeneration,
   historyKind = 'legacy-v3-disk',
   permissionKind,
   acpVersion,
@@ -40,6 +41,7 @@ export function doorStatusPayload({
     },
     capabilities: {
       presets: true,
+      ...(textGeneration ? { textGeneration: { path: 'llm-direct-v1', tools: false } } : {}),
       ...(bridge ? { bridge } : {}),
       history: normalizedHistory !== 'unavailable',
       historyQuery: normalizedHistory !== 'unavailable',

@@ -26,6 +26,11 @@ const withDsh = args.includes('--all');
 const strict = args.includes('--strict');
 
 const suites = [
+  { name: '流式 Markdown 尾部缓存与完整渲染一致', file: 'test/stream-markdown.js', always: true },
+  { name: '候选归档安装逐字节核验', file: '../../tools/bridge/test-installed-candidate.cjs', always: true },
+  { name: '支持矩阵与候选发现分类', file: '../../tools/compat/test-discovery.cjs', always: true },
+  { name: '无工具文本生成与失败边界', file: '../dsh-door/test/text-generation.js', always: true },
+  { name: '隔离验收资源与预算', file: '../../tools/run-resources.test.cjs', always: true },
   { name: '测试临时目录归属与清理', file: '../../tools/test-workspace.test.cjs', always: true },
   { name: '初始仓库快照与取消', file: 'test/repository-snapshot.js', always: true },
   { name: '未保存编辑的审查范围', file: 'test/review-scope.js', always: true },
@@ -125,10 +130,9 @@ const suites = [
 ];
 
 const results = [];
-const temporaryRoot = path.resolve(ROOT, '../../build/test-runs');
-fs.mkdirSync(temporaryRoot, { recursive: true });
-const temporary = fs.mkdtempSync(path.join(temporaryRoot, 'suite-'));
-const childEnv = { ...process.env, TMP: temporary, TEMP: temporary, TMPDIR: temporary };
+const resources = require('../../../tools/run-resources.cjs').createRunResources({ label: 'suite', keep: args.includes('--keep-work') });
+const browser = require('../tools/chrome.cjs').findChrome();
+const childEnv = resources.childEnv({ ...process.env, ...(browser ? { DSH_PANEL_CHROME: browser } : {}) });
 
 try {
 for (const suite of suites) {
@@ -137,12 +141,14 @@ for (const suite of suites) {
     continue;
   }
   console.log(`\n${'█'.repeat(3)} ${suite.name} ${'█'.repeat(3)}`);
+  resources.check();
   const started = Date.now();
   const result = spawnSync(process.execPath, [path.join(ROOT, suite.file)], {
     cwd: ROOT,
     stdio: 'inherit',
     env: { ...childEnv, ...suite.env },
     windowsHide: true,
+    timeout: Math.min(Number(process.env.DSH_TEST_SUITE_MS || 600000), resources.remainingMs()),
   });
   const ms = Date.now() - started;
   // 退出码 2 表示套件自身报告「当前无法测试」（例如端口被占用），不计为失败，
@@ -170,5 +176,5 @@ if (bad.length === 0 && skipped.length === 0) {
 }
 process.exitCode = bad.length === 0 && (!strict || skipped.length === 0) ? 0 : 1;
 } finally {
-  fs.rmSync(temporary, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+  resources.close().then(result => { if (result.status !== 'passed' || result.abort) { console.error(result); process.exitCode = 1; } });
 }

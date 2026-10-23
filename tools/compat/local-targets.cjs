@@ -29,29 +29,23 @@ function verifyInstallation({ home, extension, candidates }) {
     assert(value?.file && value.sha256 === sha256(value.file), `装机校验缺少相同的候选 ${kind}`);
     require('../bridge/packages.cjs').verifyCandidate(value.file, kind);
   }
-  const files = ['package.json', 'cordis.patch.yml', 'README.md', 'CHANGELOG.md', 'LICENSE'];
-  const walk = (base, prefix) => { for (const name of fs.readdirSync(base)) {
-    const relative = path.join(prefix, name), file = path.join(base, name);
-    if (fs.statSync(file).isDirectory()) walk(file, relative); else files.push(relative);
-  } };
-  walk(path.join(ROOT, 'packages/dsh-door/lib'), 'lib');
   const hashes = [];
+  const packages = require('../bridge/packages.cjs');
   for (const profile of ['desktop', 'vscode-panel']) {
     const directory = path.join(home, 'profiles', profile);
     assert(json(path.join(directory, 'package.json')).dsh.profile.bundles.includes('dsh-acp-door'));
-    for (const file of files) {
-      const source = path.join(ROOT, 'packages/dsh-door', file), target = path.join(directory, 'node_modules/dsh-acp-door', file);
-      assert.equal(contentSha256(target), contentSha256(source), `${profile}/${file} 内容不一致`);
-      hashes.push({profile, file:file.replace(/\\/g, '/'), sha256:sha256(target), sourceSha256:sha256(source), contentSha256:contentSha256(target)});
-    }
+    packages.verifyInstalledCandidate(candidates.tgz, path.join(directory, 'node_modules/dsh-acp-door'), { root: home });
+    for (const [file, hash] of Object.entries(candidates.tgz.files)) hashes.push({ profile, file, sha256: hash });
   }
-  require('../../packages/vscode-extension/tools/package-links.cjs').verifyPackageFiles(path.join(ROOT, 'packages/vscode-extension'), extension, {installed:true});
-  return {doorFilesPerProfile:files.length, files:hashes, panel:{verified:true}, targets:{home:path.resolve(home), extension:path.resolve(extension)},
-    artifacts:['tgz','vsix'].map(kind=>({kind,sha256:candidates[kind].sha256}))};
+  packages.verifyInstalledCandidate(candidates.vsix, extension);
+  return { doorFilesPerProfile: Object.keys(candidates.tgz.files).length, files: hashes, panel: { verified: true },
+    targets: { home: path.resolve(home), extension: path.resolve(extension) },
+    artifacts: ['tgz', 'vsix'].map(kind => ({ kind, sha256: candidates[kind].sha256 })) };
 }
-function isolatedEnvironment(home) {
+
+function isolatedEnvironment(home, cacheRoot) {
   home = dedicatedHome(home);
-  const cache = path.join(home, '.acceptance-cache');
+  const cache = cacheRoot || path.join(home, '.acceptance-cache');
   const folders = {APPDATA:'roaming', LOCALAPPDATA:'local', PNPM_HOME:'pnpm-home', npm_config_cache:'npm',
     npm_config_store_dir:'pnpm-store', XDG_CACHE_HOME:'xdg-cache', TEMP:'tmp', TMP:'tmp', TMPDIR:'tmp'};
   const result = {DSH_HOME:home};

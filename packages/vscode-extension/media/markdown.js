@@ -141,5 +141,34 @@
     return true;
   }
 
-  return { renderMarkdown, inline, escapeHtml };
+  /** Commit only blank-line boundaries outside fences; the growing final block stays replaceable. */
+  function createStreamingRenderer({ maxChars = 128 * 1024 } = {}) {
+    let previous = '', committed = 0;
+    return {
+      render(input) {
+        const text = String(input || '').replace(/\r\n?/g, '\n');
+        if (text.length > maxChars) {
+          previous = ''; committed = 0;
+          return { reset: true, appendHtml: '', tailHtml: renderMarkdown(text) };
+        }
+        const reset = !text.startsWith(previous);
+        if (reset) committed = 0;
+        let end = committed, position = committed, fenced = false;
+        while (position < text.length) {
+          const newline = text.indexOf('\n', position);
+          if (newline < 0) break;
+          const line = text.slice(position, newline);
+          if (fenced) { if (/^\s*```\s*$/.test(line)) fenced = false; }
+          else if (/^\s*```([\w+-]*)\s*$/.test(line)) fenced = true;
+          else if (!line.trim()) end = newline + 1;
+          position = newline + 1;
+        }
+        const appendHtml = renderMarkdown(text.slice(committed, end));
+        committed = end; previous = text;
+        return { reset, appendHtml, tailHtml: renderMarkdown(text.slice(end)) };
+      },
+      clear() { previous = ''; committed = 0; },
+    };
+  }
+  return { renderMarkdown, createStreamingRenderer, inline, escapeHtml };
 });

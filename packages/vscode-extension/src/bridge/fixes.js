@@ -114,15 +114,11 @@ class ReviewFixes {
           const client = this.views.connections.client;
           const permission = await client.permissionSet(handle.sessionId, 'read-only');
           if (permission.currentValue !== 'read-only') fail('无法确认只读权限，修复生成已停止。');
-          let text = '', oversized = false;
-          await this.api.prompt(handle, `为下述审查问题生成最小修复。只返回 JSON {"edits":[{"before":"唯一匹配的原文","after":"替换正文","explanation":"原因"}]}。只修改提供的文件，不运行工具，不写文件。每项原文必须完整且唯一，替换不能重叠；保留换行格式。\n问题：${JSON.stringify(finding)}\n文件：${finding.file}\n完整原文（JSON 字符串）：${JSON.stringify(original)}`, {
-            userInitiated: true, signal: abort.signal, onPermission: () => undefined, onEvent: event => {
-              if (event.type === 'text' && !oversized) { text += event.delta; if (Buffer.byteLength(text) > 256 * 1024) { oversized = true; abort.abort(); } }
-            },
-          });
-          if (oversized) fail('修复建议过大，请缩小范围。');
+          if (typeof this.api.generateText !== 'function') fail('当前接入点不支持禁用工具的修复生成，请更新后重试。');
+          const result = await this.api.generateText(handle, `为下述审查问题生成最小修复。只返回 JSON {"edits":[{"before":"唯一匹配的原文","after":"替换正文","explanation":"原因"}]}。只修改提供的文件，不运行工具，不写文件。每项原文必须完整且唯一，替换不能重叠；保留换行格式。\n问题：${JSON.stringify(finding)}\n文件：${finding.file}\n完整原文（JSON 字符串）：${JSON.stringify(original)}`, { userInitiated: true, signal: abort.signal });
           if (abort.signal.aborted) fail('修复生成已取消。');
-          return text;
+          if (result?.path !== 'llm-direct-v1' || result.tools !== false || typeof result.text !== 'string') fail('内核未确认无工具生成结果，请重试。');
+          return result.text;
         } finally { subscription.dispose(); }
       });
       this.assertFile(plan);

@@ -16,14 +16,19 @@ async function waitFor(fn, timeout = 60000) { const end = Date.now() + timeout; 
 } throw new Error('等待超时'); }
 async function run() {
   const folder = runDir('bridge-live');
+  const resources = require('../run-resources.cjs').createRunResources({ folder, label: 'work', keep: process.argv.includes('--keep-work') });
+  const work = resources.work; resources.override(resources.childEnv());
   const start = sourceState();
   const report = { schemaVersion: 2, time: new Date().toISOString(), source: start, sourceStart: start, platform: process.platform,
     packages: require('../compat/lib.cjs').versions(), status: 'failed', stages: [], artifacts: [] };
   const previous = process.env.DSH_HOME;
   const proxy = Object.fromEntries(['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'].map(k => [k, process.env[k]]));
   let kernel, model, client, bridge, session;
+  resources.defer('model', () => model?.close());
+  resources.defer('kernel', () => kernel?.dispose());
+  resources.defer('connections', () => { session?.dispose(); bridge?.dispose(); client?.close(); });
   const stage = async (name, fn) => { const started = Date.now();
-    try { const result = await fn(); report.stages.push({ name, status: 'passed', ms: Date.now() - started, result }); console.log(`PASS ${name}`); return result; }
+    try { const result = await resources.guard(fn); report.stages.push({ name, status: 'passed', ms: Date.now() - started, result }); console.log(`PASS ${name}`); return result; }
     catch (error) {
       const environmentBlocked = error.kind === 'environment-blocked' || error.code === 'DSH_EDITOR_ENVIRONMENT_RESTRICTED';
       report.stages.push({ name, status: environmentBlocked ? 'environment-blocked' : 'failed', error: redact(error.message), ...(error.editorContext ? { editorContext: error.editorContext } : {}) });
@@ -40,9 +45,9 @@ async function run() {
     const suppliedVsixSha256 = supplied.vsix?.sha256;
     await stage('loopback-environment', () => require('../compat/loopback.cjs').verifyLoopback());
     for (const k of Object.keys(proxy)) delete process.env[k];
-    process.env.DSH_HOME = path.join(folder, 'home'); fs.mkdirSync(process.env.DSH_HOME, { recursive: true });
+    process.env.DSH_HOME = path.join(work, 'home'); fs.mkdirSync(process.env.DSH_HOME, { recursive: true });
     const runtime = resolveRuntime({ dsh: versionArgument || '0.2.0-rc.2' }); report.runtime = runtime;
-    const cwd = path.join(folder, 'workspace'); fs.mkdirSync(cwd);
+    const cwd = path.join(work, 'workspace'); fs.mkdirSync(cwd);
     fs.writeFileSync(path.join(cwd, 'sample.js'), 'export function sum(a, b) { return a - b; }\n');
     fs.writeFileSync(path.join(cwd, 'context-git.txt'), 'context-base\n');
     for (const args of [['init', '-q'], ['add', 'sample.js', 'context-git.txt'], ['-c', 'user.name=Bridge test', '-c', 'user.email=bridge@example.invalid', 'commit', '-qm', 'fixture']]) locate.runDshSync({ command: 'git', args: ['-C', cwd, ...args] });
@@ -58,12 +63,13 @@ async function run() {
       locate.runDshSync({ command: runtime.command, args: ['--profile', 'bridge', '--from-default-profile', 'web', '--dump-config'] });
       require('./packages.cjs').pinSdk(path.join(process.env.DSH_HOME, 'profiles/bridge'), files[1]);
       locate.runDshSync({ command: runtime.command, args: ['plugin', '--profile', 'bridge', 'add', ...files.map(file => `file:${file.replace(/\\/g, '/')}`)], timeoutMs: 180000 });
+      for (const item of [supplied.tgz, supplied.sdk]) require('./packages.cjs').verifyInstalledCandidate(item, path.join(process.env.DSH_HOME, 'profiles/bridge/node_modules', item.name), { root: process.env.DSH_HOME });
       return { installed: files.length };
     });
     model = await fixtureProvider({ reviewReport: { findings: [{ title: '[P2] Incorrect sum', body: 'The function subtracts instead of adding.', priority: 2,
       code_location: { absolute_file_path: path.join(cwd, 'sample.js'), line_range: { start: 1, end: 1 } } }], overall_correctness: 'patch is incorrect', overall_explanation: 'Fixture issue detected.' } });
-    process.env.DSH_COMPAT_FIXTURE_KEY = 'bridge-local-fixture';
-    const patch = path.join(folder, 'fixture.yml'); fs.writeFileSync(patch, [
+    resources.override({ DSH_COMPAT_FIXTURE_KEY: 'bridge-local-fixture' });
+    const patch = path.join(work, 'fixture.yml'); fs.writeFileSync(patch, [
       '- id: llm-pi-ai', '  config:', '    providers:', '      bridge-fixture:', '        api: openai-completions',
       `        baseURL: ${model.url}`, '        apiKeyEnv: DSH_COMPAT_FIXTURE_KEY', '        models:', '          - id: bridge-model',
       '            name: Bridge fixture', '            contextWindow: 32768', '            maxTokens: 4096',
@@ -71,9 +77,11 @@ async function run() {
     ].join('\n'));
     const port = await freePort();
     await stage('startup', async () => {
+      resources.port(port, value => locate.probePort('127.0.0.1', value, 200));
       kernel = locate.spawnBackgroundDsh({ command: runtime.command, profile: 'bridge', port, ownedIdleMs: 30000, extraArgs: ['--patch', patch],
-        log(level, line) { fs.appendFileSync(path.join(folder, 'kernel.log'), `${level}: ${redact(line)}\n`); } });
+        log(level, line) { resources.appendLog(path.join(folder, 'kernel.log'), `${level}: ${redact(line)}\n`); } });
       await waitFor(async () => {
+        resources.signal.throwIfAborted();
         if (kernel.child.exitCode !== null) throw new Error('测试内核提前退出');
         const log = fs.existsSync(path.join(folder, 'kernel.log')) ? fs.readFileSync(path.join(folder, 'kernel.log'), 'utf8') : '';
         if (/acp-door.*Error:|michengai-code-review.*Error:|skill-explorer.*Error:/.test(log)) throw new Error('插件未完成加载，见内核日志');
@@ -171,10 +179,12 @@ async function run() {
     report.status = 'passed';
   } catch (error) { report.error = redact(error.message); console.error(report.error); process.exitCode = 1; }
   finally {
-    if (model) fs.writeFileSync(path.join(folder, 'model-requests.json'), JSON.stringify(model.requests, null, 2));
-    session?.dispose(); bridge?.dispose(); client?.close(); await kernel?.dispose(); await model?.close();
+    try { if (model) fs.writeFileSync(path.join(folder, 'model-requests.json'), JSON.stringify(model.requests, null, 2)); }
+    catch (error) { report.status = 'failed'; report.error ||= error.message; }
     if (previous === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previous;
     for (const [k, v] of Object.entries(proxy)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    report.resources = await resources.close();
+    if (report.resources.status !== 'passed' || report.resources.abort) { report.status = 'failed'; report.error ||= report.resources.abort || report.resources.errors.join('; '); }
     require('./packages.cjs').finishEvidence(report);
     if (report.status !== 'passed') process.exitCode = 1;
     fs.writeFileSync(path.join(folder, 'bridge-report.json'), JSON.stringify(report, null, 2) + '\n'); console.log(path.join(folder, 'bridge-report.json'));

@@ -1,7 +1,7 @@
 'use strict';
 const assert = require('node:assert/strict');
 const { validateIdentity, validateReport, validateHistoricalReport, validateReleaseApproval, readReleaseApproval, evaluateRelease, releaseCheck, releaseRequirements,
-  strictSummary, REQUIRED, LOCAL, FINGERPRINTS, REAL_WORKFLOW, REAL_LOGS, STRICT_COMMAND } = require('./release-check.cjs');
+  PREFLIGHT_COMMANDS, preflightSummary, strictSummary, REQUIRED, LOCAL, FINGERPRINTS, REAL_WORKFLOW, REAL_LOGS, STRICT_COMMAND } = require('./release-check.cjs');
 const { requiredChecks, editorEvidence } = require('./editor-evidence.cjs');
 const fs = require('node:fs'), path = require('node:path');
 const { ROOT, sha256 } = require('./lib.cjs');
@@ -44,7 +44,7 @@ const realEvidence = {
   'real-session-start': { created: true }, 'real-permission-catalog': { read: true }, 'real-permission-selection': { value: 'workspace-write', confirmed: true },
   'real-model-native-review': { findings: 1, structuredResult: true }, 'review-keeps-workspace': { unchanged: true },
   'real-independent-regression-before-fix': { executionId: 'before', exitCode: 1, cwd: 'generated-fixture', interface: 'mock-vscode-task-adapter' },
-  'real-model-read-only-repair-suggestion': { permission: 'read-only', edits: 1, toolEvents: 0, workspaceUnchanged: true },
+  'real-model-read-only-repair-suggestion': { permission: 'read-only', generationPath: 'llm-direct-v1', toolsEnabled: false, edits: 1, toolEvents: 0, workspaceUnchanged: true },
   'real-repair-editor-application': { interface: 'mock-vscode-editor-adapter', previewed: true, saved: false, diskUnchanged: true },
   'real-independent-regression-after-fix': { executionId: 'after', exitCode: 0, separateFromChat: true, distinctExecution: true },
   'real-model-re-review': { findings: 0, sameCase: true, distinctOperation: true, workspaceUnchanged: true },
@@ -55,15 +55,28 @@ const input = { current, state, platform: 'win32', kernelReports: [report], comb
   editorReports: ['1.90.2', '1.91.1', '1.142.0'].map(editor => ({ ...base, editor, defaultLaunch: true, vsixSha256: artifacts[1].sha256, checks: requiredChecks(editor).map(name => ({ name, status: 'passed' })) })),
   localReport: { ...base, artifacts, checks: LOCAL.map(name => ({ name, status: 'passed', evidence: name === 'vsix-editor' ? { paths: ['attach', 'self'].map(mode => ({ mode, exitCode: 0, vsixSha256: artifacts[1].sha256, log: mode + '.log', logSha256: '1'.repeat(64) })) } : { observed: true } })) },
   localLogDigests: { 'attach.log': '1'.repeat(64), 'self.log': '1'.repeat(64) },
-  preflight: Object.fromEntries(['quick-ui', 'contracts'].map(name => [name, { ...base, checks: [{ name, status: 'passed' }] }])),
+  preflight: Object.fromEntries(['quick-ui', 'contracts'].map(name => [name, { ...base, evidenceVersion: 1, checks: [{ name, status: 'passed', command: PREFLIGHT_COMMANDS[name], exitCode: 0, stable: true,
+    summary: name === 'quick-ui' ? summary : { complete: true }, logs: ['stdout', 'stderr'].map(stream => ({ stream, file: name + '.' + stream, sha256: '1'.repeat(64) })) }] }])),
+  preflightEvidence: { file: 'preflight.json', sha256: '1'.repeat(64) }, preflightDigests: Object.fromEntries(['preflight.json', ...['quick-ui', 'contracts'].flatMap(name => ['stdout', 'stderr'].map(stream => name + '.' + stream))].map(file => [file, '1'.repeat(64)])),
+  preflightSummaries: { 'quick-ui': summary, contracts: { complete: true } },
   strictRegression: { ...base, scope: 'candidate-door-regression', command: STRICT_COMMAND, exitCode: 0, suites: 2, summary, log: { file: workflowEvidence.strictRegression.logs[0].file, sha256: '1'.repeat(64) }, artifacts: [artifacts[0]] },
   realWorkflow: { ...base, artifacts: [artifacts[0], artifacts[2]], checks: REAL_WORKFLOW.map(name => ({ name, status: 'passed', evidence: realEvidence[name] })) },
   workflowEvidence, workflowDigests, strictLogSummary: summary };
+input.reportEvidence = Object.fromEntries(['candidateManifest', 'localReport', 'kernelReports', 'editorReports'].map(key => [key, key.endsWith('Reports') ? input[key].map((_, index) => ({ file: key + index, sha256: '1'.repeat(64) })) : { file: key, sha256: '1'.repeat(64) }]));
+input.reportDigests = Object.fromEntries(Object.values(input.reportEvidence).flat().map(item => [item.file, item.sha256]));
 const approval = evaluateRelease(input);
 assert.equal(approval.releaseReady, true, approval.issues.join('; '));
 assert.deepEqual(validateReleaseApproval(approval, { kind: 'vsix', sha256: artifacts[1].sha256, current, state, platform: 'win32' }), []);
 assert(validateReleaseApproval(approval, { kind: 'vsix', sha256: artifacts[0].sha256, current, state, platform: 'win32' }).length);
 assert(validateReleaseApproval({ ...approval, checks: [...approval.checks, approval.checks[0]] }, { kind: 'vsix', sha256: artifacts[1].sha256, current, state, platform: 'win32' }).length);
+for (const name of Object.keys(PREFLIGHT_COMMANDS)) {
+  for (const change of [{ exitCode: 17 }, { stable: false }, { command: ['child-success.js'] }, { logs: [] }, { status: 'skipped' }, { summary: { complete: false } }]) {
+    const value = structuredClone(input); Object.assign(value.preflight[name].checks[0], change);
+    assert.equal(evaluateRelease(value).checks.find(item => item.name === name).status, 'failed');
+  }
+  const duplicate = structuredClone(input); duplicate.preflight[name].checks.push(duplicate.preflight[name].checks[0]); assert(!evaluateRelease(duplicate).releaseReady);
+}
+assert(!evaluateRelease({ ...input, preflightDigests: {} }).releaseReady);
 const pending = evaluateRelease({ ...input, kernelReports: [] });
 const tampered = { ...pending, status: 'passed', releaseReady: true, issues: [], checks: approval.checks };
 assert(validateReleaseApproval(tampered, { kind: 'vsix', sha256: artifacts[1].sha256, current, state, platform: 'win32' }).length, '顶层改成 passed 不得掩盖缺失内核证据');
@@ -110,6 +123,19 @@ const folder = fs.mkdtempSync(path.join(ROOT, 'build/compat-evidence-contract-')
 try {
   const write = (name, data) => { const file = path.join(folder, name); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, typeof data === 'string' ? data : JSON.stringify(data)); return file; };
   const materializeWorkflows = (value, prefix) => {
+    for (const [name, report] of Object.entries(value.preflight)) {
+      const stdout = name === 'quick-ui' ? strictLog : 'PASS 兼容声明、预发布范围、脱敏、报告漂移、必测跳过与矩阵契约\n';
+      report.checks[0].logs = ['stdout', 'stderr'].map(stream => { const file = write(prefix + '/preflight/' + name + '.' + stream + '.log', stream === 'stdout' ? stdout : 'browser diagnostic after summary\n'); return { stream, file: path.relative(ROOT, file).replace(/\\/g, '/'), sha256: sha256(file) }; });
+      report.checks[0].summary = preflightSummary(name, stdout);
+    }
+    const rawPreflight = write(prefix + '/preflight.json', value.preflight);
+    value.preflightEvidence = { file: path.relative(ROOT, rawPreflight).replace(/\\/g, '/'), sha256: sha256(rawPreflight) };
+    value.preflightDigests = Object.fromEntries([value.preflightEvidence, ...Object.values(value.preflight).flatMap(report => report.checks[0].logs)].map(item => [item.file, item.sha256]));
+    value.reportEvidence = Object.fromEntries(['candidateManifest', 'localReport', 'kernelReports', 'editorReports'].map(key => {
+      const reference = (data, index) => { const file = write(prefix + '/inputs/' + key + index + '.json', data); return { file: path.relative(ROOT, file).replace(/\\/g, '/'), sha256: sha256(file) }; };
+      return [key, key.endsWith('Reports') ? value[key].map(reference) : reference(value[key], 0)];
+    }));
+    value.reportDigests = Object.fromEntries(Object.values(value.reportEvidence).flat().map(item => [item.file, item.sha256]));
     value.workflowEvidence = {};
     for (const key of ['strictRegression', 'realWorkflow']) {
       const logs = (key === 'strictRegression' ? ['full-suite.log'] : REAL_LOGS).map(name => {
@@ -245,6 +271,15 @@ try {
     const forged = JSON.parse(JSON.stringify(publication)); forged.validation[key].status = 'failed';
     assert.throws(() => readReleaseApproval(candidateFile, write(`forged-${key}-release.json`, forged), 'vsix'), /原始报告与汇总中的内容不同/);
   }
+  for (const item of [...Object.values(live.reportEvidence).flat(), live.preflightEvidence, ...Object.values(live.preflight).flatMap(report => report.checks[0].logs)]) {
+    const file = path.resolve(ROOT, item.file), bytes = fs.readFileSync(file);
+    fs.appendFileSync(file, 'changed');
+    for (const kind of ['vsix', 'tgz', 'sdk']) assert.throws(() => readReleaseApproval(live.artifacts.find(item => item.kind === kind).file, publicationFile, kind), /发布被阻止/);
+    fs.writeFileSync(file, bytes); fs.renameSync(file, file + '.missing');
+    assert.throws(() => readReleaseApproval(candidateFile, publicationFile, 'vsix'), /发布被阻止/); fs.renameSync(file + '.missing', file);
+  }
+  const forgedPreflight = structuredClone(publication); forgedPreflight.validation.preflight['quick-ui'].checks[0].exitCode = 17;
+  assert.throws(() => readReleaseApproval(candidateFile, write('forged-preflight.json', forgedPreflight), 'vsix'), /原始报告与汇总中的内容不同/);
   assert.equal(readReleaseApproval(candidateFile, publicationFile, 'vsix').releaseReady, true, '原始字节恢复后重新核验通过');
 } finally { fs.rmSync(folder, { recursive: true, force: true }); }
 console.log('PASS schema2 指纹起止、完整严格回归、真实工作流、日志摘要重验、候选身份与历史隔离');

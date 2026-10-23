@@ -28,17 +28,23 @@ async function bounded(promise, timeout = 45000) {
 function npmRun(args) { return locate.runDshSync({ command: 'npm', args, timeoutMs: 300000 }); }
 async function run(options) {
   const folder = runDir(options.dsh || 'local');
+  const resources = require('../run-resources.cjs').createRunResources({ folder, label: 'work', keep: Boolean(options['keep-work']) });
+  const work = resources.work;
+  resources.override(resources.childEnv());
   const start = sourceState();
   const report = { schemaVersion: 2, time: new Date().toISOString(), source: start, sourceStart: start, node: process.version, platform: process.platform,
     packages: versions(), requested: options.dsh, status: 'failed', stages: [], artifacts: [], model: 'fixture' };
   let kernel, client, session, provider, port;
   const previousHome = process.env.DSH_HOME;
+  resources.defer('model', () => provider?.close());
+  resources.defer('kernel', () => kernel?.dispose());
+  resources.defer('connections', () => { session?.dispose(); client?.close(); });
   const savedProxy = Object.fromEntries(['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'].map((key) => [key, process.env[key]]));
   // 夹具只访问回环；失效的终端代理不能把回环请求发送到另一端口。
   for (const key of Object.keys(savedProxy)) delete process.env[key];
   const stage = async (name, action) => {
     const started = Date.now();
-    try { const evidence = await action(); report.stages.push({ name, status: 'passed', ms: Date.now() - started, evidence }); console.log(`PASS ${name}`); return evidence; }
+    try { const evidence = await resources.guard(action); report.stages.push({ name, status: 'passed', ms: Date.now() - started, evidence }); console.log(`PASS ${name}`); return evidence; }
     catch (error) { report.stages.push({ name, status: error.kind || 'failed', ms: Date.now() - started, error: redact(error.message) }); throw error; }
   };
   try {
@@ -48,15 +54,16 @@ async function run(options) {
       return { sha256: artifact.sha256, file: path.basename(artifact.file) };
     });
     await stage('loopback-environment', () => require('./loopback.cjs').verifyLoopback());
-    process.env.DSH_HOME = path.join(folder, 'home');
+    process.env.DSH_HOME = path.join(work, 'home');
     fs.mkdirSync(process.env.DSH_HOME, { recursive: true });
     let runtime;
     await stage('runtime', async () => {
       if (options.install) {
         if (!semver.valid(options.dsh)) throw new Error('--install 需要精确 --dsh 版本');
-        const runtimeDir = path.join(folder, 'runtime');
+        resources.check();
+        const runtimeDir = path.join(work, 'runtime');
         fs.mkdirSync(runtimeDir);
-        try { npmRun(['install', '--prefix', runtimeDir, '--registry=https://registry.npmjs.org', '--fetch-retries=0', '--fetch-timeout=20000', '--no-audit', '--no-fund', `@deepseek-ai/dsh@${options.dsh}`]); }
+        try { locate.runDshSync({ command: 'npm', timeoutMs: Math.min(300000, resources.remainingMs()), args: ['install', '--prefix', runtimeDir, '--registry=https://registry.npmjs.org', '--fetch-retries=0', '--fetch-timeout=20000', '--no-audit', '--no-fund', `@deepseek-ai/dsh@${options.dsh}`] }); }
         catch (error) { error.kind = 'acquisition-failed'; throw error; }
         runtime = { command: `${locate.quoteArg(process.execPath)} ${locate.quoteArg(path.join(runtimeDir, 'node_modules/@deepseek-ai/dsh/lib/bin.js'))}`, distribution: 'npm', version: options.dsh };
       } else runtime = resolveRuntime(options);
@@ -67,19 +74,22 @@ async function run(options) {
     });
     await stage('installation', async () => {
       locate.runDshSync({ command: runtime.command, args: ['--profile', 'compat', '--from-default-profile', 'web', '--dump-config'] });
-      locate.runDshSync({ command: runtime.command, args: ['plugin', '--profile', 'compat', 'add', `file:${path.join(ROOT, report.artifacts[0].file).replace(/\\/g, '/')}`], timeoutMs: 180000 });
+      locate.runDshSync({ command: runtime.command, args: ['plugin', '--profile', 'compat', 'add', `file:${path.join(ROOT, report.artifacts[0].file).replace(/\\/g, '/')}`], timeoutMs: Math.min(180000, resources.remainingMs()) });
       const manifest = path.join(process.env.DSH_HOME, 'profiles/compat/node_modules/dsh-acp-door/package.json');
       assert.equal(JSON.parse(fs.readFileSync(manifest)).version, report.packages.door);
+      const candidate = require('../bridge/packages.cjs').verifyCandidate(options.tgz, 'tgz');
+      assert.equal(candidate.sha256, report.artifacts[0].sha256);
+      require('../bridge/packages.cjs').verifyInstalledCandidate(candidate, path.dirname(manifest), { root: process.env.DSH_HOME });
       return { installedVersion: report.packages.door };
     });
     provider = await fixtureProvider();
-    process.env.DSH_COMPAT_FIXTURE_KEY = 'compat-local-fixture';
+    resources.override({ DSH_COMPAT_FIXTURE_KEY: 'compat-local-fixture' });
     port = await freePort();
-    const cwd = path.join(folder, 'workspace');
+    const cwd = path.join(work, 'workspace');
     fs.mkdirSync(cwd);
     const sample = path.join(cwd, 'compat-read.txt');
     fs.writeFileSync(sample, 'COMPAT_FILE_CONTENT');
-    const patch = path.join(folder, 'fixture.yml');
+    const patch = path.join(work, 'fixture.yml');
     fs.writeFileSync(patch, [
       '- id: llm-pi-ai', '  config:', '    providers:', '      compat-fixture:', '        api: openai-completions',
       `        baseURL: ${provider.url}`, '        apiKeyEnv: DSH_COMPAT_FIXTURE_KEY', '        models:', '          - id: compat-model',
@@ -91,10 +101,10 @@ async function run(options) {
     const output = [];
     await stage('startup', async () => {
       kernel = locate.spawnBackgroundDsh({ command: runtime.command, profile: 'compat', port, extraArgs: ['--patch', patch],
-        log(level, line) { output.push(`${level}: ${redact(line)}`); fs.appendFileSync(path.join(folder, 'kernel.log'), `${level}: ${redact(line)}\n`); } });
+        log(level, line) { if (resources.signal.aborted) return; output.push(`${level}: ${redact(line)}`); resources.appendLog(path.join(folder, 'kernel.log'), `${level}: ${redact(line)}\n`); } });
       await waitFor(async () => {
         if (kernel.child.exitCode !== null) throw new Error(`内核提前退出：${output.slice(-8).join('\n')}`);
-        return locate.probePort('127.0.0.1', port, 200);
+        resources.signal.throwIfAborted(); return locate.probePort('127.0.0.1', port, 200);
       }, 60000);
       return { port };
     });
@@ -117,6 +127,22 @@ async function run(options) {
       return { presets: session.doorMeta.presets.map((item) => item.value || item.id), modelOptions: session.configOptions.length };
     });
     const sessionId = session.sessionId;
+    const directText = (await client.doorStatus()).capabilities?.textGeneration;
+    if (directText?.path === 'llm-direct-v1' && directText.tools === false) await stage('text-generation', async () => {
+      let toolEvents = 0;
+      const receive = (_id, update) => { if (/tool_call/.test(update?.sessionUpdate || '')) toolEvents++; };
+      client.on('update', receive);
+      try {
+        const answer = await client.request('dsh-door/text/generate', { sessionId, prompt: 'COMPAT_STREAM' });
+        assert.equal(answer.text, 'COMPAT_OK'); assert.equal(answer.tools, false); assert.equal(answer.path, 'llm-direct-v1');
+        assert.equal((provider.requests.at(-1).tools || []).length, 0);
+        const target = path.join(work, 'forbidden-direct-write.txt');
+        await assert.rejects(client.request('dsh-door/text/generate', { sessionId, prompt: 'COMPAT_TEXT_TOOL_ATTEMPT ' + target }), /工具请求/);
+        assert(!fs.existsSync(target)); assert.equal(toolEvents, 0);
+        return { path: answer.path, toolEvents, rejectedAttempt: true, fileUnchanged: true };
+      } finally { client.off('update', receive); }
+    });
+    else report.stages.push({ name: 'text-generation', status: 'not-applicable', required: false });
     await stage('model-switch', async () => {
       const model = session.configOptions.find((item) => item.id === 'model');
       const flat = (items) => (items || []).flatMap((item) => item.options ? flat(item.options) : [item]);
@@ -229,17 +255,17 @@ async function run(options) {
     report.status = 'passed';
   } catch (error) { report.status = error.kind || 'failed'; report.error = redact(error.message); }
   finally {
-    session?.dispose(); client?.close(); kernel?.dispose();
     if (provider) {
-      fs.writeFileSync(path.join(folder, 'fixture-requests.json'), JSON.stringify(require('./lib.cjs').safeObject(provider.requests), null, 2));
-      await provider.close();
+      try { fs.writeFileSync(path.join(folder, 'fixture-requests.json'), JSON.stringify(require('./lib.cjs').safeObject(provider.requests), null, 2)); }
+      catch (error) { report.status = 'failed'; report.error ||= error.message; }
     }
+    report.resources = await resources.close();
     if (kernel && port) {
       try { await waitFor(async () => !await locate.probePort('127.0.0.1', port, 200), 10000); report.stages.push({ name: 'cleanup', status: 'passed' }); }
       catch (error) { report.stages.push({ name: 'cleanup', status: 'failed', error: error.message }); report.status = 'failed'; }
     }
     if (previousHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previousHome;
-    delete process.env.DSH_COMPAT_FIXTURE_KEY;
+    if (report.resources.status !== 'passed' || report.resources.abort) { report.status = 'failed'; report.error ||= report.resources.abort || report.resources.errors.join('; '); }
     for (const [key, value] of Object.entries(savedProxy)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     report.finishedAt = new Date().toISOString();
     require('../bridge/packages.cjs').finishEvidence(report);
@@ -254,7 +280,8 @@ if (require.main === module) {
   if (options['record-report']) {
     try { console.log(require('./matrix.cjs').recordEvidence(options['record-report'])); }
     catch (error) { console.error(redact(error.message)); process.exitCode = 1; }
-  } else if (options.discover) discover().then((result) => {
+  } else if (options.supported) console.log(JSON.stringify(require('./lib.cjs').supportedMatrix().matrix));
+  else if (options.discover) discover().then((result) => {
     const output = options.matrix ? result.matrix : result;
     console.log(JSON.stringify(output));
   }).catch((error) => { console.error(`acquisition-failed: ${redact(error.message)}`); process.exitCode = 1; });

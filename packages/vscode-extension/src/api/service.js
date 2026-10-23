@@ -27,14 +27,15 @@ class PublicApi {
       catch (error) { throw Object.assign(new Error(redactSensitiveOutput(error?.message || 'DSH 操作失败')), { code: error?.code }); }
     };
     this.exports = Object.freeze({
-      apiVersion: 1, apiRevision: 2,
-      features: Object.freeze(['sessions', 'prompt-stream', 'capability-invoke', 'cancellation', 'events', 'panel-handoff']),
+      apiVersion: 1, apiRevision: 3,
+      features: Object.freeze(['sessions', 'prompt-stream', 'capability-invoke', 'cancellation', 'events', 'panel-handoff', 'text-generation']),
       listCapabilities: invoke(async () => copy(await views.refresh())),
       getConnectionStatus: invoke(async () => { const client = await connections.ensure(); const status = await client.doorStatus(); return copy({ version: status?.version, model: status?.model, capabilities: status?.capabilities, runtime: status?.runtime, ...connections.snapshot(), connectionCount: status?.connectionCount }); }),
       review: invoke(async request => { this.signal(request?.signal); const result = await views.reviewRequest({ ...request, userInitiated: request?.userInitiated === true }); return result ? copy(result) : result; }),
       createSession: invoke(request => this.create(request)),
       restoreSession: invoke(request => this.create(request, true)),
       getPanelSession: invoke(async () => { if (panel.newSessionPending) await panel.newSessionPending; const session = await panel.ensureConnection(); if (!session) fail('对话未连接'); return this.remember(session, this.cwd(session.cwd || panel.workdir()), 'panel'); }),
+      generateText: invoke((handle, text, options) => this.generateText(handle, text, options)),
       prompt: invoke((handle, text, options) => this.prompt(handle, text, options)),
       closeSession: invoke(handle => this.close(handle)),
       invokeCapability: invoke(request => this.capability(request)),
@@ -104,6 +105,20 @@ class PublicApi {
     if (record.session.sessionId !== record.sessionId || record.session.client !== this.connections.client || record.instanceId !== this.connections.snapshot().instanceId) fail('连接已变化，请恢复原会话', -32047);
     if (execute) this.cwd(record.cwd, true);
     return record;
+  }
+  async generateText(handle, text, options = {}) {
+    this.explicit(options); const record = this.record(handle, true); this.signal(options.signal);
+    if (typeof text !== 'string' || Buffer.byteLength(text) > 256 * 1024) fail('提示文本无效或过大');
+    if (options.signal?.aborted) cancelled();
+    const client = record.session.client, status = await client.doorStatus();
+    if (status?.capabilities?.textGeneration?.path !== 'llm-direct-v1' || status.capabilities.textGeneration.tools !== false) fail('当前内核不支持禁用工具的修复生成，请更新兼容的接入点或使用手动修复。', -32042);
+    return this.connections.runSession(record.session, async () => {
+      this.record(handle, true); if (options.signal?.aborted) cancelled();
+      const result = await client.request('dsh-door/text/generate', { sessionId: record.sessionId, prompt: text }, { signal: options.signal, timeoutMs: 100000 });
+      if (options.signal?.aborted) cancelled();
+      if (result?.path !== 'llm-direct-v1' || result?.tools !== false || typeof result.text !== 'string') fail('内核未确认无工具生成结果，请重试。');
+      return copy(result);
+    });
   }
   async prompt(handle, text, options = {}) {
     this.explicit(options); const record = this.record(handle, true);

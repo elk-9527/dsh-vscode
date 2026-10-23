@@ -50,6 +50,7 @@ import {
 import { resolveSessionsRoot } from './sessions.js';
 import { createLegacyHistory, createSessionQueryHistory } from './kernel/history.js';
 import { createPermissionHandler } from './kernel/permissions.js';
+import { handleTextGeneration, textGenerationSupported } from './kernel/text-generation.js';
 import { ACP_RUNTIME_VERSION } from './kernel/runtime.js';
 import { IdeBridge } from './bridge/runtime.js';
 import { createEndpoint } from './bridge/endpoint.js';
@@ -320,6 +321,7 @@ export function gatePrompts(source, state, diag) {
           // 该插件自身的方法（历史会话 / 权限预设）在此处就地应答、不转发内核；
           // 其余帧照旧走闸。
           const incoming = parseLine(line);
+          if (handleTextGeneration(incoming, state)) continue;
           if (historyRequests.cancelHistoryRequest(incoming, state)) continue;
           if (incoming?.id !== undefined && incoming.method?.startsWith(BRIDGE_PREFIX) && state.bridge) {
             // handle() synchronously validates identity and reserves executions;
@@ -360,6 +362,7 @@ function handleDoorStatus(line, state, diag) {
   if (!isDoorStatusRequest(frame)) return false;
   const result = doorStatusPayload({
     model: state.modelRoute,
+    textGeneration: state.textGeneration,
     historyKind: state.sessionsHandler?.kind,
     acpVersion: ACP_RUNTIME_VERSION,
     permissionKind: state.permissionHandler?.kind,
@@ -711,6 +714,10 @@ export function apply(ctx, config = {}) {
     const state = {
       /** sessionId → 预设挂载 promise（入站闸与出站方向均需使用）。 */
       pending: new Map(),
+      textRuns: new Map(),
+      textPending: new Set(),
+      textLlm: ctx.llm,
+      textGeneration: textGenerationSupported(ctx.llm, ACP_RUNTIME_VERSION),
       historyReads: new Map(),
       /** 客户端指定的预设，按 session/new 的发出顺序排队。 */
       queue: [],
@@ -790,7 +797,8 @@ export function apply(ctx, config = {}) {
       typeof handle === 'function' ? handle : () => handle?.dispose?.();
     let tearingDown;
     const teardown = () => {
-      if (!tearingDown) tearingDown = bridge.idle(state).then(disposeChild);
+      for (const controller of state.textRuns.values()) controller.abort(new Error('修复生成已取消。'));
+      if (!tearingDown) tearingDown = Promise.allSettled([...state.textPending]).then(() => bridge.idle(state)).then(disposeChild);
       return tearingDown;
     };
 
@@ -801,6 +809,7 @@ export function apply(ctx, config = {}) {
     const close = () => {
       if (!live.delete(entry)) return;
       state.historyClosed = true;
+      for (const controller of state.textRuns.values()) controller.abort(new Error('修复生成已取消。'));
       for (const controller of state.historyReads.values()) controller.abort();
       bridge.detach(state);
       diag('客户端已断开');

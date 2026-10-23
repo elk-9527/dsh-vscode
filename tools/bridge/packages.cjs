@@ -2,17 +2,29 @@
 const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 const { ROOT, locate, argsOf, sha256, sourceState, versions } = require('../compat/lib.cjs');
-function packSdk(destination) {
-  fs.mkdirSync(destination, { recursive: true });
-  const packed = JSON.parse(locate.runDshSync({ command: 'npm', args: ['pack', path.join(ROOT, 'packages/dsh-bridge-sdk'), '--ignore-scripts', '--pack-destination', destination, '--json'] }));
-  return path.join(destination, packed[0].filename);
+function normalize(bytes) {
+  if (bytes.includes(0)) return bytes;
+  try { return Buffer.from(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes).replace(/\r\n/g, '\n')); }
+  catch { return bytes; }
 }
-function packDoor(destination) {
+function packPackage(source, destination) {
   fs.mkdirSync(destination, { recursive: true });
-  const packed = JSON.parse(locate.runDshSync({ command: 'npm', args: ['pack', path.join(ROOT, 'packages/dsh-door'), '--ignore-scripts', '--pack-destination', destination, '--json'] }));
-  return path.join(destination, packed[0].filename);
+  const stage = require('../test-workspace.cjs').createFixture('package-stage');
+  try {
+    for (const name of packageFiles(source)) {
+      const target = path.join(stage, name), bytes = fs.readFileSync(path.join(source, name));
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      const text = /\.(?:[cm]?js|json|md|txt|ya?ml|ts|html|css|svg)$/.test(name) || /(?:^|\/)(?:LICENSE|NOTICE)$/.test(name);
+      fs.writeFileSync(target, text ? normalize(bytes) : bytes);
+      fs.chmodSync(target, fs.statSync(path.join(source, name)).mode & 0o111 ? 0o755 : 0o644);
+      fs.utimesSync(target, 0, 0);
+    }
+    const packed = JSON.parse(locate.runDshSync({ command: 'npm', args: ['pack', stage, '--ignore-scripts', '--pack-destination', path.resolve(destination), '--json'] }));
+    return path.join(destination, packed[0].filename);
+  } finally { require('../run-resources.cjs').plainParents(stage); fs.rmSync(stage, { recursive: true, force: true }); }
 }
-const normalize = bytes => bytes.includes(0) ? bytes : Buffer.from(bytes.toString('utf8').replace(/\r\n/g, '\n'));
+function packSdk(destination) { return packPackage(path.join(ROOT, 'packages/dsh-bridge-sdk'), destination); }
+function packDoor(destination) { return packPackage(path.join(ROOT, 'packages/dsh-door'), destination); }
 function packageFiles(source) {
   const manifest = JSON.parse(fs.readFileSync(path.join(source, 'package.json')));
   const files = [];
@@ -88,14 +100,7 @@ function verifyCandidate(input, kind) {
       require('../../packages/vscode-extension/tools/package-links.cjs').verifyPackageFiles(source, extracted);
     } else {
       source = path.join(ROOT, kind === 'tgz' ? 'packages/dsh-door' : 'packages/dsh-bridge-sdk');
-      const list = execFileSync('tar', ['-tzf', file], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, timeout: 15000, maxBuffer: 4 * 1024 * 1024 }).trim().split(/\r?\n/);
-      assert(list.length <= 10000 && list.every(name => /^package\//.test(name) && !/[\u0000-\u001f\\]/.test(name) && !name.split('/').includes('..')), 'Unsafe tar package paths');
-      assert.equal(new Set(list).size, list.length, 'Duplicate tar package entries');
-      const expectedFiles = new Set(packageFiles(source).map(name => `package/${name}`));
-      assert(list.filter(name => !name.endsWith('/')).every(name => expectedFiles.has(name)), 'Unexpected tar package entries');
-      const details = execFileSync('tar', ['-tvzf', file], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, timeout: 15000, maxBuffer: 4 * 1024 * 1024 });
-      assert(details.trim().split(/\r?\n/).every(line => /^[-d]/.test(line)), 'Package contains a link or special entry');
-      execFileSync('tar', ['-xzf', file, '-C', temporary], { windowsHide: true, timeout: 30000, stdio: 'pipe' });
+      require('./package-archive.cjs').extractPackageArchive(file, temporary);
       extracted = path.join(temporary, 'package'); verifyTarFiles(source, extracted);
     }
     const manifest = JSON.parse(fs.readFileSync(path.join(extracted, 'package.json')));
@@ -104,11 +109,46 @@ function verifyCandidate(input, kind) {
     const markdown = fs.readFileSync(path.join(extracted, 'README.md'), 'utf8');
     assert.equal(require('../../packages/vscode-extension/tools/package-links.cjs').invalidSourceLinks(markdown).length, 0, 'Candidate README has invalid public source links');
     assert.equal(sha256(file), before, 'Candidate changed during verification');
-    return { kind, file, sha256: before, name: manifest.name, version: manifest.version };
+    const files = {};
+    const collect = relative => {
+      const target = path.join(extracted, relative), stat = fs.lstatSync(target);
+      assert(!stat.isSymbolicLink() && (stat.isFile() || stat.isDirectory()), 'Candidate contains a link or special file');
+      if (stat.isDirectory()) for (const name of fs.readdirSync(target).sort()) collect(path.join(relative, name));
+      else files[relative.replace(/\\/g, '/')] = sha256(target);
+    };
+    for (const name of fs.readdirSync(extracted).sort()) collect(name);
+    return { kind, file, sha256: before, name: manifest.name, version: manifest.version, files,
+      ...(kind === 'vsix' ? { installedManifestSha256: sha256(path.join(temporary, 'extension.vsixmanifest')), manifest } : {}) };
   } finally {
     assert.equal(path.dirname(path.resolve(temporary)), path.resolve(parent)); assert(!fs.lstatSync(temporary).isSymbolicLink());
     fs.rmSync(temporary, { recursive: true, force: true });
   }
+}
+/** Compare installed bytes to the exact validated producer archive, independently of checkout newlines. */
+function verifyInstalledCandidate(candidate, installed, { root = installed } = {}) {
+  const fresh = verifyCandidate(candidate.file, candidate.kind);
+  assert.equal(fresh.sha256, candidate.sha256, 'Candidate changed before installation verification');
+  const boundary = fs.realpathSync(root), target = fs.realpathSync(installed), relative = path.relative(boundary, target);
+  assert(!relative.startsWith('..') && !path.isAbsolute(relative), 'Installed package link escapes installation root');
+  const found = new Set();
+  const walk = relative => {
+    const file = path.join(target, relative), stat = fs.lstatSync(file), name = relative.replace(/\\/g, '/');
+    assert(!stat.isSymbolicLink() && (stat.isFile() || stat.isDirectory()), 'Installed package contains a link or special file');
+    if (stat.isDirectory()) { assert(Object.keys(fresh.files).some(item => item.startsWith(name + '/')), 'Unexpected installed package directory: ' + name); for (const child of fs.readdirSync(file)) walk(path.join(relative, child)); return; }
+    if (fresh.kind === 'vsix' && name === '.vsixmanifest') { assert.equal(sha256(file), fresh.installedManifestSha256, 'Installer manifest differs from candidate'); return; }
+    assert(Object.hasOwn(fresh.files, name) && !found.has(name), 'Unexpected installed package file: ' + name); found.add(name);
+    if (sha256(file) === fresh.files[name]) return;
+    // VS Code adds this documented installer field while serializing package.json.
+    if (fresh.kind === 'vsix' && name === 'package.json') {
+      const value = JSON.parse(fs.readFileSync(file)); assert(Object.hasOwn(value, '__metadata'), 'Installed package manifest bytes differ');
+      delete value.__metadata; assert.deepEqual(value, fresh.manifest, 'Installed package manifest differs from candidate'); return;
+    }
+    assert.fail('Installed package content differs / 内容不一致: ' + name);
+  };
+  for (const name of fs.readdirSync(target)) walk(name);
+  for (const name of Object.keys(fresh.files)) assert(found.has(name), 'Missing installed package file: ' + name);
+  assert.equal(sha256(candidate.file), candidate.sha256, 'Candidate changed during installation verification');
+  return { files: found.size, sha256: fresh.sha256 };
 }
 function candidates(options, { editor = false } = {}) {
   const required = editor ? ['tgz', 'sdk', 'vsix'] : ['tgz', 'sdk'];
@@ -119,7 +159,7 @@ function candidates(options, { editor = false } = {}) {
   }
   return found;
 }
-function artifactRecord(artifact) { return { ...artifact, file: path.relative(ROOT, artifact.file).replace(/\\/g, '/') }; }
+function artifactRecord({ files, installedManifestSha256, manifest, ...artifact }) { return { ...artifact, file: path.relative(ROOT, artifact.file).replace(/\\/g, '/') }; }
 function finishEvidence(report) {
   report.sourceEnd = sourceState();
   const changed = ['fingerprint', 'toolFingerprint', 'lockFingerprint'].filter(key => !report.sourceStart?.[key] || report.sourceStart[key] !== report.sourceEnd[key]);
@@ -163,4 +203,4 @@ if (require.main === module) {
   try { const options = argsOf(); assert(typeof options.out === 'string' && Object.keys(options).every(key => key === 'out'), '需要 --out 指定新的候选输出目录'); console.log(JSON.stringify(buildCandidates(options.out), null, 2)); }
   catch (error) { console.error(error.message); process.exitCode = 1; }
 }
-module.exports = { packSdk, packDoor, pinSdk, verifyCandidate, candidates, artifactRecord, finishEvidence, buildCandidates, extractVsix };
+module.exports = { verifyInstalledCandidate, packPackage, packSdk, packDoor, pinSdk, verifyCandidate, candidates, artifactRecord, finishEvidence, buildCandidates, extractVsix };

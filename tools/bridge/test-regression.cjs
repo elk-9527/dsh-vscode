@@ -15,6 +15,7 @@ async function run() {
   const directory = runDir('full-regression'), logFile = path.join(directory, 'full-suite.log');
   const sourceStart = sourceState();
   const report = { schemaVersion: 2, platform: process.platform, time: new Date().toISOString(), source: sourceStart, sourceStart, packages: versions(), status: 'failed', command: STRICT_COMMAND };
+  const resources = require('../run-resources.cjs').createRunResources({ folder: directory, label: 'work', keep: process.argv.includes('--keep-work') });
   let child;
   try {
     const options = require('../compat/lib.cjs').argsOf();
@@ -28,24 +29,25 @@ async function run() {
     report.artifacts = candidate ? [require('./packages.cjs').artifactRecord(candidate)] : [];
     const port = await freePort(), patch = desktopProfilePatchArgs({ profile: 'vscode-panel' })[1];
     report.port = port;
-    const env = { ...process.env, DSH_PANEL_HOST: '127.0.0.1', DSH_PANEL_PROFILE: 'dshdoor', DSH_PANEL_PORT: String(port), DSH_PANEL_DSH: resolveTestDshCommand() };
+    const env = { ...resources.childEnv(), DSH_PANEL_HOST: '127.0.0.1', DSH_PANEL_PROFILE: 'dshdoor', DSH_PANEL_PORT: String(port), DSH_PANEL_DSH: resolveTestDshCommand() };
     if (candidate) env.DSH_PANEL_TEST_DOOR_CANDIDATE = candidate.file;
     else delete env.DSH_PANEL_TEST_DOOR_CANDIDATE;
     if (!env.DSH_PANEL_TEST_PATCH && patch) env.DSH_PANEL_TEST_PATCH = patch;
-    const log = fs.createWriteStream(logFile);
+    fs.writeFileSync(logFile, '');
     child = spawn(process.execPath, ['test/run-all.js', '--all', '--strict'], {
-      cwd: path.join(ROOT, 'packages/vscode-extension'), windowsHide: true, env, stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: path.join(ROOT, 'packages/vscode-extension'), windowsHide: true, detached: process.platform !== 'win32', env, stdio: ['ignore', 'pipe', 'pipe'],
     });
-    child.stdout.pipe(log, { end: false }); child.stderr.pipe(log, { end: false });
-    try { report.exitCode = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); }); }
-    finally { await new Promise(resolve => log.end(resolve)); }
+    resources.child(child);
+    child.stdout.on('data', chunk => { resources.appendLog(logFile, chunk); }); child.stderr.on('data', chunk => { resources.appendLog(logFile, chunk); });
+    report.exitCode = await resources.guard(() => new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); }));
     const output = fs.readFileSync(logFile, 'utf8');
     report.summary = strictSummary(output);
     report.suites = report.summary.suites || undefined;
     if (report.exitCode === 0 && report.summary.complete) report.status = 'passed';
   } catch (error) { report.error = redact(error.message); }
   finally {
-    if (child && child.exitCode === null) child.kill();
+    report.resources = await resources.close();
+    if (report.resources.status !== 'passed' || report.resources.abort) { report.status = 'failed'; report.error ||= report.resources.abort || report.resources.errors.join('; '); }
     if (fs.existsSync(logFile)) report.log = { file: path.relative(ROOT, logFile).replace(/\\/g, '/'), sha256: sha256(logFile) };
     report.sourceEnd = sourceState();
     if (require('../compat/release-check.cjs').FINGERPRINTS.some(key => report.sourceStart[key] !== report.sourceEnd[key])) {

@@ -30,6 +30,9 @@ async function fixtureProvider({ reviewReport } = {}) {
       await new Promise(resolve => setTimeout(resolve, reviewDelay));
       send({ content: report.slice(30) }, 'stop');
       response.end('data: [DONE]\n\n'); return;
+    } else if (text.includes('COMPAT_TEXT_TOOL_ATTEMPT')) {
+      send({ tool_calls: [{ index: 0, id: 'forbidden-text-tool', type: 'function', function: { name: 'write', arguments: JSON.stringify({ file_path: text.split('COMPAT_TEXT_TOOL_ATTEMPT ')[1], content: 'must not execute' }) } }] }, 'tool_calls');
+      response.end('data: [DONE]\n\n'); return;
     } else if (text.includes('COMPAT_CANCEL')) {
       send({ content: 'COMPAT_WAIT' });
       const timer = setTimeout(() => { send({}, 'stop'); response.end('data: [DONE]\n\n'); }, 30000);

@@ -191,8 +191,7 @@ function syncDoor({ log = () => {}, command } = {}) {
     // 候选验收必须实际安装该归档；安装失败或内容不同不允许用源码覆盖成“通过”。
     runDshSync({ command, args: ['plugin', '--profile', TEST_PROFILE, 'add', `file:${candidate.file.replace(/\\/g, '/')}`] });
     if (require('node:crypto').createHash('sha256').update(fs.readFileSync(candidate.file)).digest('hex') !== candidate.sha256) throw new Error('候选归档在安装期间发生变化');
-    const drift = doorDrift();
-    if (drift.length) throw new Error(`候选安装后内容不同：${drift.join('、')}`);
+    require('../../../../tools/bridge/packages.cjs').verifyInstalledCandidate(candidate, DOOR_INSTALLED, { root: process.env.DSH_HOME });
     return { synced: true, drift: [], copied: [], candidateSha256: candidate.sha256 };
   }
   const drift = doorDrift();
