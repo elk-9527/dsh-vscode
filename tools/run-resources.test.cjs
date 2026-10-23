@@ -1,7 +1,7 @@
 'use strict';
 const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
-const { createRunResources } = require('./run-resources.cjs');
+const { createRunResources, directorySize } = require('./run-resources.cjs');
 const { createFixture } = require('./test-workspace.cjs');
 
 async function main() {
@@ -22,6 +22,12 @@ async function main() {
     assert.equal(fs.readFileSync(path.join(outside, 'keep'), 'utf8'), 'unchanged');
     assert(child.exitCode !== null || child.signalCode !== null);
   }
+  const race = createRunResources({ label: 'transient-race' });
+  const vanished = path.join(race.work, 'vanished'); fs.writeFileSync(vanished, 'temporary');
+  const originalStat = fs.lstatSync;
+  fs.lstatSync = function(file, ...args) { if (file === vanished && fs.existsSync(file)) fs.unlinkSync(file); return originalStat.call(fs, file, ...args); };
+  try { assert(directorySize(race.work) > 0); } finally { fs.lstatSync = originalStat; }
+  assert.equal((await race.close()).status, 'passed');
   const a = createRunResources({ label: 'concurrent' }), b = createRunResources({ label: 'concurrent' });
   assert.notEqual(a.work, b.work); await a.close(); assert(fs.existsSync(b.work)); await b.close();
   for (const mode of ['timeout', 'cancel', 'space', 'output']) {

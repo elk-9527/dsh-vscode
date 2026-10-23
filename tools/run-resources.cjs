@@ -8,8 +8,12 @@ let environmentOwner;
 
 function directorySize(directory) {
   let bytes = 0;
-  for (const item of fs.readdirSync(directory, { withFileTypes: true })) {
-    const file = path.join(directory, item.name), stat = fs.lstatSync(file);
+  let entries;
+  try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch (error) { if (error.code === 'ENOENT') return 0; throw error; }
+  for (const item of entries) {
+    const file = path.join(directory, item.name);
+    let stat;
+    try { stat = fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
     if (stat.isSymbolicLink()) continue;
     bytes += stat.isDirectory() ? directorySize(file) : stat.size;
   }
