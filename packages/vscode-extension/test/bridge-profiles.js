@@ -4,7 +4,7 @@ const fs = require('node:fs'), os = require('node:os'), path = require('node:pat
 const { inspectProfile, compareProfiles, installationPlan, profileReport } = require('../src/diagnostics/profiles');
 const { installRegistry, runAsync } = require('../src/diagnostics/install');
 const { capabilityState } = require('../src/bridge/availability');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-profile-diagnostics-'));
+const root = require('../../../tools/test-workspace.cjs').createFixture('profile-diagnostics');
 const options = { env: { DSH_HOME: root } }, target = 'custom-panel';
 const directory = name => path.join(root, 'profiles', name);
 const write = (profile, dependencies, bundles = Object.keys(dependencies)) => {

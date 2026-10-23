@@ -8,10 +8,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   fast-check:
     name: 快速验收 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -23,11 +28,16 @@ jobs:
       - name: 准备 Node.js
         uses: actions/setup-node@v4
         with:
-          # packageManager 固定的 pnpm 11.19.0 要求 Node.js 22.13 或更高版本。
+          # packageManager 固定的 pnpm 11.28.6 要求 Node.js 22.13 或更高版本。
           node-version: 24
 
       - name: 启用包管理器
         run: corepack enable
+
+      - name: 准备跨平台安装包验证器
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
 
       - name: 检查公开项目内容
         run: node tools/check-public-paths.cjs
@@ -35,17 +45,36 @@ jobs:
       - name: 安装锁定的依赖
         run: pnpm install --frozen-lockfile
 
+      - name: 验证 UTF-8 上游包解压与归档边界
+        run: node tools/bridge/test-package-archive.cjs
+
+      - name: 无配置与缓存构建真实上游测试插件
+        timeout-minutes: 4
+        run: node tools/bridge/test-build-pilots.cjs
+
       - name: 运行不依赖 DSH 的快速套件
         run: node packages/vscode-extension/test/run-all.js
 
       - name: 检查 SDK 与公共 API 调用方类型
         run: pnpm exec tsc --noEmit --strict --ignoreConfig --lib "es2022,dom" --module commonjs packages/dsh-bridge-sdk/test/types.ts
 
+      - name: 检查产品消息与实际 JavaScript 模块类型
+        run: pnpm exec tsc -p tsconfig.product.json
+
       - name: 检查 SDK 发行内容
         run: npm pack ./packages/dsh-bridge-sdk --ignore-scripts --dry-run --json
 
       - name: 兼容维护契约
         run: pnpm compat:contracts
+
+      - name: 候选安装边界
+        run: node packages/vscode-extension/test/candidate-regression.js
+
+      - name: 跨平台归档边界
+        run: node tools/bridge/test-archive.cjs
+
+      - name: 校验历史证据结构（当前发布验收单独进行）
+        run: node tools/compat/release-check.cjs --historical
 
       - name: 准备 macOS 无头浏览器
         if: runner.os == 'macOS'
@@ -64,9 +93,19 @@ jobs:
       - name: 检查编码与换行
         run: node packages/vscode-extension/tools/check-eol.cjs
 
-      - name: 构建 VS Code 安装包
-        run: node packages/vscode-extension/tools/build-vsix.js
+      - name: 构建并核对三个产品的候选安装包
+        run: node tools/bridge/packages.cjs --out build/ci-candidates
 
-      - name: 检查 DSH 插件安装包
-        working-directory: packages/dsh-door
-        run: node tools/publish.cjs
+  sdk-minimum-node:
+    name: 独立 SDK 最低 Node.js
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18.0.0
+      - name: 在声明的最低运行时验证 SDK 行为
+        run: node packages/dsh-bridge-sdk/test/contracts.js
+      - name: 在声明的最低运行时验证恢复记录排序
+        run: node packages/dsh-bridge-sdk/test/skill-recovery.js

@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { ROOT, argsOf, json, versions, sourceState, resolveRuntime, locate, runDir, safeObject, contentSha256 } = require('./lib.cjs');
+const { ROOT, argsOf, json, versions, sourceState, resolveRuntime, locate, runDir, safeObject } = require('./lib.cjs');
 const { freePort, waitFor, bounded } = require('./test.cjs');
 const { desktopProfilePatchArgs, syncPanelProfilePlugins } = require('../../packages/vscode-extension/src/door/setup');
 const { DoorClient } = require('../../packages/vscode-extension/src/door/client');
@@ -28,15 +28,18 @@ async function editor(report, options, folder) {
   assert(['attach', 'self'].includes(mode), '--path 需要 attach 或 self');
   const gui = require('./lib.cjs').desktopGuiProcessIds();
   assert(mode === 'attach' ? gui.length > 0 : gui.length === 0, 'Desktop GUI 状态不符合测试路径');
-  const file = path.join(ROOT, `packages/vscode-extension/build/dsh-acp-panel-${versions().panel}.vsix`);
+  const file = options.candidates.vsix.file;
   const destination = path.join(folder, 'vsix');
   const quote = (text) => `'${text.replace(/'/g, "''")}'`;
   execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory(${quote(file)}, ${quote(destination)})`], { windowsHide: true, timeout: 10000 });
-  const port = mode === 'attach' ? 47821 : await freePort();
+  const port = options.port ? Number(options.port) : mode === 'attach' ? 47821 : await freePort();
+  assert(Number.isInteger(port) && port > 0 && port <= 65535, '编辑器验收端口无效');
   assert.equal(await locate.probePort('127.0.0.1', port), mode === 'attach');
   const env = { ...process.env, DSH_PANEL_CHECK_EXTENSION_SOURCE: path.join(destination, 'extension'),
     DSH_PANEL_CHECK_PROFILE: 'vscode-panel', DSH_PANEL_CHECK_PORT: String(port), DSH_PANEL_CHECK_SELF_PORT: String(port) };
-  delete env.DSH_PANEL_CHECK_DSH;
+  if (options.command) env.DSH_PANEL_CHECK_DSH = options.command;
+  else delete env.DSH_PANEL_CHECK_DSH;
+  if (options.profile) env.DSH_PANEL_CHECK_PROFILE = options.profile;
   const result = spawnSync(process.execPath, [path.join(ROOT, 'packages/vscode-extension/tools/vscode-check.js')], { env, encoding: 'utf8', windowsHide: true, timeout: 180000 });
   const log = path.join(folder, 'editor.log');
   fs.writeFileSync(log, require('./lib.cjs').redact(`${result.stdout || ''}${result.stderr || ''}`));
@@ -48,41 +51,46 @@ async function editor(report, options, folder) {
   if (results.every((item) => item?.status === 'passed' && item.evidence.vsixSha256 === evidence.vsixSha256)) check(report, 'vsix-editor', { paths: results.map((item) => item.evidence) });
 }
 
-function installed(report) {
-  const home = process.env.DSH_HOME || path.join(require('node:os').homedir(), '.dsh');
-  const files = ['package.json', 'cordis.patch.yml', 'README.md', 'CHANGELOG.md', 'LICENSE'];
-  const walk = (base, prefix) => { for (const name of fs.readdirSync(base)) { const rel = path.join(prefix, name), file = path.join(base, name); if (fs.statSync(file).isDirectory()) walk(file, rel); else files.push(rel); } };
-  walk(path.join(ROOT, 'packages/dsh-door/lib'), 'lib');
-  const hashes = [];
-  for (const profile of ['desktop', 'vscode-panel']) {
-    const directory = path.join(home, 'profiles', profile);
-    assert(json(path.join(directory, 'package.json')).dsh.profile.bundles.includes('dsh-acp-door'));
-    for (const file of files) {
-      const source = path.join(ROOT, 'packages/dsh-door', file);
-      const target = path.join(directory, 'node_modules/dsh-acp-door', file);
-      assert.equal(contentSha256(target), contentSha256(source), `${profile}/${file} 内容不一致`);
-      hashes.push({ profile, file: file.replace(/\\/g, '/'), sha256: require('./lib.cjs').sha256(target), sourceSha256: require('./lib.cjs').sha256(source), contentSha256: contentSha256(target) });
-    }
-  }
-  const result = spawnSync(process.execPath, [path.join(ROOT, 'packages/vscode-extension/tools/check-installed.cjs')], { encoding: 'utf8', windowsHide: true, timeout: 10000 });
-  assert.equal(result.status, 0, '面板装机文件与源码不同');
-  check(report, 'installed-files', { doorFilesPerProfile: files.length, files: hashes, panel: require('./lib.cjs').redact(result.stdout) });
-  report.artifacts = ['tgz', 'vsix'].map((kind) => {
-    const file = kind === 'tgz' ? `build/dsh-acp-door-${versions().door}.tgz` : `packages/vscode-extension/build/dsh-acp-panel-${versions().panel}.vsix`;
-    return { kind, file, sha256: require('./lib.cjs').sha256(path.join(ROOT, file)) };
-  });
+function installed(report, options) {
+  const home = options.home || process.env.DSH_HOME || path.join(require('node:os').homedir(), '.dsh');
+  const manifest = json(path.join(ROOT, 'packages/vscode-extension/package.json'));
+  const extensions = path.join(require('node:os').homedir(), '.vscode/extensions'), name = `${manifest.publisher}.${manifest.name}-${manifest.version}`;
+  const extension = options['extension-dir'] ? path.resolve(options['extension-dir']) : path.join(extensions,
+    fs.existsSync(extensions) ? fs.readdirSync(extensions).find(value => value.toLowerCase() === name.toLowerCase()) || name : name);
+  check(report, 'installed-files', require('./local-targets.cjs').verifyInstallation({home, extension, candidates:options.candidates}));
 }
 
 async function local(options) {
   if (!['attach', 'self', 'probe', 'editor', 'installed'].includes(options.mode)) throw new Error('--mode 需要 attach、self、probe、editor 或 installed');
   const folder = runDir(`local-${options.mode}`);
   const file = options.out ? path.resolve(options.out) : path.join(folder, 'local-report.json');
-  const report = fs.existsSync(file) ? json(file) : { schemaVersion: 1, time: new Date().toISOString(), source: sourceState(), packages: versions(), checks: [], artifacts: [] };
-  assert.equal(report.source.fingerprint, sourceState().fingerprint, '本机报告对应的源码已变化');
+  const state = sourceState();
+  options.candidates = require('../bridge/packages.cjs').candidates(options, { editor: true });
+  const artifacts = Object.values(options.candidates).map(require('../bridge/packages.cjs').artifactRecord);
+  const previousHome = process.env.DSH_HOME;
+  const isolatedHome = options.home ? require('./local-targets.cjs').dedicatedHome(options.home) : undefined;
+  if (isolatedHome && options.mode === 'installed') assert(options['extension-dir'], '隔离装机校验需要 --extension-dir 指定独立扩展安装目录');
+  const existed = fs.existsSync(file);
+  const report = existed ? json(file) : { schemaVersion: 2, time: new Date().toISOString(), source: state, sourceStart: state, sourceEnd: state,
+    platform: process.platform, packages: versions(), status: 'pending', checks: [], artifacts };
+  assert.deepEqual(require('./release-check.cjs').validateIdentity(report, versions(), state, process.platform), [], '本机报告对应的版本、平台或验收输入已变化');
+  const targetHome = isolatedHome || previousHome || path.join(require('node:os').homedir(), '.dsh');
+  const target = fs.existsSync(targetHome) ? fs.realpathSync(targetHome) : path.resolve(targetHome);
+  const validationTarget = crypto.createHash('sha256').update(process.platform === 'win32' ? target.toLowerCase() : target).digest('hex');
+  if (existed) assert.equal(report.validationTarget, validationTarget, '本机各路径必须使用同一配置目录；旧格式目标不明的记录请保留并另建报告');
+  report.validationTarget = validationTarget;
+  if (isolatedHome) report.scope = 'isolated-local';
+  for (const artifact of artifacts) assert.equal(report.artifacts?.find(item => item.kind === artifact.kind)?.sha256, artifact.sha256, '本机各路径必须使用同一份候选包');
   let kernel, client, session, port, succeeded = false;
+  let environmentBefore;
   try {
+    if (isolatedHome) {
+      const overrides = require('./local-targets.cjs').isolatedEnvironment(isolatedHome);
+      environmentBefore = Object.fromEntries(Object.keys(overrides).map(key => [key, process.env[key]]));
+      Object.assign(process.env, overrides);
+    }
     if (options.mode === 'editor') { await editor(report, options, folder); succeeded = true; return report; }
-    if (options.mode === 'installed') { installed(report); succeeded = true; return report; }
+    if (options.mode === 'installed') { installed(report, options); succeeded = true; return report; }
     port = Number(options.port || 47821);
     if (options.mode !== 'attach') {
       const runtime = resolveRuntime(options);
@@ -90,12 +98,12 @@ async function local(options) {
       if (options.mode === 'self') {
         assert(options['desktop-closed'], '需要 --desktop-closed');
         assert.equal(require('./lib.cjs').desktopGuiProcessIds().length, 0, 'Desktop GUI 尚未退出');
-        syncPanelProfilePlugins({ command: runtime.command, profile });
+        await syncPanelProfilePlugins({ command: runtime.command, profile });
       } else {
         const directory = path.join(process.env.DSH_HOME || path.join(require('node:os').homedir(), '.dsh'), 'profiles', profile);
         if (profile !== 'compat-real') throw new Error('probe 只允许操作专用 compat-real 配置集');
         if (!fs.existsSync(path.join(directory, 'package.json'))) locate.runDshSync({ command: runtime.command, args: ['--profile', profile, '--from-default-profile', 'web', '--dump-config'] });
-        locate.runDshSync({ command: runtime.command, args: ['plugin', '--profile', profile, 'add', `file:${path.join(ROOT, `build/dsh-acp-door-${versions().door}.tgz`).replace(/\\/g, '/')}`] });
+        locate.runDshSync({ command: runtime.command, args: ['plugin', '--profile', profile, 'add', `file:${options.candidates.tgz.file.replace(/\\/g, '/')}`] });
         const manifestFile = path.join(directory, 'package.json');
         const manifest = json(manifestFile);
         const source = json(path.join(directory, '..', 'desktop/package.json'));
@@ -153,6 +161,7 @@ async function local(options) {
     succeeded = true;
   } catch (error) { report.checks.push({ name: `${options.mode}-failure`, status: 'failed', evidence: require('./lib.cjs').redact(error.message) }); throw error; }
   finally {
+    try {
     if (session?.sessionId && client) { try { await client.closeSession(session.sessionId); } catch {} }
     session?.dispose(); client?.close(); kernel?.dispose();
     let cleanupError;
@@ -162,11 +171,17 @@ async function local(options) {
     }
     if (succeeded && !cleanupError) completeAttempt(report, options.mode);
     report.finishedAt = new Date().toISOString();
+    const required = require('./release-check.cjs').LOCAL;
+    report.status = report.checks.every(item => item.status === 'passed') && required.every(name => report.checks.filter(item => item.name === name && item.status === 'passed').length === 1) ? 'passed' : 'pending';
+    require('../bridge/packages.cjs').finishEvidence(report);
     fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, `${JSON.stringify(safeObject(report), null, 2)}\n`);
     console.log(`本机验收记录：${file}`);
     if (cleanupError) throw cleanupError;
+    } finally {
+      for (const [key, value] of Object.entries(environmentBefore || {})) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    }
   }
   return report;
 }
 if (require.main === module) local(argsOf()).catch((error) => { console.error(require('./lib.cjs').redact(error.stack)); process.exitCode = 1; });
-module.exports = { local, completeAttempt };
+module.exports = { local, completeAttempt, installed };

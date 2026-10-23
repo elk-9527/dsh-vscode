@@ -22,6 +22,7 @@ const os = require('node:os');
 const Module = require('node:module');
 
 const SCRATCH = require('./helpers/door').createTestWorkspace('fallback');
+const workspaceState = require('./helpers/workspace-state').createWorkspaceState(path.join(SCRATCH, '.workspace-state.json'));
 
 /** 测试使用哪个端口：默认与面板默认值一致，可用 DSH_PANEL_TEST_PORT 指定一个空闲端口。 */
 const PORT = Number(process.env.DSH_PANEL_TEST_PORT || 47821);
@@ -126,9 +127,15 @@ let modelSkipped = false;
 const failures = [];
 const testPanels = new Set();
 function createPanel(options) {
-  const panel = new DshPanelView(options);
+  const panel = new DshPanelView({ workspaceState, ...options });
   testPanels.add(panel);
   return panel;
+}
+async function cleanupPanels() {
+  const managers = new Set();
+  for (const panel of testPanels) { panel.dispose(); managers.add(panel.kernels); }
+  for (const manager of managers) manager.disposeAll('测试收尾');
+  await Promise.all([...managers].map(manager => manager.waitForCleanup()));
 }
 
 function check(name, condition, detail) {
@@ -216,7 +223,7 @@ async function sendMessage(panel, view, text) {
     console.log('     ① 关闭桌面端 DSH（或手工启动的试验实例）后重新运行；');
     console.log(`     ② 换一个空闲端口：$env:DSH_PANEL_TEST_PORT = '47830'; node test/fallback.js`);
     console.log('     —— 按「跳过」处理，不计为失败。');
-    process.exit(2);
+    return 2;
   }
   console.log(`  ✅ ${PORT} 是空的，可以测自启内核这条路了${PATCH ? `（该插件固定在 ${PORT}，patch：${PATCH}）` : ''}`);
 
@@ -328,6 +335,7 @@ async function sendMessage(panel, view, text) {
   const childPid = panel.background && panel.background.child && panel.background.child.pid;
   console.log(`     后台 DSH 的 pid：${childPid}`);
   panel.dispose();
+  await panel.kernels.waitForCleanup();
 
   let portFreed = false;
   try {
@@ -439,6 +447,7 @@ async function sendMessage(panel, view, text) {
 
     panelB.dispose();
     check('用户显式关闭 → 确实回收（不留孤儿）', panelB.kernels.disposeAll('测试收尾') === 1);
+    await panelB.kernels.waitForCleanup();
     let freed = false;
     try {
       await waitFor(async () => !(await probePort('127.0.0.1', PORT, 400)), { totalMs: 30000, intervalMs: 600 });
@@ -455,12 +464,12 @@ async function sendMessage(panel, view, text) {
     console.log(`❌ 通过 ${passed} 项，失败 ${failed} 项：`);
     for (const item of failures) console.log(`   - ${item}`);
   }
-  process.exit(failed ? 1 : modelSkipped ? 2 : 0);
-})().catch((error) => {
-  for (const panel of testPanels) {
-    panel.dispose();
-    panel.kernels.disposeAll('测试异常收尾');
-  }
+  return failed ? 1 : modelSkipped ? 2 : 0;
+})().then(async code => {
+  await cleanupPanels();
+  process.exit(code);
+}).catch(async (error) => {
+  await cleanupPanels();
   console.error('💥 测试发生异常：', error.stack || error.message);
   process.exit(1);
 });

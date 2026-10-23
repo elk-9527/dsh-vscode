@@ -47,7 +47,7 @@ class FakeClient extends EventEmitter {
   authClient.request = async () => { sent++; throw Object.assign(new Error('expired'), { code: -32041 }); };
   await assert.rejects(guarded.request('invoke', {}, { beforeSend: () => { if (!trusted) throw Object.assign(new Error('restricted'), { code: -32044 }); } }), error => error.code === -32044);
   assert.equal(sent, 1, 'Trust is checked again after renewal, before a retried invoke'); guarded.dispose();
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-result-')); fs.writeFileSync(path.join(cwd, 'sample.txt'), 'a\nb\n');
+  const cwd = require('../../../tools/test-workspace.cjs').createFixture('bridge-result'); fs.writeFileSync(path.join(cwd, 'sample.txt'), 'a\nb\n');
   assert.equal(findingLocation(cwd, { file: 'sample.txt', startLine: 2 }).start, 1);
   assert.equal(findingLocation(cwd, { file: '../outside.txt', startLine: 1 }), undefined);
   assert.equal(findingLocation(cwd, { file: 'sample.txt', startLine: 100 }), undefined);

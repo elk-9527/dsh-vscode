@@ -10,7 +10,7 @@ const { SkillFileStore } = require('../../dsh-bridge-sdk/lib/skill-files');
 const { checkSchema } = require('../../dsh-bridge-sdk/lib/schema');
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
-const pending = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
+const pending = () => { let resolve, reject; const promise = new Promise((done, fail) => { resolve = done; reject = fail; }); return { promise, resolve, reject }; };
 
 async function connections() {
   const ready = pending();
@@ -47,6 +47,76 @@ async function connections() {
     assert.deepEqual(opened.map(item => item.isConnected), [false, false, true]);
     assert.equal(multiple.client.port, 49125);
   } finally { for (const wait of waits) wait.resolve(); multiple.dispose(); }
+
+  const attempts = [], gates = [];
+  const racing = new DshConnectionService({ makeClient: options => {
+    const gate = pending(), fake = new EventEmitter(); gates.push(gate); attempts.push(fake);
+    Object.assign(fake, options, { async connect() { await gate.promise; fake.isConnected = true; }, close() { fake.isConnected = false; } }); return fake;
+  } });
+  try {
+    const a = racing.connect({ host: '127.0.0.1', port: 49131 });
+    const aFailure = assert.rejects(a, /target A failed/);
+    const b = racing.connect({ host: '127.0.0.1', port: 49132 });
+    const bOutcome = b.then(value => ({ value }), error => ({ error }));
+    gates[0].reject(new Error('target A failed')); await aFailure; await tick();
+    assert.equal(attempts.length, 2, 'A failed target must not prevent another target from attempting a connection');
+    gates[1].resolve(); assert.equal((await bOutcome).value.port, 49132);
+    racing.disconnect();
+    const sameA = racing.connect({ host: '127.0.0.1', port: 49133 });
+    const sameB = racing.connect({ host: '127.0.0.1', port: 49133 });
+    assert.equal(attempts.length, 3); gates[2].resolve();
+    assert.equal(await sameA, await sameB, 'Concurrent callers for one target share one handshake');
+    racing.disconnect();
+    const closingA = racing.connect({ host: '127.0.0.1', port: 49134 });
+    const closingB = racing.connect({ host: '127.0.0.1', port: 49135 });
+    const closing = Promise.allSettled([closingA, closingB]); racing.dispose(); gates[3].resolve();
+    assert((await closing).every(result => result.status === 'rejected'));
+    assert.equal(attempts.length, 4, 'A waiter must not create a connection after service shutdown');
+    assert(attempts.every(fake => !fake.isConnected));
+  } finally { gates.forEach(gate => gate.resolve()); racing.dispose(); }
+
+  const reconnectGates = [], reconnectClients = [];
+  const reconnect = new DshConnectionService({ makeClient: options => {
+    const gate = pending(), fake = new EventEmitter(); reconnectGates.push(gate); reconnectClients.push(fake);
+    Object.assign(fake, options, { async connect() { await gate.promise; fake.isConnected = true; }, close() { fake.isConnected = false; } }); return fake;
+  } });
+  try {
+    const old = reconnect.connect({ host: '127.0.0.1', port: 49136 });
+    const oldResult = assert.rejects(old, /连接已取消/); reconnect.disconnect();
+    const fresh = reconnect.connect({ host: '127.0.0.1', port: 49136 });
+    reconnectGates[0].resolve(); await oldResult; await tick();
+    assert.equal(reconnectClients.length, 2, 'An explicit reconnect does not inherit a cancelled handshake from an older generation');
+    reconnectGates[1].resolve(); assert.equal(await fresh, reconnectClients[1]);
+  } finally { reconnectGates.forEach(gate => gate.resolve()); reconnect.dispose(); }
+
+  const sessions = new DshConnectionService();
+  const makeSessionClient = () => Object.assign(new EventEmitter(), { isConnected: true, starts: 0, closedSessions: [],
+    async newSession() { return { sessionId: 'session-' + ++this.starts }; },
+    async closeSession(id) { this.closedSessions.push(id); }, close() { this.isConnected = false; } });
+  const oldSessionClient = makeSessionClient(), freshSessionClient = makeSessionClient(), reply = pending();
+  sessions.client = oldSessionClient;
+  oldSessionClient.newSession = async () => { await reply.promise; return { sessionId: 'old-session' }; };
+  try {
+    const late = sessions.sessionFor('review:fixture', 'fixture');
+    const lateResult = assert.rejects(late, /销毁|变化/); await tick();
+    assert.equal(oldSessionClient.listenerCount('update'), 1);
+    sessions.disconnect(); sessions.client = freshSessionClient;
+    assert.equal(oldSessionClient.listenerCount('update'), 0, 'Disconnect disposes sessions that are still opening');
+    reply.resolve(); await lateResult;
+    const fresh = await sessions.sessionFor('review:fixture', 'fixture');
+    assert.equal(fresh.client, freshSessionClient, 'Late old replies cannot be cached by a replacement connection');
+    assert.equal(fresh.sessionId, 'session-1');
+    const shared = await Promise.all([sessions.sessionFor('review:other', 'other'), sessions.sessionFor('review:other', 'other')]);
+    assert.equal(shared[0], shared[1]); assert.equal(freshSessionClient.starts, 2, 'Concurrent surface requests create one session');
+    const beforeReplacement = sessions.sessionFor('review:other', 'third');
+    const afterReplacement = sessions.sessionFor('review:other', 'fourth');
+    await beforeReplacement; const final = await afterReplacement;
+    assert.equal(final.cwd, 'fourth'); assert.deepEqual(freshSessionClient.closedSessions, ['session-2', 'session-3']);
+    let invoked = false; sessions.client = oldSessionClient; oldSessionClient.isConnected = true;
+    await assert.rejects(sessions.runSession(fresh, () => { invoked = true; }), /会话已变化/);
+    assert.equal(invoked, false, 'Queued turns cannot execute on a session from another connection');
+    sessions.client = freshSessionClient;
+  } finally { reply.resolve(); sessions.dispose(); }
 }
 
 async function bridge(cwd) {
@@ -92,7 +162,8 @@ function skills(cwd) {
 
 (async () => {
   const failures = [];
-  const cwd = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-boundaries-')));
+  const fixtures = path.resolve(__dirname, '../../../build/test-boundaries'); fs.mkdirSync(fixtures, { recursive: true });
+  const cwd = fs.realpathSync.native(fs.mkdtempSync(path.join(fixtures, 'dsh-boundaries-')));
   try {
     for (const [name, test] of [
       ['connection cancellation and replacement serialization', connections],

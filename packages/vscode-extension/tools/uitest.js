@@ -24,17 +24,19 @@ const { SCENARIOS, buildHtml, buildReplayScript, OUT, ROOT } = require('./previe
 const { findChrome, missingChromeMessage } = require('./chrome.cjs');
 
 const CHROME = findChrome();
-const WORK = process.env.DSH_PANEL_UI_WORK ? path.resolve(process.env.DSH_PANEL_UI_WORK) : path.join(ROOT, 'build', 'uitest');
+const WORK = process.env.DSH_PANEL_UI_WORK ? path.resolve(process.env.DSH_PANEL_UI_WORK) : path.resolve(ROOT, '../../build/uitest');
 const CHROME_TIMEOUT_MS = 45000;
 const TEST_SCENARIOS = {
   ...SCENARIOS,
   usability() { return SCENARIOS.composer(); },
   testrepair() { return SCENARIOS.composer(); },
   controls() { return SCENARIOS.composer(); },
+  lifecycle() { return SCENARIOS.composer(); },
 };
 
 /** 每个场景特有的额外期望。 */
 const EXPECTATIONS = {
+  lifecycle: { needsUser: false, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0, lifecycleScene: true },
   controls: { needsUser: false, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0, controlsScene: true },
   testrepair: { needsUser: false, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0, testRepairScene: true },
   usability: { needsUser: false, needsAssistant: false, needsTools: 0, needsCaret: false, needsPermission: false, minAssistantChars: 0, usabilityScene: true },
@@ -438,6 +440,125 @@ function assertionsScript(scene) {
     //    同步等待会永久阻塞 rAF；
     // 2. 阈值设置很宽松（真实值几百毫秒），仅拦截数量级的回归 —— 例如将
     //    渲染改为「每个增量都重渲染整棵树」。
+    if (EXPECT.lifecycleScene) {
+      var receiveLife = function (message) { window.dispatchEvent(new MessageEvent('message', { data: message })); };
+      var settleLife = function () { return new Promise(function (resolve) { setTimeout(resolve, 160); }); };
+      for (var orderLife of [['thinking', 'text'], ['text', 'thinking']]) {
+        receiveLife({ type: 'reset' });
+        for (var typeLife of orderLife) receiveLife({ type: typeLife, id: 'mixed', delta: typeLife === 'text' ? '正文尾部' : '思考尾部' });
+        await settleLife();
+        assert('同帧 ' + orderLife.join(' → ') + ' 两部分都刷新', document.querySelector('.think-body').textContent === '思考尾部' && document.querySelector('.msg-assistant .body').textContent.indexOf('正文尾部') >= 0);
+      }
+      for (var statusLife of ['completed', 'cancelled', 'error']) {
+        receiveLife({ type: 'reset' });
+        receiveLife({ type: 'text', id: 'end', delta: '正文结束' });
+        receiveLife({ type: 'thinking', id: 'end', delta: '思考结束' });
+        receiveLife({ type: 'done', id: 'end', status: statusLife });
+        assert(statusLife + ' 同帧终态立即刷新思考与正文', document.querySelector('.think-body').textContent === '思考结束' && document.querySelector('.msg-assistant .body').textContent === '正文结束' && !document.querySelector('.caret'));
+        await settleLife();
+        assert(statusLife + ' 后备刷新不恢复光标', !document.querySelector('.caret'));
+      }
+      for (var lateEstablishLife of [true, false]) {
+        receiveLife({ type: 'reset' });
+        if (!lateEstablishLife) receiveLife({ type: 'assistant', id: 'established' });
+        receiveLife({ type: 'text', id: 'established', delta: '已经接收的正文' });
+        receiveLife({ type: 'thinking', id: 'established', delta: '已经接收的思考' });
+        receiveLife({ type: 'assistant', id: 'established' });
+        receiveLife({ type: 'done', id: 'established', status: 'completed' });
+        await settleLife();
+        assert((lateEstablishLife ? '建立前输出' : '重复建立') + '保留同一消息和两部分终态', document.querySelectorAll('.msg-assistant').length === 1 && document.querySelector('.msg-assistant .body').textContent === '已经接收的正文' && document.querySelector('.think-body').textContent === '已经接收的思考' && !document.querySelector('.caret'));
+        receiveLife({ type: 'assistant', id: 'established' });
+        assert('终态后重复建立不会重建节点或光标 ' + lateEstablishLife, document.querySelectorAll('.msg-assistant').length === 1 && !document.querySelector('.caret'));
+      }
+      receiveLife({ type: 'reset' });
+      receiveLife({ type: 'tool', id: 'early-tool', tool: { toolCallId: 'same-tool', status: 'in_progress', rawInput: { command: 'fixture' }, content: [{ type: 'text', text: '部分输出' }] } });
+      receiveLife({ type: 'assistant', id: 'early-tool' });
+      receiveLife({ type: 'text', id: 'early-tool', delta: '同一消息正文' });
+      receiveLife({ type: 'tool', id: 'early-tool', tool: { toolCallId: 'same-tool', status: 'completed', rawInput: { command: 'fixture' }, content: [{ type: 'text', text: '完整最终输出' }] } });
+      receiveLife({ type: 'done', id: 'early-tool', status: 'completed' });
+      await settleLife();
+      assert('工具先于助手建立时增量与终态仍只有同一张卡', document.querySelectorAll('.msg-assistant').length === 1 && document.querySelectorAll('.tool').length === 1 && !document.querySelector('#messages > .tool') && document.querySelector('.tool-status').textContent === '完成' && !document.querySelector('.caret'));
+      document.querySelector('.tool-head').click();
+      assert('提前工具的最终输出可完整展开', document.querySelector('.tool-out').textContent === '完整最终输出' && document.querySelector('.msg-assistant .body').textContent === '同一消息正文');
+      receiveLife({ type: 'reset' });
+      receiveLife({ type: 'tool', tool: { toolCallId: 'unscoped', status: 'completed', rawInput: { command: 'standalone' } } });
+      assert('没有消息身份的工具仍显示在转录根部', document.querySelectorAll('#messages > .tool').length === 1 && !document.querySelector('.msg-assistant'));
+      receiveLife({ type: 'reset' });
+      var realRafLife = window.requestAnimationFrame;
+      window.requestAnimationFrame = function () { return 0; };
+      receiveLife({ type: 'thinking', id: 'hidden', delta: '后台思考' });
+      receiveLife({ type: 'text', id: 'hidden', delta: '后台正文' });
+      await settleLife();
+      assert('动画帧暂停时定时器完整刷新两部分', document.querySelector('.think-body').textContent === '后台思考' && document.querySelector('.msg-assistant .body').textContent.indexOf('后台正文') >= 0);
+      receiveLife({ type: 'thinking', id: 'hidden', delta: '旧节点尾部' });
+      var oldLife = document.querySelector('.msg-assistant');
+      receiveLife({ type: 'reset' });
+      var oldHtmlLife = oldLife.innerHTML;
+      await settleLife();
+      assert('重置取消已销毁节点的延迟刷新', oldLife.innerHTML === oldHtmlLife && !document.querySelector('.msg-assistant'));
+      window.requestAnimationFrame = realRafLife;
+
+      var historyLife = document.getElementById('history'), permissionLife = document.getElementById('permission');
+      var inputLife = document.getElementById('input'), historyButtonLife = document.getElementById('history-btn');
+      var keyLife = function (key, extra) { var e = new KeyboardEvent('keydown', Object.assign({ key: key, bubbles: true, cancelable: true }, extra)); document.activeElement.dispatchEvent(e); return e; };
+      inputLife.focus(); historyButtonLife.click();
+      assert('历史打开后焦点进入且背景不可操作', historyLife.contains(document.activeElement) && inputLife.closest('[inert]'));
+      var historyTargetsLife = Array.from(historyLife.querySelectorAll('button:not(:disabled), input:not(:disabled)')).filter(visible);
+      historyTargetsLife[historyTargetsLife.length - 1].focus(); keyLife('Tab');
+      assert('历史 Tab 在末尾回到首项', document.activeElement === historyTargetsLife[0]);
+      keyLife('Tab', { shiftKey: true });
+      assert('历史 Shift+Tab 在首项回到末尾', document.activeElement === historyTargetsLife[historyTargetsLife.length - 1]);
+      receiveLife({ type: 'busy', busy: true }); receiveLife({ type: 'busy', busy: false });
+      assert('后台任务结束不抢历史焦点', historyLife.contains(document.activeElement));
+      keyLife('Escape', { isComposing: true });
+      assert('输入法组合 Escape 不关闭历史', !historyLife.hidden);
+      keyLife('Escape');
+      assert('历史关闭恢复打开前焦点并释放背景', historyLife.hidden && document.activeElement === inputLife && !inputLife.closest('[inert]'));
+      receiveLife({ type: 'busy', busy: true });
+      var askLife = function (id) { receiveLife({ type: 'permission', requestId: id, params: { toolCall: { title: id }, options: [{ optionId: 'allow', name: '允许', kind: 'allow_once' }, { optionId: 'deny', name: '拒绝', kind: 'reject_once' }] } }); };
+      askLife('permission-one'); askLife('permission-two');
+      assert('权限具有标题关联与可见初始焦点', permissionLife.getAttribute('role') === 'dialog' && permissionLife.getAttribute('aria-modal') === 'true' && permissionLife.getAttribute('aria-labelledby') === 'permission-title' && permissionLife.contains(document.activeElement));
+      keyLife('Escape', { isComposing: true });
+      assert('输入法组合 Escape 不答复权限', !window.__received.some(function (m) { return m.type === 'permission' && m.requestId === 'permission-one'; }));
+      keyLife('Escape');
+      assert('权限 Escape 明确取消当前请求', window.__received.some(function (m) { return m.type === 'permission' && m.requestId === 'permission-one' && m.optionId === null; }));
+      assert('连续权限请求依次可处理', !permissionLife.hidden && document.getElementById('permission-title').textContent === 'permission-two' && permissionLife.contains(document.activeElement));
+      receiveLife({ type: 'busy', busy: false });
+      assert('任务结束不抢权限焦点', permissionLife.contains(document.activeElement));
+      document.querySelector('#permission-actions button').click();
+      assert('第二个权限请求答复后恢复输入焦点', permissionLife.hidden && document.activeElement === inputLife && window.__received.some(function (m) { return m.type === 'permission' && m.requestId === 'permission-two'; }));
+      receiveLife({ type: 'reset' });
+      receiveLife({ type: 'assistant', id: 'lazy' });
+      receiveLife({ type: 'tool', id: 'lazy', tool: { toolCallId: 'lazy-tool', status: 'in_progress', rawInput: { command: 'fixture' }, content: [{ type: 'text', text: '第一次输出' }] } });
+      var lazyLife = document.querySelector('.tool'), lazyHeadLife = lazyLife.querySelector('.tool-head'), lazyBodyLife = lazyLife.querySelector('.tool-body');
+      assert('折叠工具不构建输出正文 DOM', lazyBodyLife.childNodes.length === 0);
+      receiveLife({ type: 'tool', id: 'lazy', tool: { toolCallId: 'lazy-tool', status: 'completed', rawInput: { command: 'fixture' }, content: [{ type: 'text', text: '最终完整输出 <safe>' }] } });
+      lazyHeadLife.click();
+      assert('工具展开后渲染最新完整输出并正确转义', lazyBodyLife.textContent.indexOf('最终完整输出 <safe>') >= 0 && !lazyBodyLife.querySelector('safe'));
+      assert('工具展开按钮可键盘访问且关联详情', lazyHeadLife.tagName === 'BUTTON' && lazyHeadLife.getAttribute('aria-controls') === lazyBodyLife.id && lazyHeadLife.getAttribute('aria-expanded') === 'true');
+      var lazySelectionLife = window.getSelection(), lazyRangeLife = document.createRange();
+      lazyRangeLife.selectNodeContents(lazyBodyLife.querySelector('.tool-out')); lazySelectionLife.removeAllRanges(); lazySelectionLife.addRange(lazyRangeLife);
+      receiveLife({ type: 'text', id: 'unrelated', delta: '另一条消息' });
+      receiveLife({ type: 'done', id: 'unrelated', status: 'cancelled' });
+      assert('其他消息更新和取消不破坏工具文本选择', lazySelectionLife.toString() === '最终完整输出 <safe>');
+      lazySelectionLife.removeAllRanges();
+      lazyHeadLife.click();
+      assert('折叠已展开工具保留详情且读屏隐藏', lazyBodyLife.textContent.indexOf('最终完整输出 <safe>') >= 0 && lazyBodyLife.parentElement.getAttribute('aria-hidden') === 'true');
+      receiveLife({ type: 'reset' });
+      receiveLife({ type: 'queueState', paused: true, items: [{ id: 'uncertain', text: '等待确认的消息', uncertain: true, restored: true }] });
+      assert('恢复执行中消息明确显示结果待确认且不可继续', document.getElementById('queue').textContent.indexOf('执行结果待确认') >= 0 && document.getElementById('queue-continue').disabled);
+      receiveLife({ type: 'queueState', paused: true, items: [], recoveryBlocked: true, reason: '旧恢复记录损坏' });
+      assert('损坏恢复记录仍可见且有明确放弃操作', !document.getElementById('queue').hidden && document.getElementById('queue-summary').textContent.indexOf('损坏') >= 0);
+      document.querySelector('#queue-list button').click();
+      assert('放弃恢复明确提交discardRecovery', window.__received.some(function (m) { return m.type === 'queueAction' && m.action === 'discardRecovery'; }));
+      receiveLife({ type: 'queueState', paused: false, items: [] });
+      historyButtonLife.click();
+      receiveLife({ type: 'history', via: 'cache', cachedAt: Date.now(), limitation: '连接不可用', sessions: [] });
+      assert('离线缓存展示只读摘要时间与分页范围', document.getElementById('history-meta').textContent.indexOf('只读摘要缓存') >= 0 && document.getElementById('history-meta').textContent.indexOf('当前筛选与分页') >= 0);
+      receiveLife({ type: 'history', unsupported: 2, emptyReason: 'unsupported-format', sessions: [] });
+      assert('新版本地历史限制不会显示数据为空', document.getElementById('history-list').textContent.indexOf('连接内核') >= 0 && document.getElementById('history-list').textContent.indexOf('暂无历史') < 0);
+      keyLife('Escape');
+    }
     if (EXPECT.perf) {
       var messagesNode = document.getElementById('messages');
       var segments = [];
@@ -716,6 +837,7 @@ function assertionsScript(scene) {
 
       // 焦点与键盘：浮层覆盖整个面板，因此焦点必须随之移动 ——
       // 打开时进入浮层，关闭时回到该按钮（否则焦点落到 body，键盘用户将失去位置）。
+      hbtn.focus();
       hbtn.click();
       assert('打开浮层时焦点移进了浮层（不在底下的控件上）',
         overlay.contains(document.activeElement),
@@ -1403,9 +1525,18 @@ function assertionsScript(scene) {
       queueList.querySelector('[data-action="edit"][data-id="edit-first"]').click();
       queueList.querySelector('[data-action="edit"][data-id="edit-second"]').click();
       assert('取回响应到达前不允许再取回另一项', !window.__received.some(function (message) { return message.type === 'queueAction' && message.action === 'edit' && message.id === 'edit-second'; }));
-      receiveUi({ type: 'queueState', items: [{ id: 'edit-second', text: '第二份取回内容', attachmentCount: 0 }], paused: true });
-      receiveUi({ type: 'queueEdit', id: 'edit-first', text: '第一份取回内容', attachments: [] });
+      assert('发起取回立即禁止发送与继续队列', uiSend.disabled && document.getElementById('queue-continue').disabled);
+      receiveUi({ type: 'queueEdit', phase: 'prepared', token: 'edit-first-token', id: 'edit-first', text: '第一份取回内容', attachments: [] });
       assert('取回响应保留当前草稿并提供切换', uiInput.value === '保留的停止草稿' && !document.getElementById('recover-draft').hidden);
+      var preparedEdit = latestUi('queueAction'), editActions = countUi('queueAction');
+      assert('取回确认携带原消息及当前草稿', preparedEdit.action === 'confirmEdit' && preparedEdit.token === 'edit-first-token' && preparedEdit.draft.text === '保留的停止草稿' && preparedEdit.draft.recoveries.some(function (draft) { return draft.text === '第一份取回内容'; }));
+      receiveUi({ type: 'queueEdit', phase: 'prepared', token: 'edit-first-token', id: 'edit-first', text: '第一份取回内容', attachments: [] });
+      assert('重复取回准备不重复保存或加入草稿', countUi('queueAction') === editActions && preparedEdit.draft.recoveries.length === 1);
+      receiveUi({ type: 'queueEdit', phase: 'completed', token: 'stale-token', id: 'edit-first' });
+      assert('旧确认不能解除当前取回等待', uiSend.disabled && document.getElementById('recover-draft').disabled);
+      receiveUi({ type: 'queueState', items: [{ id: 'edit-second', text: '第二份取回内容', attachmentCount: 0 }], paused: true });
+      receiveUi({ type: 'queueEdit', phase: 'completed', token: 'edit-first-token', id: 'edit-first' });
+      assert('持久化完成后解除取回等待', !uiSend.disabled && !document.getElementById('recover-draft').disabled && !document.getElementById('queue-continue').disabled);
       receiveUi({ type: 'queueState', items: [], paused: false });
       setUiText(''); document.getElementById('recover-draft').click();
       uiSend.click(); var editedSend = latestUi('send');
@@ -1661,6 +1792,20 @@ function assertionsScript(scene) {
         draftReceive({ type: 'sendCompleted', requestId: pruneSend.requestId, success: false });
         assert('队列' + (pruneAction === 'edit' ? '取回' : '移除') + '后清理已接收草稿索引', draftInput.value === '当前正文 ' + pruneAction && document.getElementById('recover-draft').hidden);
       }
+      draftReceive({ type: 'meta', cwd: '/fixture-ack', trusted: true });
+      draftText('保存期间的新正文');
+      draftReceive({ type: 'queueState', items: [{ id: 'ack-error', text: '需要持久化的取回正文', cwd: '/fixture-ack' }], paused: true });
+      document.querySelector('[data-action="edit"][data-id="ack-error"]').click();
+      draftReceive({ type: 'queueEdit', phase: 'prepared', token: 'ack-token', id: 'ack-error', cwd: '/fixture-ack', text: '需要持久化的取回正文', attachments: [] });
+      draftReceive({ type: 'queueEdit', phase: 'completed', token: 'ack-token', id: 'ack-error', error: '草稿保存失败，原消息仍保留在队列中' });
+      assert('取回保存失败解除等待并同时保留队列和两份正文', !draftSend.disabled && document.querySelector('[data-action="remove"][data-id="ack-error"]') && draftInput.value === '保存期间的新正文' && window.__draftState.recoveries.some(function(d) { return d.text === '需要持久化的取回正文'; }) && document.getElementById('hint').textContent.indexOf('保存失败') >= 0);
+      draftReceive({ type: 'meta', cwd: '/fixture-ack-other', trusted: true });
+      draftText('另一个项目的正文');
+      draftReceive({ type: 'queueEdit', phase: 'prepared', token: 'other-cwd-token', id: 'other-cwd', cwd: '/fixture-ack', text: '原目录取回正文', attachments: [] });
+      var crossCwdAck = window.__received.filter(function(m) { return m.type === 'queueAction' && m.action === 'confirmEdit'; }).pop();
+      assert('跨目录取回确认保存原目录的完整草稿', crossCwdAck.draft.cwd === '/fixture-ack' && crossCwdAck.draft.text === '保存期间的新正文' && crossCwdAck.draft.recoveries.some(function(d) { return d.text === '原目录取回正文'; }) && draftInput.value === '另一个项目的正文');
+      draftReceive({ type: 'queueEdit', phase: 'completed', token: 'other-cwd-token', id: 'other-cwd' });
+      draftReceive({ type: 'queueState', items: [], paused: false });
       draftReceive({ type: 'meta', cwd: '/fixture', trusted: true });
     }
     // ── 8. 交互：发送 / 换行 / 空输入 / 忙碌时排队 ──
@@ -1893,6 +2038,7 @@ function main() {
   }
   fs.mkdirSync(WORK, { recursive: true });
   const profile = fs.mkdtempSync(path.join(WORK, 'chrome-profile-'));
+  try {
   fs.copyFileSync(path.join(ROOT, 'media', 'main.css'), path.join(WORK, 'main.css'));
   fs.copyFileSync(path.join(ROOT, 'media', 'main.js'), path.join(WORK, 'main.js'));
   fs.copyFileSync(path.join(ROOT, 'media', 'markdown.js'), path.join(WORK, 'markdown.js'));
@@ -1937,7 +2083,10 @@ function main() {
     console.log(`❌ 通过 ${passed} 项，失败 ${failed} 项：`);
     for (const item of failures) console.log(`   - ${item}`);
   }
-  process.exit(failed === 0 ? 0 : 1);
+  process.exitCode = failed === 0 ? 0 : 1;
+  } finally {
+    fs.rmSync(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+  }
 }
 
 main();

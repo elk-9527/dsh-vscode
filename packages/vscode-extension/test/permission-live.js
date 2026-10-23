@@ -152,13 +152,13 @@ async function main() {
     console.log(`  [info] 跑的是 ${PROFILE} 档：按规矩不自动改它，只检查`);
   }
 
+  const cwd = createTestWorkspace('permission');
   const door = await ensureDoor({
     port,
     extraArgs: ['--patch', overlay],
     log: (level, message) => console.log(`  [${level}] ${message}`),
   });
 
-  const cwd = createTestWorkspace('permission');
   let client;
   try {
     section('1. 握手');
@@ -263,7 +263,7 @@ async function main() {
     check('切失败之后状态没变（还是前面那个档）',
       afterBad?.currentValue === 'workspace-write', String(afterBad?.currentValue));
 
-    section('8. 不存在的会话：要说清楚，而不是内部异常');
+    section('8. 未归属当前连接的会话：明确拒绝并说明恢复方式');
     let missingMessage = '';
     let missingCode = 0;
     try {
@@ -273,10 +273,28 @@ async function main() {
       missingCode = error && error.code;
     }
     check('报了错', missingMessage.length > 0, missingMessage);
-    check('说的是「这个内核里没有这段会话」（人话）',
-      /没有会话|没有这段|no session/i.test(missingMessage), missingMessage);
+    check('说明会话不属于当前连接，并提示先创建或恢复',
+      /不属于当前连接/.test(missingMessage) && /创建.*恢复/.test(missingMessage), missingMessage);
     check('错误码是「会话不存在」那一档（跟名字不存在分开）',
       missingCode === DOOR_CODES.NO_SESSION, String(missingCode));
+
+    section('8.5 另一条真实连接不能读取或修改第一条连接的会话权限');
+    const other = new DoorClient({ host: '127.0.0.1', port, log: () => {} });
+    try {
+      await other.connect();
+      for (const [name, request] of [
+        ['读取', () => other.permissionGet(a.sessionId)],
+        ['修改', () => other.permissionSet(a.sessionId, 'danger-full-access')],
+      ]) {
+        let error;
+        try { await request(); } catch (caught) { error = caught; }
+        check(`另一连接${name}被拒绝，返回会话错误码与恢复建议`,
+          error?.code === DOOR_CODES.NO_SESSION && /不属于当前连接/.test(error.message) && /创建.*恢复/.test(error.message),
+          error ? `${error.code}: ${error.message}` : '请求意外成功');
+      }
+      const ownerState = await client.permissionGet(a.sessionId);
+      check('原连接仍可读取，且权限未被另一连接改变', ownerState?.currentValue === 'workspace-write', String(ownerState?.currentValue));
+    } finally { other.close(); }
 
     section('9. 请求的方法名不在该插件的清单里时也能给出清晰说明');
     let unknownMethod = '';
@@ -294,7 +312,7 @@ async function main() {
       diag.split('\n').filter((line) => line.includes('权限')).slice(-3).join(' | '));
   } finally {
     if (client) client.close();
-    door.stop();
+    await door.stop();
   }
 
   console.log(`\n${'═'.repeat(56)}`);

@@ -1,6 +1,6 @@
 {
   "name": "dsh-ide-bridge-sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Typed provider registration and contract validation for DSH IDE Bridge v1.",
   "license": "MIT",
   "main": "lib/index.js",
@@ -32,7 +32,7 @@
     "directory": "packages/dsh-bridge-sdk"
   },
   "scripts": {
-    "test": "node test/contracts.js"
+    "test": "node test/contracts.js && node test/skill-recovery.js"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",

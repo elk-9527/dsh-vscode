@@ -27,7 +27,7 @@ const { describeError } = require('../src/dsh/errors');
 const { decorateOptions } = require('../src/dsh/permission');
 
 const ROOT = path.resolve(__dirname, '..');
-const OUT = path.join(ROOT, 'build', 'preview');
+const OUT = path.resolve(ROOT, '../../build/preview');
 
 /**
  * 主题变量。

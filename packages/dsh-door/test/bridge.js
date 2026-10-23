@@ -5,8 +5,9 @@ import path from 'node:path';
 import { IdeBridge } from '../lib/bridge/runtime.js';
 import { checkSchema, jsonValue } from '../lib/bridge/protocol.js';
 import { createEndpoint } from '../lib/bridge/endpoint.js';
+import { createFixture } from '../../../tools/test-workspace.cjs';
 
-const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-bridge-'));
+const home = createFixture('bridge');
 const endpoint = createEndpoint(49123, home);
 const record = JSON.parse(fs.readFileSync(path.join(home, 'run/dsh-acp-door/49123.json')));
 assert.equal(endpoint.matches('界'.repeat(64)), false, 'Non-ASCII tokens must be rejected without throwing');
@@ -54,6 +55,7 @@ try {
   const cancelled = await bridge.request('operation/get', { operationId: second.operationId }, c); assert.equal(cancelled.status, 'cancelled');
   assert.equal((await bridge.request('cancel', { operationId: second.operationId }, c)).status, 'cancelled');
   const third = await bridge.request('invoke', { ...request, requestId: 'req3' }, c); dispose();
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal((await bridge.request('operation/get', { operationId: third.operationId }, c)).result.reason, 'provider-unloaded');
   now += 900001; await rejected(bridge.request('operation/get', { operationId: third.operationId }, c), -32041);
   assert.equal((await bridge.request('catalog', {}, c)).capabilities.length, 0);
@@ -63,4 +65,4 @@ try {
   assert.throws(() => bridge.registerProvider({ id: 'bad', name: 'bad', version: '1', capabilities: [{ ...descriptor, riskTier: 'unknown' }], invoke() {} }));
   assert(!JSON.stringify(bridge.catalog()).includes(record.bootstrapToken));
   console.log('Bridge: auth, isolation, schema, idempotency, reconnect, cancellation, unloading, expiry and redaction passed');
-} finally { bridge.dispose(); assert(!fs.existsSync(path.join(home, 'run/dsh-acp-door/49123.json'))); }
+} finally { await bridge.dispose(); assert(!fs.existsSync(path.join(home, 'run/dsh-acp-door/49123.json'))); }

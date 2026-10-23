@@ -24,7 +24,8 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 async function idle(panel) { for (let n = 0; n < 40; n++) { await tick(); if (!panel.queue.active) return; } throw new Error('queue did not settle'); }
 function fixture() {
   const output = [], calls = [], client = new EventEmitter(); client.isConnected = true; client.closeSession = async () => {};
-  const panel = new DshPanelView({ extensionUri: {}, log() {}, kernels: { release() {}, acquire() {}, live() {} } });
+  const saved = new Map(), workspaceState = { get: key => saved.get(key), update: async (key, value) => saved.set(key, structuredClone(value)) };
+  const panel = new DshPanelView({ extensionUri: {}, workspaceState, log() {}, kernels: { release() {}, acquire() {}, live() {} } });
   panel.view = { webview: { postMessage: async message => { output.push(structuredClone(message)); } } };
   panel.workdir = () => PROJECT; panel.config = () => ({}); panel.refreshPermission = async () => {};
   const session = new EventEmitter(); Object.assign(session, { sessionId: 'original', cwd: PROJECT, client, messages: new Map(), configOptions: [], busy: false, dispose() {}, stop() {} });
@@ -79,9 +80,14 @@ function fixture() {
   const binding = fixture(); binding.session.busy = true;
   await binding.panel.acceptMessage({ requestId: 30, text: 'bound' }); binding.panel.queue.pause('manual'); binding.session.busy = false; binding.session.sessionId = 'other';
   await assert.rejects(binding.panel.queueAction({ action: 'continue' }), /原会话/); assert.equal(binding.calls.length, 0);
-  await binding.panel.queueAction({ action: 'edit', id: binding.panel.queue.items[0].id }); assert.equal(binding.panel.queue.items.length, 0);
+  const bindingId = binding.panel.queue.items[0].id;
+  await binding.panel.queueAction({ action: 'edit', id: bindingId }); assert.equal(binding.panel.queue.items.length, 1);
   assert(binding.output.some(item => item.type === 'queueEdit' && item.text === 'bound'));
-  assert.equal(binding.output.find(item => item.type === 'queueEdit' && item.text === 'bound').cwd, PROJECT);
+  const preparedEdit = binding.output.find(item => item.type === 'queueEdit' && item.text === 'bound');
+  assert.equal(preparedEdit.cwd, PROJECT);
+  await binding.panel.queueAction({ action: 'confirmEdit', id: bindingId, token: preparedEdit.token,
+    draft: { version: 1, cwd: PROJECT, savedAt: Date.now(), text: preparedEdit.text, attachments: preparedEdit.attachments } });
+  assert.equal(binding.panel.queue.items.length, 0);
   assert.equal(binding.panel.queue.paused, false);
   await binding.panel.queueAction({ action: 'edit', id: 'already-gone' });
   assert(binding.output.some(item => item.type === 'queueEdit' && item.id === 'already-gone' && item.error === '此消息已不在队列中'));

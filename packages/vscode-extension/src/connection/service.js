@@ -9,8 +9,8 @@ const { randomUUID } = require('node:crypto');
 class DshConnectionService extends EventEmitter {
   constructor({ log = () => {}, clientId = randomUUID(), makeClient = options => new DoorClient(options) } = {}) {
     super(); this.log = log; this.clientId = clientId; this.makeClient = makeClient;
-    this.client = undefined; this.pending = undefined; this.bridge = undefined; this.sessions = new Map();
-    this.consumers = new Set(); this.closed = false; this.driver = undefined; this.state = { state: 'disconnected' }; this.turns = new Map(); this.generation = 0;
+    this.client = undefined; this.pending = undefined; this.bridge = undefined; this.sessions = new Map(); this.sessionOpenings = new Map();
+    this.consumers = new Set(); this.closed = false; this.driver = undefined; this.state = { state: 'disconnected' }; this.turns = new Map(); this.generation = 0; this.cancelGeneration = 0;
   }
   emit(name, ...args) {
     if (name === 'state') this.state = { ...args[0] };
@@ -32,10 +32,21 @@ class DshConnectionService extends EventEmitter {
     if (this.client && this.key === key && this.client.isConnected) return this.client;
     // Several callers may resume after the same handshake. Recheck the pending
     // connection before replacing it, so each replacement owns the socket.
-    while (this.pending) { await this.pending; if (this.closed) throw new Error('连接服务已关闭'); if (this.key === key && this.client?.isConnected) return this.client; }
-    this.disconnect(); this.key = key; this.emit('state', { state: 'connecting', host, port });
+    while (this.pending) {
+      const pending = this.pending, pendingKey = this.pendingKey, pendingGeneration = this.pendingGeneration,
+        observedGeneration = this.generation, cancelGeneration = this.cancelGeneration;
+      let failure;
+      try { await pending; } catch (error) { failure = error; }
+      if (this.closed) throw new Error('连接服务已关闭');
+      if (cancelGeneration !== this.cancelGeneration) throw new Error('连接已取消');
+      if (this.key === key && this.client?.isConnected) return this.client;
+      if (failure && pendingKey === key && pendingGeneration === observedGeneration) throw failure;
+    }
+    this.disconnect({ replacing: true }); this.key = key; this.emit('state', { state: 'connecting', host, port });
     const generation = this.generation;
-    this.pending = (async () => {
+    this.pendingKey = key;
+    this.pendingGeneration = generation;
+    const pending = (async () => {
       const client = this.makeClient({ host, port, log: this.log });
       this.connectingClient = client;
       try { await client.connect(); } catch (error) { client.close(); if (generation === this.generation) this.emit('state', { state: 'error' }); throw error; }
@@ -45,12 +56,13 @@ class DshConnectionService extends EventEmitter {
       client.once('close', () => {
         if (this.client !== client) return;
         this.bridge?.dispose(); this.bridge = undefined; this.client = undefined; this.status = undefined;
-        for (const session of this.sessions.values()) session.dispose(); this.sessions.clear();
+        this.clearSessions();
         this.emit('state', { state: 'disconnected' });
       });
       this.emit('state', { state: 'connected', host, port });
       return client;
-    })().finally(() => { this.pending = undefined; });
+    })().finally(() => { if (this.pending === pending) { this.pending = undefined; this.pendingKey = undefined; } });
+    this.pending = pending;
     return this.pending;
   }
   setStatus(status) {
@@ -82,7 +94,7 @@ class DshConnectionService extends EventEmitter {
     const id = session.sessionId;
     const previous = this.turns.get(id) || Promise.resolve();
     const next = previous.catch(() => {}).then(() => {
-      if (this.closed || !this.client?.isConnected || session.sessionId !== id) throw new Error('会话已变化，请重新恢复会话');
+      if (this.closed || !this.client?.isConnected || session.client !== this.client || session.sessionId !== id) throw new Error('会话已变化，请重新恢复会话');
       return action();
     });
     this.turns.set(id, next);
@@ -90,20 +102,50 @@ class DshConnectionService extends EventEmitter {
     return next;
   }
   async sessionFor(surfaceId, cwd, options = {}) {
-    await this.ensure();
+    const client = await this.ensure(), generation = this.generation;
+    const current = () => !this.closed && client === this.client && client.isConnected && generation === this.generation;
+    if (!current()) throw new Error('连接已变化，请重新建立会话');
+    const opening = this.sessionOpenings.get(surfaceId);
+    if (opening) {
+      if (opening.client === client && opening.cwd === cwd) return opening.promise;
+      await opening.promise.catch(() => {});
+      if (!current()) throw new Error('连接已变化，请重新建立会话');
+      return this.sessionFor(surfaceId, cwd, options);
+    }
     const existing = this.sessions.get(surfaceId);
-    if (existing?.cwd === cwd && existing.sessionId) return existing;
-    if (existing) { if (existing.sessionId) await this.client.closeSession(existing.sessionId); existing.dispose(); }
-    const session = new DshSession({ client: this.client, log: this.log });
-    try { await session.start({ cwd, ...options }); session.cwd = cwd; this.sessions.set(surfaceId, session); return session; }
-    catch (error) { session.dispose(); throw error; }
+    if (existing?.cwd === cwd && existing.sessionId && existing.client === client) return existing;
+    const record = { client, cwd, session: undefined, promise: undefined };
+    record.promise = (async () => {
+      if (existing) {
+        this.sessions.delete(surfaceId); existing.dispose();
+        if (existing.sessionId && existing.client.isConnected) await existing.client.closeSession(existing.sessionId);
+        if (!current()) throw new Error('连接已变化，请重新建立会话');
+      }
+      const session = new DshSession({ client, log: this.log }); record.session = session;
+      try {
+        await session.start({ cwd, ...options });
+        if (!current() || this.sessionOpenings.get(surfaceId) !== record) throw new Error('连接已变化，请重新建立会话');
+        session.cwd = cwd; this.sessions.set(surfaceId, session); return session;
+      } catch (error) {
+        session.dispose();
+        if (session.sessionId && client.isConnected) await client.closeSession(session.sessionId).catch(() => {});
+        throw error;
+      }
+    })().finally(() => { if (this.sessionOpenings.get(surfaceId) === record) this.sessionOpenings.delete(surfaceId); });
+    this.sessionOpenings.set(surfaceId, record);
+    return record.promise;
   }
-  disconnect() {
+  clearSessions() {
+    for (const opening of this.sessionOpenings.values()) opening.session?.dispose(); this.sessionOpenings.clear();
+    for (const session of this.sessions.values()) session.dispose(); this.sessions.clear();
+  }
+  disconnect({ replacing = false } = {}) {
+    if (!replacing) this.cancelGeneration++;
     this.generation++;
     this.connectingClient?.close(); this.connectingClient = undefined;
     this.bridge?.dispose(); this.bridge = undefined;
     this.status = undefined;
-    for (const session of this.sessions.values()) session.dispose(); this.sessions.clear();
+    this.clearSessions();
     const client = this.client; this.client = undefined; if (client) client.close();
     this.emit('state', { state: 'disconnected' });
   }

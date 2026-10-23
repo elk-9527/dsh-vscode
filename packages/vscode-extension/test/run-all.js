@@ -16,6 +16,7 @@
  */
 
 const path = require('node:path');
+const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -25,6 +26,23 @@ const withDsh = args.includes('--all');
 const strict = args.includes('--strict');
 
 const suites = [
+  { name: '测试临时目录归属与清理', file: '../../tools/test-workspace.test.cjs', always: true },
+  { name: '初始仓库快照与取消', file: 'test/repository-snapshot.js', always: true },
+  { name: '未保存编辑的审查范围', file: 'test/review-scope.js', always: true },
+  { name: '本机与远程环境边界', file: 'test/runtime-support.js', always: true },
+  { name: 'Webview 消息信封', file: 'test/webview-protocol.js', always: true },
+  { name: '待发送队列持久恢复', file: 'test/queue-recovery.js', always: true },
+  { name: '候选包回归入口隔离', file: 'test/candidate-regression.js', always: true },
+  { name: '断线历史范围与格式降级', file: 'test/history-offline.js', always: true },
+  { name: '草稿持久写入合并', file: 'test/draft-persistence.js', always: true },
+  { name: '技能恢复全局时间排序', file: '../dsh-bridge-sdk/test/skill-recovery.js', always: true },
+  { name: '客户端传输预算与背压', file: 'test/transport-budget.js', always: true },
+  { name: '异步命令、超时与进程归属', file: 'test/async-command.js', always: true },
+  { name: 'Bridge 实际执行生命周期', file: '../dsh-door/test/bridge-lifecycle.js', always: true },
+  { name: 'Bridge 未停止执行的内核归属', file: 'test/bridge-kernel-lifetime.js', always: true },
+  { name: 'ACP SDK 大载荷与 v1 入口', file: '../dsh-door/test/acp-sdk.js', always: true },
+  { name: 'DSH MCP 客户端依赖链', file: '../dsh-door/test/mcp-sdk.js', always: true },
+  { name: '服务端传输预算与权限归属', file: '../dsh-door/test/transport-budgets.js', always: true },
   { name: 'Git 变更与问题诊断上下文', file: 'test/workspace-context.js', always: true },
   { name: '审查子 Agent 内核接口兼容', file: '../../tools/bridge/test-review-runtime.cjs', always: true },
   { name: '文件句柄身份与链接切换边界', file: 'test/file-state.js', always: true },
@@ -107,7 +125,12 @@ const suites = [
 ];
 
 const results = [];
+const temporaryRoot = path.resolve(ROOT, '../../build/test-runs');
+fs.mkdirSync(temporaryRoot, { recursive: true });
+const temporary = fs.mkdtempSync(path.join(temporaryRoot, 'suite-'));
+const childEnv = { ...process.env, TMP: temporary, TEMP: temporary, TMPDIR: temporary };
 
+try {
 for (const suite of suites) {
   if (!suite.always && !suite.needs) {
     console.log(`\n⏭  跳过「${suite.name}」（${suite.hint}）`);
@@ -118,7 +141,8 @@ for (const suite of suites) {
   const result = spawnSync(process.execPath, [path.join(ROOT, suite.file)], {
     cwd: ROOT,
     stdio: 'inherit',
-    env: suite.env ? { ...process.env, ...suite.env } : process.env,
+    env: { ...childEnv, ...suite.env },
+    windowsHide: true,
   });
   const ms = Date.now() - started;
   // 退出码 2 表示套件自身报告「当前无法测试」（例如端口被占用），不计为失败，
@@ -144,4 +168,7 @@ if (bad.length === 0 && skipped.length === 0) {
 } else {
   console.log(`\n❌ ${bad.length} 个套件失败`);
 }
-process.exit(bad.length === 0 && (!strict || skipped.length === 0) ? 0 : 1);
+process.exitCode = bad.length === 0 && (!strict || skipped.length === 0) ? 0 : 1;
+} finally {
+  fs.rmSync(temporary, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+}

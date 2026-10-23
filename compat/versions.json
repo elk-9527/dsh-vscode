@@ -1,5 +1,12 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "currentRelease": {
+    "status": "pending",
+    "panel": "0.18.0",
+    "door": "0.6.0",
+    "sdk": "0.1.1",
+    "evidence": []
+  },
   "platform": "win32",
   "sources": {
     "releases": "https://api.github.com/repos/deepseek-ai/deepseek-harness/releases",
@@ -42,7 +49,7 @@
       "door": "0.5.2",
       "panel": "0.16.0",
       "acp": "0.2.0-rc.2",
-      "testedAt": "2026-10-19T01:43:16.390Z",
+      "testedAt": "2026-10-19T01:43:16.39Z",
       "fingerprint": "fe9a36007c27ad1b93aee0a1e58a89346be08971c8821c7379f387803990e8b5"
     },
     {

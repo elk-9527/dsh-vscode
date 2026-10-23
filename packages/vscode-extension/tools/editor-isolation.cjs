@@ -42,6 +42,41 @@ function belongsToEditor(item, all, userData) {
   }
   return false;
 }
+/** Recognize a CLI launcher only; PID and isolated-editor ancestry establish ownership separately. */
+function isDshKernelLauncher(item) {
+  if (!/^cmd\.exe$/i.test(item.name || '')) return false;
+  const shell = String(item.cmdline || '').match(/^(?:"([^"]+)"|(\S+))\s+(?:\/[ds]\s+)*\/c\s+([\s\S]+)$/i);
+  if (!shell || !/^cmd\.exe$/i.test(path.win32.basename(shell[1] || shell[2]))) return false;
+  let command = shell[3].trim();
+  if (command.startsWith('"') && command.endsWith('"') && (command.startsWith('""') || command.indexOf('"', 1) === command.length - 1)) command = command.slice(1, -1);
+  const argv = []; let word = '', quoted = false;
+  for (const character of command) {
+    if (character === '"') { quoted = !quoted; continue; }
+    if (!quoted && /[&|<>^]/.test(character)) return false;
+    if (!quoted && /\s/.test(character)) { if (word) argv.push(word); word = ''; }
+    else word += character;
+  }
+  if (quoted) return false;
+  if (word) argv.push(word);
+  const executable = path.win32.basename(argv[0] || '').toLowerCase();
+  let flagsAt;
+  if (/^dsh(?:\.cmd)?$/.test(executable)) flagsAt = 1;
+  else if (/^node(?:\.exe)?$/.test(executable)) {
+    if (/[\\/]dsh[\\/]lib[\\/]bin\.js$/i.test(argv[1] || '')) flagsAt = 2;
+    else if (/[\\/]src[\\/]door[\\/]desktop-cli-host\.cjs$/i.test(argv[1] || '')
+      && path.win32.isAbsolute(argv[2] || '') && /^DeepSeek Harness\.exe$/i.test(path.win32.basename(argv[2]))) {
+      const packageRoot = path.win32.join(path.win32.dirname(argv[2]), 'resources', 'app.asar', 'dsh', 'node_modules', '@deepseek-ai');
+      const entries = [['dsh-desktop-host', 'cli.js'], ['dsh', 'bin.js']]
+        .map(([name, file]) => path.win32.join(packageRoot, name, 'lib', file).toLowerCase());
+      if (!entries.includes(path.win32.normalize(argv[3] || '').toLowerCase())) return false;
+      flagsAt = 4;
+    } else return false;
+  } else return false;
+  const flags = argv.slice(flagsAt), end = flags.indexOf('--');
+  if (end >= 0) flags.length = end;
+  const profile = flags.indexOf('--profile');
+  return flags.includes('--no-open') && profile >= 0 && /^(?!-)[A-Za-z0-9._-]+$/.test(flags[profile + 1] || '');
+}
 /** 清理实例根进程即可覆盖子进程，避免同一快照中重复终止已退出的后代。 */
 function editorProcessRoots(all, userData) {
   const owned = all.filter(item => ownsEditorProcess(item.CommandLine, userData));
@@ -56,4 +91,4 @@ function editorProcessRoots(all, userData) {
     return true;
   });
 }
-module.exports = { isolatedEditorOptions, ownsEditorProcess, belongsToEditor, editorProcessRoots };
+module.exports = { isolatedEditorOptions, ownsEditorProcess, belongsToEditor, isDshKernelLauncher, editorProcessRoots };

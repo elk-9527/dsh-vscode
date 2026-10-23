@@ -20,10 +20,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { SHIP } = require('./ship-list');
+const { renderedReadme, checkArchiveReadme } = require('./package-links.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
-const BUILD = path.join(ROOT, 'build');
-const STAGE = path.join(BUILD, 'stage');
+const BUILD = path.resolve(ROOT, '../../build/vscode-extension');
 
 function readManifest() {
   return JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
@@ -80,6 +80,37 @@ function escapeXml(value) {
 
 function powershellLiteral(value) { return "'" + String(value).replace(/'/g, "''") + "'"; }
 
+function createArchive(stage, file, { platform = process.platform, run = execFileSync } = {}) {
+  if (platform !== 'win32') {
+    run('python3', ['-c', [
+      'import os, sys, zipfile',
+      'with zipfile.ZipFile(sys.argv[2], "w", compression=zipfile.ZIP_DEFLATED) as archive:',
+      '  for root, directories, files in os.walk(sys.argv[1]):',
+      '    directories.sort()',
+      '    for name in sorted(files):',
+      '      source = os.path.join(root, name)',
+      '      archive.write(source, os.path.relpath(source, sys.argv[1]).replace(os.sep, "/"))',
+    ].join('\n'), stage, file], { stdio: 'inherit', windowsHide: true, timeout: 60000 });
+    return;
+  }
+  run('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
+    `$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; ` +
+    `if (Test-Path -LiteralPath ${powershellLiteral(file)}) { Remove-Item -LiteralPath ${powershellLiteral(file)} }; ` +
+    `[System.IO.Compression.ZipFile]::CreateFromDirectory(${powershellLiteral(stage)}, ${powershellLiteral(file)})`],
+  { stdio: 'inherit', windowsHide: true, timeout: 60000 });
+}
+function archiveEntries(file, { platform = process.platform, run = execFileSync } = {}) {
+  if (platform !== 'win32') return JSON.parse(run('python3', ['-c',
+    'import json, sys, zipfile\nwith zipfile.ZipFile(sys.argv[1]) as archive: print(json.dumps(archive.namelist()))', file],
+  { encoding: 'utf8', windowsHide: true, timeout: 15000, maxBuffer: 4 * 1024 * 1024 }));
+  const check = run('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
+    `$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; ` +
+    `$z=[System.IO.Compression.ZipFile]::OpenRead(${powershellLiteral(file)}); ` +
+    'try { $z.Entries | ForEach-Object { $_.FullName } } finally { $z.Dispose() }'],
+  { encoding: 'utf8', windowsHide: true, timeout: 15000, maxBuffer: 4 * 1024 * 1024 });
+  return check.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+}
+
 function manifestXml(manifest) {
   const categories = Array.isArray(manifest.categories) ? manifest.categories.join(',') : 'Other';
   return `<?xml version="1.0" encoding="utf-8"?>
@@ -111,12 +142,19 @@ function manifestXml(manifest) {
 `;
 }
 
-function main() {
+function main(args = process.argv.slice(2)) {
   const manifest = readManifest();
+  const options = require('../../../tools/compat/lib.cjs').argsOf(args);
+  if (Object.keys(options).some(key => key !== 'out') || options.out !== undefined && typeof options.out !== 'string') throw new Error('仅支持 --out 指定候选安装包');
+  const explicit = typeof options.out === 'string';
+  const vsix = explicit ? path.resolve(options.out) : path.join(BUILD, `${manifest.name}-${manifest.version}.vsix`);
+  if (!vsix.endsWith('.vsix')) throw new Error('候选安装包必须使用 .vsix 扩展名');
+  if (explicit && fs.existsSync(vsix)) throw new Error('候选安装包已经存在；请复用该文件或使用新的输出目录');
+  fs.mkdirSync(path.dirname(vsix), { recursive: true });
 
-  // 只重建暂存目录，保留历史 VSIX 与验收记录供回退。
-  if (path.dirname(path.resolve(STAGE)) !== path.resolve(BUILD) || fs.existsSync(STAGE) && fs.lstatSync(STAGE).isSymbolicLink()) throw new Error('暂存目录超出构建边界或为链接');
-  fs.rmSync(STAGE, { recursive: true, force: true });
+  fs.mkdirSync(BUILD, { recursive: true });
+  const STAGE = fs.mkdtempSync(path.join(BUILD, 'stage-'));
+  try {
   const extensionDir = path.join(STAGE, 'extension');
   fs.mkdirSync(extensionDir, { recursive: true });
 
@@ -127,39 +165,18 @@ function main() {
     }
     copyInto(from, path.join(extensionDir, item));
   }
+  fs.writeFileSync(path.join(extensionDir, 'README.md'), renderedReadme(fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8')));
 
   // 2) 两个描述文件（不得包含 BOM，否则 VS Code 解析失败）
   fs.writeFileSync(path.join(STAGE, 'extension.vsixmanifest'), manifestXml(manifest), 'utf8');
   fs.writeFileSync(path.join(STAGE, '[Content_Types].xml'), contentTypesXml(), 'utf8');
 
   // 3) 打包为 zip（使用 .NET 的实现，该实现在 .NET Core 上写入正斜杠路径，符合 vsix 要求）
-  const vsix = path.join(BUILD, `${manifest.name}-${manifest.version}.vsix`);
-  if (path.dirname(path.resolve(vsix)) !== path.resolve(BUILD)) throw new Error('安装包路径超出构建边界');
-  execFileSync(
-    'pwsh',
-    [
-      '-NoProfile',
-      '-Command',
-      `$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; ` +
-        `if (Test-Path -LiteralPath ${powershellLiteral(vsix)}) { Remove-Item -LiteralPath ${powershellLiteral(vsix)} }; ` +
-        `[System.IO.Compression.ZipFile]::CreateFromDirectory(${powershellLiteral(STAGE)}, ${powershellLiteral(vsix)})`,
-    ],
-    { stdio: 'inherit' },
-  );
+  if (!explicit && path.dirname(path.resolve(vsix)) !== path.resolve(BUILD)) throw new Error('安装包路径超出构建边界');
+  createArchive(STAGE, vsix);
 
   // 4) 自检：读回 zip 中的条目名，确认路径使用正斜杠且必需条目齐全
-  const check = execFileSync(
-    'pwsh',
-    [
-      '-NoProfile',
-      '-Command',
-      `$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; ` +
-        `$z=[System.IO.Compression.ZipFile]::OpenRead(${powershellLiteral(vsix)}); ` +
-        `try { $z.Entries | ForEach-Object { $_.FullName } } finally { $z.Dispose() }`,
-    ],
-    { encoding: 'utf8' },
-  );
-  const entries = check.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const entries = archiveEntries(vsix);
 
   const problems = [];
   if (entries.some((name) => name.includes('\\'))) problems.push('有条目名用了反斜杠（vsix 会装不上）');
@@ -173,10 +190,15 @@ function main() {
   if (problems.length) {
     console.error('  ❌ 自检没过：');
     for (const problem of problems) console.error(`     - ${problem}`);
-    process.exit(1);
+    throw new Error('候选安装包结构检查失败');
   }
   console.log('  ✅ 自检通过（结构完整、条目名规范）');
+  checkArchiveReadme(vsix);
+  return vsix;
+  } finally {
+    fs.rmSync(STAGE, { recursive: true, force: true });
+  }
 }
 
 if (require.main === module) main();
-module.exports = { manifestXml, contentTypesXml };
+module.exports = { manifestXml, contentTypesXml, createArchive, archiveEntries, buildVsix: main };

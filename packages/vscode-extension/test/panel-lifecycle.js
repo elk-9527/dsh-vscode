@@ -575,6 +575,7 @@ async function checkConcurrentNewSession() {
   const sendPanel = new DshPanelView({ extensionUri: { fsPath: 'D:/extension' }, log: () => {}, kernels: fakeKernels() });
   const sendSession = fakeSession('send-old');
   const sendClient = fakeClient();
+  sendSession.client = sendClient;
   let releaseStart;
   let startFinished = false;
   let sent = false;

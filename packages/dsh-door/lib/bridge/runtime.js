@@ -5,9 +5,12 @@ import { PREFIX, BridgeError, fail, jsonValue, requiredString, checkSchema, capa
 const terminal = status => ['completed', 'failed', 'cancelled'].includes(status);
 /** 内核级能力注册与运行记录；socket 和 Agent 的所有权由连接状态显式传入。 */
 export class IdeBridge {
-  constructor({ now = Date.now, endpoint } = {}) {
+  constructor({ now = Date.now, endpoint, limits = {}, sweepIntervalMs = 60000 } = {}) {
     this.now = now; this.endpoint = endpoint; this.providers = new Map(); this.capabilities = new Map();
     this.operations = new Map(); this.requests = new Map(); this.locks = new Map(); this.connections = new Set(); this.idleWaiters = new Map(); this.revision = 0;
+    this.limits = { active: 32, operations: 1000, requests: 1000, requestBytes: 32 * 1024 * 1024, retainedBytes: 64 * 1024 * 1024, ...limits };
+    this.disposed = false;
+    this.sweeper = setInterval(() => this.sweep(), sweepIntervalMs); this.sweeper.unref();
   }
   registerProvider(provider) {
     requiredString(provider.id); requiredString(provider.name); requiredString(provider.version);
@@ -22,8 +25,10 @@ export class IdeBridge {
       if (disposed) return; disposed = true;
       this.providers.delete(provider.id);
       for (const item of items) this.capabilities.delete(item.id);
-      for (const op of this.operations.values()) if (op.providerId === provider.id && !terminal(op.status)) {
-        op.controller.abort(); this.finish(op, 'failed', { reason: 'provider-unloaded' });
+      for (const op of this.operations.values()) if (op.providerId === provider.id && !op.settled) {
+        // Older clients release their kernel consumer on terminal events. Do
+        // not announce completion until even an uncooperative provider stops.
+        op.stopReason = 'provider-unloaded'; op.controller.abort();
       }
       this.changed();
     };
@@ -34,34 +39,61 @@ export class IdeBridge {
   }
   authorized(state) { return Boolean(state.bridgeOwner && state.bridgeLease > this.now()); }
   catalog() { return { protocolVersion: 1, revision: this.revision, capabilities: [...this.capabilities.values()].map(x => x.item) }; }
+  activeCount() { return [...this.operations.values()].filter(op => !op.settled).length; }
+  requestBytes() { return [...this.requests.values()].reduce((sum, item) => sum + item.bytes, 0); }
+  retainedBytes() { return [...this.operations.values()].reduce((sum, op) => sum + op.bytes + (op.resultBytes || 0), 0); }
   sweep() {
-    for (const [key, item] of this.requests) if (item.expires <= this.now()) this.requests.delete(key);
-    for (const [id, op] of this.operations) if (terminal(op.status) && op.finishedAt + 1800000 <= this.now()) this.operations.delete(id);
+    for (const [key, item] of this.requests) if (!item.active && item.expires <= this.now()) this.requests.delete(key);
+    for (const [id, op] of this.operations) if (op.settled && op.finishedAt + 1800000 <= this.now()) this.operations.delete(id);
+    // Never evict an active execution: forgetting one would release its lock or
+    // allow its request ID to execute again while the provider is still running.
+    for (const [id, op] of this.operations) {
+      if (this.retainedBytes() <= this.limits.retainedBytes && this.operations.size < this.limits.operations) break;
+      if (op.settled) this.operations.delete(id);
+    }
+    for (const item of this.requests.values()) {
+      if (this.requestBytes() <= this.limits.requestBytes) break;
+      if (!item.active && item.responseBytes) { item.promise = undefined; item.bytes -= item.responseBytes; item.responseBytes = 0; }
+    }
   }
   emit(op, type, payload = {}) {
     if (terminal(op.status) && !['completed', 'failed', 'cancelled'].includes(type)) return;
     const event = jsonValue({ operationId: op.id, seq: ++op.seq, type, at: new Date(this.now()).toISOString(), payload });
     op.events.push(event); op.bytes += Buffer.byteLength(JSON.stringify(event));
     while (op.events.length > 200 || op.bytes > 2 * 1024 * 1024) op.bytes -= Buffer.byteLength(JSON.stringify(op.events.shift()));
+    // Bound aggregate event retention even while all executions remain active.
+    // A snapshot's gap flag and terminal result preserve recovery semantics.
+    for (const item of this.operations.values()) {
+      while (item.events.length && this.retainedBytes() > this.limits.retainedBytes) {
+        item.bytes -= Buffer.byteLength(JSON.stringify(item.events.shift()));
+      }
+    }
     for (const state of this.connections) if (state.bridgeOwner === op.owner && this.authorized(state)) state.respond({ jsonrpc: '2.0', method: `${PREFIX}event`, params: event });
   }
   finish(op, status, payload) {
     if (terminal(op.status)) return;
     const result = jsonValue(payload);
-    jsonValue({ operationId: op.id, seq: op.seq + 1, type: status, at: new Date(this.now()).toISOString(), payload: result });
+    if (op.kind !== 'resource') jsonValue({ operationId: op.id, seq: op.seq + 1, type: status, at: new Date(this.now()).toISOString(), payload: result });
     op.status = status; op.finishedAt = this.now(); op.result = result;
+    op.resultBytes = Buffer.byteLength(JSON.stringify(result));
+    if (op.kind !== 'resource') this.emit(op, status, op.result);
+  }
+  settle(op) {
+    if (op.settled) return;
+    op.settled = true;
     if (op.lock && this.locks.get(op.lock) === op.id) this.locks.delete(op.lock);
-    this.emit(op, status, op.result);
-    // 完成后释放 Agent 和提供方持有的执行上下文，只保留序列化记录。
+    // A visible terminal result does not prove cancellation succeeded. Only the
+    // provider promise's actual settlement releases the Agent and concurrency.
     op.controller = undefined;
     const scope = op.scope; op.scope = undefined;
-    if (scope && ![...this.operations.values()].some(item => item.scope === scope && !terminal(item.status))) {
+    if (scope && ![...this.operations.values()].some(item => item.scope === scope && !item.settled)) {
       for (const resolve of this.idleWaiters.get(scope) || []) resolve(); this.idleWaiters.delete(scope);
     }
+    this.sweep();
   }
   snapshot(op, afterSeq = 0) {
     return { operationId: op.id, capabilityId: op.capabilityId, status: op.status, seq: op.seq,
-      acceptedAt: new Date(op.acceptedAt).toISOString(), gap: op.events.length > 0 && afterSeq < op.events[0].seq - 1,
+      acceptedAt: new Date(op.acceptedAt).toISOString(), gap: afterSeq < (op.events[0]?.seq ?? op.seq + 1) - 1,
       events: op.events.filter(e => e.seq > afterSeq), ...(terminal(op.status) ? { result: op.result } : {}) };
   }
   operation(state, id) {
@@ -71,6 +103,7 @@ export class IdeBridge {
   }
   async request(method, params, state) {
     this.sweep(); jsonValue(params || {});
+    if (this.disposed) fail(-32043, '插件运行时已卸载');
     if (method === 'catalog') return this.catalog();
     if (method === 'auth') {
       if (!this.endpoint || params?.instanceId !== this.endpoint.instanceId || !this.endpoint.matches(params?.bootstrapToken)) fail(-32042, '无法确认本机接入点身份');
@@ -100,13 +133,31 @@ export class IdeBridge {
     if (this.requests.has(key)) {
       const saved = this.requests.get(key);
       if (saved.fingerprint !== fingerprint) fail(-32046, '重复请求参数不一致');
+      if (!saved.promise) fail(-32047, '该请求结果已超出缓存预算；请查询已有运行记录，不要自动重试写操作');
       return saved.promise;
     }
-    const promise = this.invoke(params, state);
-    this.requests.set(key, { fingerprint, promise, expires: this.now() + 600000 });
-    try { return await promise; } catch (error) { this.requests.delete(key); throw error; }
+    const bytes = Buffer.byteLength(key) + Buffer.byteLength(fingerprint);
+    if (this.requests.size >= this.limits.requests || this.requestBytes() + bytes > this.limits.requestBytes) fail(-32045, '请求缓存达到上限');
+    let resolve, reject;
+    const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+    const saved = { fingerprint, promise, bytes, active: true, expires: Infinity };
+    this.requests.set(key, saved);
+    // Reserve the request before validation can reach provider code. Synchronous
+    // registration/validation keeps auth -> invoke in one input chunk ordered.
+    let execution;
+    try { execution = this.invoke(params, state, saved); }
+    catch (error) { this.requests.delete(key); reject(error); return promise; }
+    Promise.resolve(execution).then(result => {
+      saved.responseBytes = Buffer.byteLength(JSON.stringify(result)); saved.bytes += saved.responseBytes;
+      resolve(result); this.sweep();
+    }, error => {
+      if (!saved.started) this.requests.delete(key);
+      else { saved.responseBytes = 0; saved.active = false; saved.expires = this.now() + 600000; }
+      reject(error);
+    });
+    return promise;
   }
-  async invoke(params, state) {
+  invoke(params, state, saved) {
     const entry = this.capabilities.get(requiredString(params.capabilityId));
     if (!entry || entry.item.availability.state !== 'available') fail(-32043, '插件能力当前不可用');
     const { item, provider } = entry;
@@ -125,36 +176,60 @@ export class IdeBridge {
       if (!agentCwd || fs.realpathSync(agentCwd) !== cwd) fail(-32046, '会话与工作目录不一致');
     }
     const controller = new AbortController();
-    if (item.kind === 'resource') {
-      return { mode: 'immediate', value: jsonValue(await provider.invoke(item.id, input, {
-        cwd, sessionId: context.sessionId, agent, clientId: state.bridgeOwner, userInitiated: context.userInitiated === true, approved: context.approved === true, workspaceTrusted: context.workspaceTrusted === true, signal: controller.signal, emit() {},
-      })) };
-    }
-    if ([...this.operations.values()].filter(op => !terminal(op.status)).length >= 32 || this.operations.size >= 1000) fail(-32045, '当前运行数量达到上限');
+    if (this.activeCount() >= this.limits.active || this.operations.size >= this.limits.operations) fail(-32045, '当前运行数量达到上限');
     const lock = agent ? context.sessionId : undefined;
     if (lock && (this.locks.has(lock) || agent.status === 'running')) fail(-32045, '同一会话已有运行');
     const op = { id: randomUUID(), owner: state.bridgeOwner, capabilityId: item.id, providerId: provider.id,
-      status: 'running', acceptedAt: this.now(), controller, lock, scope: state, supportsCancellation: item.supportsCancellation, seq: 0, events: [], bytes: 0 };
+      kind: item.kind, requestId: params.requestId, settled: false, status: 'running', acceptedAt: this.now(), controller, lock, scope: state, supportsCancellation: item.supportsCancellation, seq: 0, events: [], bytes: 0 };
     this.operations.set(op.id, op); if (lock) this.locks.set(lock, op.id);
-    this.emit(op, 'started');
+    saved.started = true;
+    if (item.kind !== 'resource') this.emit(op, 'started');
     // 执行脱离请求流；断线不取消运行，新的已鉴权连接可查询相同身份的结果。
-    Promise.resolve().then(() => provider.invoke(item.id, input, { cwd, agent, sessionId: context.sessionId,
+    const executing = Promise.resolve().then(() => {
+      if (op.stopReason) fail(-32043, '提供方执行已取消');
+      return provider.invoke(item.id, input, { cwd, agent, sessionId: context.sessionId,
       clientId: state.bridgeOwner, userInitiated: context.userInitiated === true, approved: context.approved === true, workspaceTrusted: context.workspaceTrusted === true, signal: controller.signal,
-      emit: event => { if (!['progress', 'artifact'].includes(event?.type)) fail(-32046, '插件事件无效'); this.emit(op, event.type, event.payload); },
-    })).then(result => this.finish(op, controller.signal.aborted ? 'cancelled' : 'completed', result ?? {}),
-      () => this.finish(op, controller.signal.aborted ? 'cancelled' : 'failed', { reason: 'provider-failed' }))
-      .catch(() => this.finish(op, 'failed', { reason: 'invalid-output' }));
+      emit: event => { if (!['progress', 'artifact'].includes(event?.type)) fail(-32046, '插件事件无效'); if (item.kind !== 'resource') this.emit(op, event.type, event.payload); },
+      });
+    }).then(result => {
+      if (op.stopReason) fail(-32043, '提供方执行已取消');
+      const value = jsonValue(result ?? {});
+      this.finish(op, controller.signal.aborted ? 'cancelled' : 'completed', value);
+      return { mode: 'immediate', value };
+    }, () => {
+      const status = op.stopReason && op.stopReason !== 'connection-closed' ? 'failed' : controller.signal.aborted ? 'cancelled' : 'failed';
+      this.finish(op, status, { reason: op.stopReason || 'provider-failed' });
+      fail(-32043, '提供方执行失败');
+    }).catch(error => {
+      this.finish(op, 'failed', { reason: op.stopReason || 'invalid-output' }); throw error;
+    }).finally(() => {
+      saved.active = false; saved.expires = this.now() + 600000; this.settle(op);
+    });
+    if (item.kind === 'resource') return executing;
+    void executing.catch(() => {});
     return { mode: 'operation', operationId: op.id, acceptedAt: new Date(op.acceptedAt).toISOString() };
   }
-  detach(state) { this.connections.delete(state); state.agentsBySession?.clear(); }
+  detach(state) {
+    this.connections.delete(state);
+    for (const op of this.operations.values()) if (op.scope === state && op.kind === 'resource' && !op.settled) {
+      op.stopReason = 'connection-closed'; op.controller.abort();
+    }
+    void this.idle(state).then(() => state.agentsBySession?.clear());
+  }
   idle(state) {
-    if (![...this.operations.values()].some(op => op.scope === state && !terminal(op.status))) return Promise.resolve();
+    if (![...this.operations.values()].some(op => op.scope === state && !op.settled)) return Promise.resolve();
     return new Promise(resolve => { const waiters = this.idleWaiters.get(state) || []; waiters.push(resolve); this.idleWaiters.set(state, waiters); });
   }
   dispose() {
-    for (const op of this.operations.values()) if (!terminal(op.status)) { op.controller.abort(); this.finish(op, 'failed', { reason: 'bridge-unloaded' }); }
-    this.connections.clear(); this.providers.clear(); this.capabilities.clear(); this.requests.clear(); this.operations.clear();
-    this.endpoint?.dispose();
+    if (this.disposal) return this.disposal;
+    this.disposed = true; clearInterval(this.sweeper);
+    const waiting = [...new Set([...this.operations.values()].filter(op => !op.settled).map(op => op.scope))].map(scope => this.idle(scope));
+    for (const op of this.operations.values()) if (!op.settled) { op.stopReason = 'bridge-unloaded'; op.controller.abort(); }
+    this.providers.clear(); this.capabilities.clear();
+    this.disposal = Promise.all(waiting).then(() => {
+      this.connections.clear(); this.endpoint?.dispose(); this.requests.clear(); this.operations.clear();
+    });
+    return this.disposal;
   }
   /** Bridge 自身的错误仅返回稳定描述，提供方原始异常和凭据不进入协议。 */
   async handle(frame, state) {

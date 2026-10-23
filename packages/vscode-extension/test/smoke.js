@@ -20,11 +20,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DoorClient } = require('../src/door/client');
 const { DshSession, flattenChoices } = require('../src/dsh/session');
-const { ensureDoor, isMissingModelCredentials } = require('./helpers/door');
+const { ensureDoor, isMissingModelCredentials, createTestWorkspace } = require('./helpers/door');
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.DSH_PANEL_PORT || 47821);
-const SCRATCH = path.resolve(__dirname, '..', '..', '..', 'spike', 'scratch');
+const SCRATCH = createTestWorkspace('smoke');
 
 const args = process.argv.slice(2);
 const FAST = args.includes('--fast');
@@ -91,6 +91,8 @@ async function runOnce(round) {
   // ── 2. 握手 ────────────────────────────────────────
   section('2. ACP 握手');
   const client = new DoorClient({ host: HOST, port: PORT, log });
+  let session;
+  try {
   const init = await client.connect();
   check('initialize 有回应', Boolean(init));
   check('内核自报家门', Boolean(client.agentInfo && client.agentInfo.name), JSON.stringify(client.agentInfo));
@@ -98,7 +100,7 @@ async function runOnce(round) {
 
   // ── 3. 建会话 ──────────────────────────────────────
   section('3. 建会话');
-  const session = new DshSession({ client, log });
+  session = new DshSession({ client, log });
   const seen = {
     text: 0,
     thinking: 0,
@@ -326,8 +328,10 @@ async function runOnce(round) {
     );
   }
 
-  session.dispose();
-  client.close();
+  } finally {
+    session?.dispose();
+    client.close();
+  }
 }
 
 (async () => {
@@ -340,21 +344,22 @@ async function runOnce(round) {
     process.exit(1);
   }
 
+  try {
   for (let round = 1; round <= REPEAT; round += 1) {
     try {
       await runOnce(round);
     } catch (error) {
       if (isMissingModelCredentials(error)) {
-        door.stop();
         console.log('\n⏭  ACP 握手与建会话成功，但本机没有当前模型的凭据；跳过真实模型回合。');
-        process.exit(2);
+        process.exitCode = 2;
+        return;
       }
       failed += 1;
       failures.push(`第 ${round} 轮发生异常：${error.message}`);
       console.log(`\n💥 第 ${round} 轮异常：${error.stack || error.message}`);
     }
   }
-  door.stop();
+  } finally { await door.stop(); }
 
   console.log(`\n${'═'.repeat(56)}`);
   if (failed === 0) {

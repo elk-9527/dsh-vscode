@@ -98,21 +98,21 @@ class PublicApi {
       return this.describe(record);
     } catch (error) { if (session.sessionId) await session.client.closeSession(session.sessionId).catch(() => {}); session.dispose(); throw error; }
   }
-  record(handle) {
+  record(handle, execute = false) {
     const record = this.sessions.get(typeof handle === 'string' ? handle : handle?.id);
     if (!record) fail('会话不属于当前 API 调用', -32047);
-    this.cwd(record.cwd, true);
     if (record.session.sessionId !== record.sessionId || record.session.client !== this.connections.client || record.instanceId !== this.connections.snapshot().instanceId) fail('连接已变化，请恢复原会话', -32047);
+    if (execute) this.cwd(record.cwd, true);
     return record;
   }
   async prompt(handle, text, options = {}) {
-    this.explicit(options); const record = this.record(handle);
+    this.explicit(options); const record = this.record(handle, true);
     if (typeof text !== 'string' || Buffer.byteLength(text) > 256 * 1024) fail('提示文本无效或过大');
     this.signal(options.signal);
     if (options.signal?.aborted) cancelled();
     const session = this.panel.session?.sessionId === record.session.sessionId ? this.panel.session : record.session;
     return this.connections.runSession(session, async () => {
-      this.record(handle); if (options.signal?.aborted) cancelled();
+      this.record(handle, true); if (options.signal?.aborted) cancelled();
       const receive = [], pendingPermissions = new Set(); let finished = false;
       for (const name of ['text', 'thinking', 'tool', 'usage', 'done']) {
         const listener = value => { try { options.onEvent?.(copy({ type: name, ...value })); } catch {} };
@@ -145,7 +145,7 @@ class PublicApi {
     const catalog = await bridge.catalog(), capability = catalog.capabilities.find(item => item.id === request.capabilityId);
     if (!capability) fail('插件能力不可用', -32043);
     if (capability.riskTier !== 'read') { this.explicit(request); this.cwd(cwd, true); }
-    const handle = request.session ? this.record(request.session) : undefined;
+    const handle = request.session ? this.record(request.session, true) : undefined;
     if (handle && handle.cwd !== cwd) fail('会话和操作目录不一致');
     const context = { cwd, sessionId: handle?.session.sessionId, workspaceTrusted: this.vscode.workspace.isTrusted === true, userInitiated: request.userInitiated === true, approved: request.approved === true };
     const beforeSend = () => {
@@ -154,7 +154,7 @@ class PublicApi {
       const identity = value => process.platform === 'win32' ? value.toLowerCase() : value;
       if (identity(current) !== identity(cwd)) fail('工作目录已变化', -32044);
       if (capability.riskTier !== 'read') this.explicit(request);
-      if (handle) this.record(request.session);
+      if (handle) this.record(request.session, true);
       context.workspaceTrusted = this.vscode.workspace.isTrusted === true;
       context.approved = request.approved === true;
     };
@@ -175,7 +175,6 @@ class PublicApi {
     if (!this.operations.has(id) && !this.views.operations.has(id)) fail('运行不属于当前 API 调用', -32047);
     await this.connections.ensure();
     const operation = this.operations.get(id);
-    if (method === 'operation/get') { const cwd = operation?.cwd || this.views.operations.get(id)?.cwd; if (cwd) this.cwd(cwd, true); }
     if (operation && operation.instanceId !== this.connections.snapshot().instanceId) { this.releaseOperation(id); fail('运行所属内核已变化', -32047); }
     const result = await this.connections.bridge.request(method, { operationId: id });
     if (['completed', 'failed', 'cancelled'].includes(result.status)) this.releaseOperation(id);
@@ -196,7 +195,7 @@ class PublicApi {
   }
   async openPanel(handle) {
     if (this.panel.newSessionPending) await this.panel.newSessionPending;
-    const record = this.record(handle);
+    const record = this.record(handle, true);
     if (this.panel.session?.busy || this.connections.turns.has(record.session.sessionId)) fail('会话正在使用中', -32045);
     const previous = this.panel.session;
     if (previous && this.connections.turns.has(previous.sessionId)) fail('会话正在使用中', -32045);

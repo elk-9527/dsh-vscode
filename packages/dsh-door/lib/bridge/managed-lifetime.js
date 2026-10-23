@@ -8,7 +8,7 @@ export function managedLifetime({ bridge, live, exit = () => {
   if (!Number.isFinite(idleMs) || idleMs < 1000 || idleMs > 86400000) return { touch() {}, schedule() {}, dispose() {} };
   let timer;
   const touch = () => { clearTimeout(timer); timer = undefined; };
-  const busy = () => live.size > 0 || [...bridge.operations.values()].some(op => op.status === 'running');
+  const busy = () => live.size > 0 || bridge.activeCount() > 0;
   const schedule = (delay = idleMs) => {
     touch();
     if (busy()) return;

@@ -172,11 +172,28 @@ function doorDrift() {
  */
 function syncDoor({ log = () => {}, command } = {}) {
   command = resolveTestDshCommand({ command, log });
+  let candidate;
+  if (process.env.DSH_PANEL_TEST_DOOR_CANDIDATE) {
+    const build = path.resolve(DOOR_SRC, '../..', 'build');
+    const home = process.env.DSH_HOME && path.resolve(process.env.DSH_HOME);
+    if (!home || !home.startsWith(build + path.sep)) throw new Error('候选回归需要 build/ 下的专用 DSH_HOME');
+    fs.mkdirSync(home, { recursive: true });
+    if (!fs.realpathSync(home).startsWith(fs.realpathSync(build) + path.sep)) throw new Error('候选测试目录不能通过链接指向日常配置');
+    candidate = require('../../../../tools/bridge/packages.cjs').verifyCandidate(process.env.DSH_PANEL_TEST_DOOR_CANDIDATE, 'tgz');
+  }
   ensureTestProfile({ command, log });
   if (process.env.DSH_PANEL_TEST_PROVIDER_PACKAGE) {
     require('../../../../tools/bridge/test-profile.cjs').prepareTestProvider({
       profile: TEST_PROFILE, packageName: process.env.DSH_PANEL_TEST_PROVIDER_PACKAGE, command, log,
     });
+  }
+  if (candidate) {
+    // 候选验收必须实际安装该归档；安装失败或内容不同不允许用源码覆盖成“通过”。
+    runDshSync({ command, args: ['plugin', '--profile', TEST_PROFILE, 'add', `file:${candidate.file.replace(/\\/g, '/')}`] });
+    if (require('node:crypto').createHash('sha256').update(fs.readFileSync(candidate.file)).digest('hex') !== candidate.sha256) throw new Error('候选归档在安装期间发生变化');
+    const drift = doorDrift();
+    if (drift.length) throw new Error(`候选安装后内容不同：${drift.join('、')}`);
+    return { synced: true, drift: [], copied: [], candidateSha256: candidate.sha256 };
   }
   const drift = doorDrift();
   if (drift.length === 0) {
@@ -254,14 +271,15 @@ function inspectDoor(profile = PROFILE) {
 /**
  * 确保该插件已开放接入点。
  *
- * @returns {Promise<{started: boolean, stop: () => void}>}
+ * @returns {Promise<{started: boolean, stop: () => Promise<void>}>}
  *   `started` 表示该内核由本次测试启动（测试结束时需要回收）；
  *   若内核本就在运行，`stop()` 为空操作 —— 不得终止其他进程启动的内核。
  */
 async function ensureDoor({ host = HOST, port = PORT, profile = PROFILE, log = () => {}, extraArgs = [] } = {}) {
   if (await doorIsUp(host, port)) {
     log('info', `该插件已在 ${host}:${port} 上，直接使用`);
-    return { started: false, stop() {} };
+    const stopped = Promise.resolve();
+    return { started: false, stop() { return stopped; } };
   }
 
   log('info', `该插件未监听，自行启动一个后台 DSH（profile=${profile}）`);
@@ -289,7 +307,7 @@ async function ensureDoor({ host = HOST, port = PORT, profile = PROFILE, log = (
   }
   if (!ok) {
     const tail = typeof kernel.stderrTail === 'function' ? kernel.stderrTail() : '';
-    kernel.dispose();
+    await kernel.dispose();
     throw new Error(
       `后台 DSH 未能在 ${host}:${port} 建立监听（profile=${profile}）` +
         (tail ? `：${tail.split(/\r?\n/).filter(Boolean).slice(-2).join(' | ')}` : ''),
@@ -298,7 +316,7 @@ async function ensureDoor({ host = HOST, port = PORT, profile = PROFILE, log = (
   return {
     started: true,
     stop() {
-      kernel.dispose();
+      return kernel.dispose();
     },
   };
 }

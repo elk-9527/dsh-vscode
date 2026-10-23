@@ -7,7 +7,7 @@ const { ReportStore, MAX_REPORT } = require('../src/bridge/report-store');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const exec = promisify(execFile);
-const op = (id, cwd, caseKey) => ({ id, cwd, caseKey, status: 'completed', fingerprint: 'snapshot', clientId: 'client', instanceId: 'kernel',
+const op = (id, cwd, caseKey) => ({ id, cwd, caseKey, status: 'completed', fingerprint: 'snapshot', indexFingerprint: 'b'.repeat(64), headState: 'unborn', clientId: 'client', instanceId: 'kernel',
   input: { mode: 'worktree', instructions: 'PRIVATE_REQUIREMENT' }, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString() });
 const report = { verdict: 'Review finished', findings: [{ title: 'Finding', body: 'Complete body', file: 'sample.js', startLine: 1 }] };
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -125,6 +125,8 @@ async function ticketScanRegressions(root) {
     const body = await fs.readFile(first.file(a.key), 'utf8'); assert(!body.includes('PRIVATE_REQUIREMENT'));
     await assert.rejects(first.save(run, { verdict: 'changed' }), /不同结果/);
     assert.equal((await first.read(a.key)).report.findings[0].body, 'Complete body');
+    assert.equal((await first.read(a.key)).operation.indexFingerprint, 'b'.repeat(64));
+    assert.equal((await first.read(a.key)).operation.headState, 'unborn');
     const third = new ReportStore({ directory }); assert.equal((await third.list())[0].key, a.key);
     const child = await first.save(op('two', root, a.key), report);
     await second.append(a.key, { kind: 'review', operationKey: child.key });

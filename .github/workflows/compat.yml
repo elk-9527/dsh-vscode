@@ -7,13 +7,25 @@ on:
       - 'tools/**'
       - 'compat/**'
       - 'pnpm-lock.yaml'
+      - 'package.json'
+      - 'pnpm-workspace.yaml'
       - '.github/workflows/**'
   schedule:
     - cron: '20 2 * * *'
   workflow_dispatch:
+    inputs:
+      editor_checks:
+        description: '运行原生 VS Code 完整兼容验收（最低版本、Chat 基线和稳定版）'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   discover:
@@ -21,7 +33,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       matrix: ${{ steps.versions.outputs.matrix }}
-      vsix_sha256: ${{ steps.panel.outputs.sha256 }}
+      manifest_sha256: ${{ steps.panel.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -40,23 +52,23 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           "matrix=$matrix" >> $env:GITHUB_OUTPUT
-      - name: 构建供编辑器共同验收的安装包
-        run: node packages/vscode-extension/tools/publish.js
+      - name: 构建供全部任务共同验收的唯一候选包
+        run: node tools/bridge/packages.cjs --out build/candidates
       - id: panel
         shell: pwsh
         run: |
-          $file = Get-ChildItem -LiteralPath packages/vscode-extension/build -Filter '*.vsix'
-          if (@($file).Count -ne 1) { throw 'Expected exactly one panel archive' }
+          $file = Get-Item -LiteralPath build/candidates/manifest.json
           "sha256=$((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant())" >> $env:GITHUB_OUTPUT
       - uses: actions/upload-artifact@v4
         with:
-          name: panel-native-candidate
-          path: packages/vscode-extension/build/*.vsix
+          name: release-candidates
+          path: build/candidates/*
           if-no-files-found: error
 
   kernel:
     needs: discover
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -69,8 +81,24 @@ jobs:
           node-version: 24
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-candidates
+          path: build/candidates
+      - name: 核对共同候选清单及每个安装包摘要
+        shell: pwsh
+        run: |
+          if ((Get-FileHash -LiteralPath build/candidates/manifest.json -Algorithm SHA256).Hash.ToLowerInvariant() -ne '${{ needs.discover.outputs.manifest_sha256 }}') { throw 'Candidate manifest digest mismatch' }
+          $manifest = Get-Content -LiteralPath build/candidates/manifest.json -Raw | ConvertFrom-Json
+          foreach ($artifact in $manifest.artifacts) {
+            if ((Get-FileHash -LiteralPath $artifact.file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $artifact.sha256) { throw 'Candidate archive digest mismatch' }
+          }
       - name: 隔离真实内核与本机模型服务
-        run: node tools/compat/test.cjs --dsh ${{ matrix.dsh }} --install
+        shell: pwsh
+        run: |
+          $manifest = Get-Content -LiteralPath build/candidates/manifest.json -Raw | ConvertFrom-Json
+          $tgz = ($manifest.artifacts | Where-Object kind -eq 'tgz').file
+          node tools/compat/test.cjs --dsh ${{ matrix.dsh }} --install --tgz $tgz
       - name: 导出公开验证结果
         if: always()
         shell: pwsh
@@ -87,6 +115,7 @@ jobs:
             build/compat/**/public-validation.json
 
   minimum-editor:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.editor_checks }}
     needs: discover
     runs-on: windows-latest
     timeout-minutes: 15
@@ -103,29 +132,35 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - uses: actions/download-artifact@v4
         with:
-          name: panel-native-candidate
-          path: packages/vscode-extension/build
+          name: release-candidates
+          path: build/candidates
       - name: 核对共同安装包摘要
         shell: pwsh
         run: |
-          $file = Get-ChildItem -LiteralPath packages/vscode-extension/build -Filter '*.vsix'
-          if (@($file).Count -ne 1 -or (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne '${{ needs.discover.outputs.vsix_sha256 }}') { throw 'Panel archive digest mismatch' }
+          if ((Get-FileHash -LiteralPath build/candidates/manifest.json -Algorithm SHA256).Hash.ToLowerInvariant() -ne '${{ needs.discover.outputs.manifest_sha256 }}') { throw 'Candidate manifest digest mismatch' }
+          $manifest = Get-Content -LiteralPath build/candidates/manifest.json -Raw | ConvertFrom-Json
+          foreach ($artifact in $manifest.artifacts) {
+            if ((Get-FileHash -LiteralPath $artifact.file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $artifact.sha256) { throw 'Candidate archive digest mismatch' }
+          }
+      - name: 从上游包冷启动构建测试插件
+        run: node tools/bridge/build-pilots.cjs --fresh
       - name: 准备精确内核和最低编辑器
         shell: pwsh
         run: |
           npm install --prefix build/editor-runtime --no-audit --no-fund @deepseek-ai/dsh@0.2.1-alpha.1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $minimumVersion = ((Get-Content -LiteralPath packages/vscode-extension/package.json -Raw | ConvertFrom-Json).engines.vscode).TrimStart('^')
-          $version = if ('${{ matrix.editor }}' -eq 'minimum') { $minimumVersion } elseif ('${{ matrix.editor }}' -eq 'chat') { '1.91.1' } else { 'latest' }
+          $chatBaseline = (Get-Content -LiteralPath compat/editors.json -Raw | ConvertFrom-Json).chatBaseline
+          $version = if ('${{ matrix.editor }}' -eq 'minimum') { $minimumVersion } elseif ('${{ matrix.editor }}' -eq 'chat') { $chatBaseline } else { 'latest' }
           Invoke-WebRequest "https://update.code.visualstudio.com/$version/win32-x64-archive/stable" -OutFile build/vscode-minimum.zip
           Expand-Archive -LiteralPath build/vscode-minimum.zip -DestinationPath build/vscode-editor
-      - run: node tools/bridge/build-pilots.cjs
       - name: 默认启动下验收完整原生流程
         shell: pwsh
         run: |
           $env:DSH_PANEL_DSH = 'node "' + (Join-Path $PWD 'build/editor-runtime/node_modules/@deepseek-ai/dsh/lib/bin.js') + '"'
           $env:DSH_PANEL_CODE = Join-Path $PWD 'build/vscode-editor/Code.exe'
-          ./tools/bridge/check-minimum.ps1 -DshVersion 0.2.1-alpha.1 -UsePackedVsix
+          $manifest = Get-Content -LiteralPath build/candidates/manifest.json -Raw | ConvertFrom-Json
+          ./tools/bridge/check-minimum.ps1 -DshVersion 0.2.1-alpha.1 -Vsix ($manifest.artifacts | Where-Object kind -eq 'vsix').file -Tgz ($manifest.artifacts | Where-Object kind -eq 'tgz').file -Sdk ($manifest.artifacts | Where-Object kind -eq 'sdk').file
       - name: 导出最低编辑器公开验证结果
         shell: pwsh
         run: |

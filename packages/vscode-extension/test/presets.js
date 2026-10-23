@@ -129,13 +129,13 @@ async function main() {
     }
   }
 
+  const cwd = createTestWorkspace('presets');
   const door = await ensureDoor({
     port,
     extraArgs: ['--patch', overlay],
     log: (level, message) => console.log(`  [${level}] ${message}`),
   });
 
-  const cwd = createTestWorkspace('presets');
   let client;
   try {
     section('1. 握手');
@@ -288,7 +288,7 @@ async function main() {
   } finally {
     if (client) client.close();
     // 仅回收自身启动的内核；若内核由其他进程启动，stop() 为空操作。
-    door.stop();
+    await door.stop();
     try {
       fs.unlinkSync(OVERLAY);
     } catch {

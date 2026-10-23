@@ -7,14 +7,16 @@ const { ROOT, locate, redact, sha256 } = require('../compat/lib.cjs');
 const { isolatedEditorOptions, ownsEditorProcess, editorProcessRoots } = require('../../packages/vscode-extension/tools/editor-isolation.cjs');
 const { probeEditorContext, requireEditorContext, installedEditor } = require('./editor-context.cjs');
 
-async function checkEditor({ folder, cwd, port }) {
+async function checkEditor({ folder, cwd, port, vsix }) {
+  assert.equal(typeof vsix, 'string', '需要显式提供候选 VSIX');
+  assert(fs.statSync(vsix).isFile(), '候选 VSIX 不存在');
+  const candidateSha256 = sha256(vsix);
   const code = process.env.DSH_PANEL_CODE || installedEditor();
   const editorContext = probeEditorContext({ code, folder });
   // Electron 的命令行 Node 和图形扩展宿主可能处于不同的完整性级别。
   // 默认启动的真实宿主会再次核对端点；预探测不能替代实际功能验收。
   if (editorContext.status === 'unavailable') requireEditorContext(editorContext);
   const panelVersion = require('../../packages/vscode-extension/package.json').version;
-  const vsix = path.join(ROOT, `packages/vscode-extension/build/dsh-acp-panel-${panelVersion}.vsix`);
   const extracted = path.join(folder, 'vsix');
   const quote = text => `'${text.replace(/'/g, "''")}'`;
   execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
@@ -32,6 +34,11 @@ async function checkEditor({ folder, cwd, port }) {
   fs.writeFileSync(extensionEntry, extensionSource
     .replace('  const view = new DshPanelView({', '  const startupEditor = vscode.window.activeTextEditor;\n  const view = new DshPanelView({')
     .replace('  return api.exports;', "  process[Symbol.for('dsh.validation.observer')] = { nativeViews, view, vscode, chatRegistration, startupEditor };\n  return api.exports;"));
+  const viewsEntry = path.join(extensions, `Elk-ydy.dsh-acp-panel-${panelVersion}`, 'src/bridge/views.js');
+  const viewsSource = fs.readFileSync(viewsEntry, 'utf8').replace(/\r\n/g, '\n');
+  const treeRegistration = "vscode.window.registerTreeDataProvider('dshPanel.capabilities', { onDidChangeTreeData: this.capabilityEmitter.event,\n        getTreeItem: item => item, getChildren: item => this.capabilityChildren(item) }),";
+  assert(viewsSource.includes(treeRegistration), '隔离树视图观察点与当前源码不一致');
+  fs.writeFileSync(viewsEntry, viewsSource.replace(treeRegistration, "process[Symbol.for('dsh.validation.tree')] = vscode.window.createTreeView('dshPanel.capabilities', { treeDataProvider: { onDidChangeTreeData: this.capabilityEmitter.event, getTreeItem: item => item, getParent: () => undefined, getChildren: item => this.capabilityChildren(item) } }),"));
   fs.writeFileSync(path.join(userData, 'User/settings.json'), JSON.stringify({ 'security.workspace.trust.enabled': false,
     'dshPanel.port': port, 'dshPanel.selfStartPort': port, 'dshPanel.autoStart': false, 'workbench.startupEditor': 'none',
     'update.mode': 'none', 'extensions.autoUpdate': false }));
@@ -105,15 +112,36 @@ async function run() {
       await vscode.workspace.getConfiguration('workbench').update('colorTheme',theme,vscode.ConfigurationTarget.Global);
       const themeDeadline=Date.now()+5000;
       while(vscode.window.activeColorTheme.kind!==kind&&Date.now()<themeDeadline) await new Promise(resolve=>setTimeout(resolve,50));
-      check('native theme '+kind,vscode.window.activeColorTheme.kind===kind);
+      check('editor active theme '+kind,vscode.window.activeColorTheme.kind===kind);
       await vscode.commands.executeCommand('dshPanel.capabilities.focus');
       await vscode.commands.executeCommand('dshPanel.operations.focus');
     }
     await vscode.commands.executeCommand('dshPanel.capabilities.focus');
-    for(const action of ['list.focusDown','list.focusUp','list.expand','list.collapse']) await vscode.commands.executeCommand(action);
-    check('native keyboard navigation commands',true);
+    const capabilityTree=process[Symbol.for('dsh.validation.tree')];
+    const keyboardItems=await observed.nativeViews.capabilityChildren();
+    const keyboardObservation={items:keyboardItems.map(item=>item.id),events:[]};
+    capabilityTree.onDidChangeSelection(event=>keyboardObservation.events.push(event.selection.map(item=>item.id)));
+    check('native keyboard tree observation',!!capabilityTree&&keyboardItems.length>=2);
+    await capabilityTree.reveal(keyboardItems[0],{select:true,focus:true});
+    keyboardObservation.initial=capabilityTree.selection.map(item=>item.id);
+    await vscode.commands.executeCommand('list.focusDown');
+    keyboardObservation.afterDown=capabilityTree.selection.map(item=>item.id);
+    await vscode.commands.executeCommand('list.toggleSelection');
+    keyboardObservation.afterToggle=capabilityTree.selection.map(item=>item.id);
+    const keyboardDeadline=Date.now()+3000;
+    while(!capabilityTree.selection.some(item=>item.id===keyboardItems[1].id)&&Date.now()<keyboardDeadline) await new Promise(resolve=>setTimeout(resolve,30));
+    keyboardObservation.final=capabilityTree.selection.map(item=>item.id);
+    fs.writeFileSync(${JSON.stringify(path.join(folder, 'editor-keyboard.json'))},JSON.stringify(keyboardObservation));
+    check('native keyboard changes tree selection',keyboardObservation.initial.length===1&&keyboardObservation.initial[0]===keyboardItems[0].id&&capabilityTree.selection.some(item=>item.id===keyboardItems[1].id));
+    await capabilityTree.reveal(keyboardItems[1],{select:true,focus:true});
+    await vscode.commands.executeCommand('list.focusUp');
+    await vscode.commands.executeCommand('list.toggleSelection');
+    const keyboardReturnDeadline=Date.now()+3000;
+    while(!capabilityTree.selection.some(item=>item.id===keyboardItems[0].id)&&Date.now()<keyboardReturnDeadline) await new Promise(resolve=>setTimeout(resolve,30));
+    check('native keyboard returns tree selection',capabilityTree.selection.some(item=>item.id===keyboardItems[0].id));
+    await capabilityTree.reveal(keyboardItems[0],{select:true,focus:true});
     await vscode.workspace.getConfiguration('workbench').update('reduceMotion','on',vscode.ConfigurationTarget.Global);
-    check('reduced motion setting',vscode.workspace.getConfiguration('workbench').get('reduceMotion')==='on');
+    check('editor reduced motion configuration',vscode.workspace.getConfiguration('workbench').get('reduceMotion')==='on');
     if(${process.env.DSH_PANEL_EXPECT_NATIVE_RESTRICTION === '1'}) {
       let nativeError;try{await api.review({cwd:${JSON.stringify(cwd)},input:{mode:'worktree'},userInitiated:true});}catch(error){nativeError=error;}
       check('unconfirmed identity restricts native execution',nativeError&&nativeError.code===-32052);
@@ -305,7 +333,8 @@ async function run() {
     assert(fs.existsSync(resultFile), `编辑器验收超时：${userData}；最后检查：${fs.existsSync(progressFile) ? fs.readFileSync(progressFile, 'utf8') : '尚未激活'}`);
     const result = JSON.parse(fs.readFileSync(resultFile)); assert.equal(result.status, 'passed', redact(result.error || ''));
     if (Number(result.vscode.split('.')[1]) >= 140) assert(fs.existsSync(path.join(sharedData, 'sharedStorage/state.vscdb')), '编辑器未使用隔离的共享账号目录');
-    return { ...result, editorContext, diagnosticLaunchFlags, runtimeFilesInstrumented: ['src/extension.js'], observationOnlyInIsolation: true,
+    assert.equal(sha256(vsix), candidateSha256, '编辑器验收期间候选 VSIX 已变化');
+    return { ...result, editorContext, diagnosticLaunchFlags, runtimeFilesInstrumented: ['src/extension.js', 'src/bridge/views.js'], observationOnlyInIsolation: true,
       accountStorageIsolation: { sharedData: path.relative(folder, sharedData), authenticationProvidersDisabled: true }, vsixSha256: sha256(vsix) };
   } finally {
     if (process.platform === 'win32') {

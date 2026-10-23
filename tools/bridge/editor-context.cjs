@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { isolatedEditorOptions } = require('../../packages/vscode-extension/tools/editor-isolation.cjs');
+const { isBuildEditor, prepareEditorFixture } = require('./editor-fixture.cjs');
 
 function childProbe() {
   const parent = Number(process.argv[process.argv.indexOf('--parent-pid') + 1]);
@@ -20,6 +21,8 @@ function childProbe() {
 
 function probeEditorContext({ code, folder }) {
   if (!fs.existsSync(code)) throw new Error('找不到待验收编辑器');
+  const fixturePreparation = isBuildEditor(code) ? prepareEditorFixture({ code,
+    reportFile: path.join(folder, 'editor-fixture.json') }) : undefined;
   const userData = path.join(folder, 'context-user'), extensions = path.join(folder, 'context-extensions'), sharedData = path.join(folder, 'context-shared');
   for (const directory of [userData, extensions, sharedData]) fs.mkdirSync(directory, { recursive: true });
   const isolation = isolatedEditorOptions({ userData, extensions, sharedData });
@@ -30,7 +33,8 @@ function probeEditorContext({ code, folder }) {
   try { if (result.status !== 0) throw new Error(); observed = JSON.parse(result.stdout.trim()); }
   catch { return { status: 'unavailable', exitCode: result.status, spawnError: result.error?.code, reason: '编辑器运行环境查询未完成' }; }
   const status = observed.selfAlive && observed.parentAlive ? 'passed' : 'environment-blocked';
-  return { status, ...observed, ...(status === 'environment-blocked' ? { reason: '编辑器运行时无法查询仍在等待本次检查的启动进程；外部内核身份检查没有足够的环境条件' } : {}) };
+  return { status, ...observed, ...(fixturePreparation ? { fixturePreparation } : {}),
+    ...(status === 'environment-blocked' ? { reason: '编辑器运行时无法查询仍在等待本次检查的启动进程；外部内核身份检查没有足够的环境条件' } : {}) };
 }
 
 function requireEditorContext(context) {

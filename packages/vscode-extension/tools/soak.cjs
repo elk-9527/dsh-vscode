@@ -37,7 +37,7 @@ const turnEvery = Number(take('--turn-every', '60'));
 const host = take('--host', '127.0.0.1');
 const port = Number(take('--port', '47830'));
 const patch = take('--patch', '');
-const cwd = take('--cwd', path.join(os.tmpdir(), `dsh-soak-${profile}`));
+const cwd = take('--cwd', path.resolve(ROOT, '../../build/soak', `dsh-soak-${profile.replace(/[^a-zA-Z0-9_-]/g, '_')}`));
 
 const started = Date.now();
 const stamp = () => `+${((Date.now() - started) / 1000).toFixed(1)}s`;

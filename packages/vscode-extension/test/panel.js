@@ -14,6 +14,7 @@
  */
 
 const path = require('node:path');
+const fs = require('node:fs');
 const Module = require('node:module');
 const TEST_EXTENSION_URI = { fsPath: path.resolve(__dirname, '..') };
 
@@ -36,6 +37,9 @@ const configValues = {
   kernelIdleMinutes: 0,
   cwd: require('./helpers/door').createTestWorkspace('panel'),
 };
+const workspaceState = require('./helpers/workspace-state').createWorkspaceState(path.join(configValues.cwd, '.workspace-state.json'));
+const sampleFile = path.join(configValues.cwd, 'hello.ts');
+fs.writeFileSync(sampleFile, '/** 给集成测试用的样本文件。 */\nexport const ANSWER = 42;\n', 'utf8');
 
 const mockVscode = {
   version: '1.99.0-mock',
@@ -178,7 +182,7 @@ async function sendMessage(panel, view, text) {
   activeDoor = door;
 
   section('1. 视图注册与 HTML 生成');
-  const panel = new DshPanelView({ extensionUri: TEST_EXTENSION_URI, log });
+  const panel = new DshPanelView({ extensionUri: TEST_EXTENSION_URI, log, workspaceState });
   activePanel = panel;
   const view = makeFakeView();
   panel.resolveWebviewView(view);
@@ -202,7 +206,7 @@ async function sendMessage(panel, view, text) {
 
   section('3. 发一条消息，走完整条链路');
   const before = view.messages.length;
-  const prompt = '读取 spike/scratch/hello.ts 的第一行，只回那一行，不要解释。';
+  const prompt = `读取 ${JSON.stringify(sampleFile)} 的第一行，只回那一行，不要解释。`;
   await sendMessage(panel, view, prompt);
   const after = view.messages.slice(before).map((item) => item.message);
 
@@ -211,7 +215,8 @@ async function sendMessage(panel, view, text) {
   check('收到 assistant 开始', after.some((item) => item.type === 'assistant'));
   if (after.some((item) => item.type === 'error' && isMissingModelCredentials(item.message))) {
     panel.dispose();
-    door.stop();
+    await panel.kernels.waitForCleanup();
+    await door.stop();
     console.log('  ⏭  面板连接与建会话成功，但测试环境没有当前模型的凭据；跳过真实模型回合。');
     process.exit(2);
   }
@@ -318,6 +323,7 @@ async function sendMessage(panel, view, text) {
     const badPanel = new DshPanelView({
       extensionUri: TEST_EXTENSION_URI,
       log,
+      workspaceState,
     });
     // 隔离自动候选：本节只测试「配置的命令无效」这条路径 ——
     // 否则候选清单会包含默认安装位置的 node bin.js（它是有效的），
@@ -832,7 +838,8 @@ async function sendMessage(panel, view, text) {
 
   section('9. 收尾');
   panel.dispose();
-  door.stop();
+  await panel.kernels.waitForCleanup();
+  await door.stop();
   check('dispose 后能再建面板', true);
 
   console.log(`\n${'═'.repeat(56)}`);
@@ -842,10 +849,11 @@ async function sendMessage(panel, view, text) {
     for (const item of failures) console.log(`   - ${item}`);
   }
   process.exit(failed === 0 ? 0 : 1);
-})().catch((error) => {
+})().catch(async (error) => {
   activePanel?.dispose();
   activePanel?.kernels.disposeAll('测试异常收尾');
-  activeDoor?.stop();
+  await activePanel?.kernels.waitForCleanup();
+  await activeDoor?.stop();
   console.error('💥 测试异常终止：', error.stack || error.message);
   process.exit(1);
 });

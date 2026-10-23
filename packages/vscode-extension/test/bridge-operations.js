@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { OperationStore } = require('../src/bridge/operations');
 const removed = [];
 const store = new OperationStore({ limit: 2, onRemove: op => removed.push(op.id) });
-store.set('active', { id: 'active', status: 'running', seq: 1, input: { mode: 'custom', instructions: 'SECRET_CUSTOM_REQUIREMENT' }, instanceId: 'original-kernel', clientId: 'original-client', cwd: '/fixture' });
+store.set('active', { id: 'active', status: 'running', seq: 1, input: { mode: 'custom', instructions: 'SECRET_CUSTOM_REQUIREMENT' }, instanceId: 'original-kernel', clientId: 'original-client', cwd: '/fixture', indexFingerprint: 'a'.repeat(64), headState: 'unborn' });
 assert(store.event({ operationId: 'active', seq: 2, type: 'progress', at: '2026-10-04T01:00:00Z' }));
 assert(!store.event({ operationId: 'active', seq: 2, type: 'progress' }));
 store.get('active').status = 'cancelling';
@@ -16,6 +16,7 @@ store.set('cancelling', { id: 'cancelling', status: 'cancelling' });
 store.set('other', { id: 'other', status: 'failed' });
 const serialized = store.serialize(); assert(!JSON.stringify(serialized).includes('SECRET')); assert.equal(serialized.records[0].input.mode, 'custom');
 const restored = new OperationStore(serialized); assert.equal(restored.get('cancelling').status, 'pending-restore'); assert.equal(restored.get('active').instanceId, 'original-kernel');
+assert.equal(restored.get('active').indexFingerprint, 'a'.repeat(64)); assert.equal(restored.get('active').headState, 'unborn');
 assert(!store.remove('pending')); assert(!store.remove('cancelling')); assert.equal(store.clearFinished(), 2);
 assert(!store.event({ operationId: 'active', seq: 99, type: 'completed' })); assert(!new OperationStore(store.serialize()).event({ operationId: 'active', seq: 100, type: 'completed' }));
 for (let i = 0; i < 5; i++) { store.set('done-' + i, { id: 'done-' + i, status: 'completed' }); store.serialize(); }

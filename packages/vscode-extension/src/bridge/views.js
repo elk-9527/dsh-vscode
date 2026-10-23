@@ -2,7 +2,8 @@
 const vscode = require('vscode');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
-const { findingLocation, repositorySnapshot, validateReviewInput, reportText } = require('./results');
+const { findingLocation, repositorySnapshot, sameRepositorySnapshot, validateReviewInput, reportText } = require('./results');
+const { relatedDocuments, prepareReviewScope, identity: fileIdentity } = require('./review-scope');
 const { EXPECTED, capabilityState } = require('./availability');
 const { OperationStore, ACTIVE, TERMINAL, LABELS } = require('./operations');
 const { inspectProfile, installationPlan, profileReport } = require('../diagnostics/profiles');
@@ -88,12 +89,10 @@ class BridgeViews {
       ].map(([name, fn]) => vscode.commands.registerCommand(`dshPanel.bridge.${name}`, async (...args) => {
         try { return await fn(...args); } catch (error) { this.showError(error, name); }
       })),
-      vscode.workspace.onDidSaveTextDocument(document => {
-        const identity = file => process.platform === 'win32' ? file.toLowerCase() : file;
-        for (const [cwd, files] of this.reports) if (files.some(file => identity(file) === identity(document.uri.fsPath))) {
-          for (const file of files) this.diagnostics.delete(vscode.Uri.file(file)); this.reports.delete(cwd);
-        }
-      }),
+      vscode.workspace.onDidSaveTextDocument(document => this.invalidateReviewFile(document.uri?.fsPath, true)),
+      vscode.workspace.onDidChangeTextDocument?.(event => this.invalidateReviewFile(event.document?.uri?.fsPath, false)) || { dispose() {} },
+      vscode.workspace.onDidDeleteFiles?.(event => { for (const uri of event.files) this.invalidateReviewFile(uri.fsPath, true); }) || { dispose() {} },
+      vscode.workspace.onDidRenameFiles?.(event => { for (const file of event.files) { this.invalidateReviewFile(file.oldUri.fsPath, true); this.invalidateReviewFile(file.newUri.fsPath, true); } }) || { dispose() {} },
       vscode.workspace.onDidCloseTextDocument(document => {
         this.skillDrafts.delete(document.uri.toString());
         for (const op of this.operations.values()) if (op.uri?.toString() === document.uri.toString() && op.savedKey) void this.reportStore.unpin(op.caseKey || op.savedKey, document.uri.toString()).catch(() => this.log('warn', '已关闭报告的空间保护清理未完成'));
@@ -103,6 +102,23 @@ class BridgeViews {
       vscode.workspace.onDidGrantWorkspaceTrust?.(() => this.capabilityEmitter.fire()) || { dispose() {} },
       vscode.window.tabGroups?.onDidChangeTabs?.(() => { clearTimeout(this.pinTimer); this.pinTimer = setTimeout(() => { void this.syncReportPins().catch(() => this.log('warn', '本地空间保护清理未完成')); }, 50); }) || { dispose() {} },
       { dispose: () => this.dispose() });
+    const watcher = vscode.workspace.createFileSystemWatcher?.('**/*');
+    if (watcher) context.subscriptions.push(watcher, ...['onDidChange', 'onDidCreate', 'onDidDelete'].map(event => watcher[event](uri => this.invalidateReviewFile(uri.fsPath, true))));
+  }
+  invalidateReviewFile(file, disk) {
+    if (!file) return;
+    for (const op of this.operations.values()) {
+      if (!op.cwd) continue;
+      const relative = path.relative(fileIdentity(op.cwd), fileIdentity(file));
+      if (!relative || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) continue;
+      op.reviewRevision = (op.reviewRevision || 0) + 1;
+      if (!op.result) continue;
+      for (const previous of this.reports.get(op.cwd) || []) this.diagnostics.delete(vscode.Uri.file(previous));
+      this.reports.delete(op.cwd);
+      if (disk) { op.codeCheck = 'changed'; op.stale = true; }
+      op.editorCheck = relatedDocuments(vscode, op.cwd).length ? 'unsaved' : 'saved';
+      if (op.uri) this.document(`review/${op.id}.md`, this.savedReportText(op));
+    }
   }
   showError(error, action) {
     this.log('warn', `插件操作未完成（操作：${action || 'background'}，错误码：${Number.isInteger(error?.code) ? error.code : 'unknown'}）`);
@@ -245,18 +261,21 @@ class BridgeViews {
     const selectedKey = identity(cwd);
     if (this.runningRepositories.has(selectedKey)) throw Object.assign(new Error(), { code: -32045 });
     this.runningRepositories.add(selectedKey);
-    let snapshot, requestedRef, repositoryKey;
+    let snapshot, requestedRef, repositoryKey, scopeNote;
     const releaseRepository = () => { this.runningRepositories.delete(selectedKey); if (repositoryKey) this.runningRepositories.delete(repositoryKey); };
     try {
       const selected = await validateReviewInput(cwd, input);
       if (selected) { requestedRef = input.ref; input = { ...input, ref: selected }; }
-      snapshot = await repositorySnapshot(cwd);
+      snapshot = await repositorySnapshot(cwd, { signal });
       const canonicalKey = identity(snapshot.cwd);
       if (canonicalKey !== selectedKey) {
         if (this.runningRepositories.has(canonicalKey)) throw Object.assign(new Error(), { code: -32045 });
         this.runningRepositories.add(canonicalKey); repositoryKey = canonicalKey;
       }
       if (!vscode.workspace.getWorkspaceFolder(vscode.Uri.file(snapshot.cwd))) throw new Error('Git 根目录不在当前工作区授权范围内。');
+      const hadUnsaved = relatedDocuments(vscode, snapshot.cwd).length > 0;
+      scopeNote = await prepareReviewScope(vscode, snapshot.cwd);
+      if (hadUnsaved) snapshot = await repositorySnapshot(snapshot.cwd, { signal });
       if (caseKey) {
         const identity = cwd => process.platform === 'win32' ? path.resolve(cwd).toLowerCase() : path.resolve(cwd);
         if (!validKey(caseKey) || identity((await this.reportStore.read(caseKey)).operation.cwd) !== identity(snapshot.cwd)) throw new Error('任务不属于当前审查目录。');
@@ -268,7 +287,7 @@ class BridgeViews {
     if (caseKey) await this.reportStore.pin(caseKey, `review:${snapshot.cwd}`);
     if (retryOf) {
       const previous = this.operations.get(retryOf);
-      const changed = previous?.fingerprint !== snapshot.fingerprint;
+      const changed = !previous || !sameRepositorySnapshot(previous, snapshot);
       const modes = { worktree: '当前未提交变更', base: '当前变更与基准分支的差异', commit: '指定提交', custom: '自定义审查要求' };
       const uri = this.document('retry-preview.md', `# 重新运行审查\n\n范围：${modes[input.mode]}${input.ref ? '（' + input.ref.replace(/[\r\n`<>\[\]]/g, '') + '）' : ''}\n\n${changed ? '代码快照已变化，本次使用当前内容重新审查。' : '代码快照与原运行一致，本次仍建立独立的新运行。'}\n\n原记录和原报告保留，新的发现仅按本次快照定位。`);
       await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri), { preview: true });
@@ -277,7 +296,7 @@ class BridgeViews {
       if (!vscode.workspace.isTrusted || signal?.aborted) throw Object.assign(new Error('审查无法继续'), { code: signal?.aborted ? -32800 : -32044 });
       const id = randomUUID(), at = new Date().toISOString();
       const result = { status: 'skipped-clean', verdict: '工作区没有未提交变更，未调用模型。', findings: [] };
-      this.operations.set(id, { id, title: '代码审查', status: 'completed', seq: 0, cwd: snapshot.cwd, fingerprint: snapshot.fingerprint, input: { ...input }, requestedRef, retryOf, caseKey, startedAt: at, finishedAt: at, reason: result.verdict, result });
+      this.operations.set(id, { id, title: '代码审查', status: 'completed', seq: 0, cwd: snapshot.cwd, fingerprint: snapshot.fingerprint, indexFingerprint: snapshot.indexFingerprint, headState: snapshot.headState, scopeNote, input: { ...input }, requestedRef, retryOf, caseKey, startedAt: at, finishedAt: at, reason: result.verdict, result });
       await this.presentReport(id, result); await this.saveActive(); this.operationEmitter.fire();
       return this.operations.get(id);
     }
@@ -293,11 +312,11 @@ class BridgeViews {
     if (run.mode !== 'operation') throw new Error('运行协议无效');
     const existing = this.operations.get(run.operationId);
     const connection = this.connections.snapshot();
-    this.operations.set(run.operationId, { ...existing, id: run.operationId, title: '代码审查', status: existing?.status || 'running', seq: existing?.seq || 0, cwd: snapshot.cwd, fingerprint: snapshot.fingerprint, input: { ...input }, requestedRef, retryOf, caseKey, instanceId: connection.instanceId, clientId: this.connections.clientId, source: this.reportSource(), startedAt: existing?.startedAt || new Date().toISOString() });
+    this.operations.set(run.operationId, { ...existing, id: run.operationId, title: '代码审查', status: existing?.status || 'running', seq: existing?.seq || 0, cwd: snapshot.cwd, fingerprint: snapshot.fingerprint, indexFingerprint: snapshot.indexFingerprint, headState: snapshot.headState, scopeNote, input: { ...input }, requestedRef, retryOf, caseKey, instanceId: connection.instanceId, clientId: this.connections.clientId, source: this.reportSource(), startedAt: existing?.startedAt || new Date().toISOString() });
     this.retain(run.operationId); await this.saveActive(); this.operationEmitter.fire();
     const abort = () => { void this.cancel(run.operationId).catch(error => this.showError(error)); };
     signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) abort();
-    try { await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: '正在审查代码变更', cancellable: true }, async (progress, token) => {
+    try { await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `正在审查代码变更${scopeNote?.startsWith('仅审查') ? '（磁盘内容，不含未保存编辑）' : ''}`, cancellable: true }, async (progress, token) => {
       const update = () => { const op = this.operations.get(run.operationId); const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(op?.startedAt)) / 1000)); progress.report?.({ message: `${op?.progress?.message || '等待审查结果'} · ${seconds} 秒` }); };
       update(); const progressTimer = setInterval(update, 1000);
       const cancelSubscription = token.onCancellationRequested(() => this.cancel(run.operationId).catch(error => this.showError(error)));
@@ -358,13 +377,16 @@ class BridgeViews {
   async presentReport(id, report) {
     const op = this.operations.get(id); if (!op?.cwd) return;
     op.result = report; await this.saveReport(op);
+    const revision = op.reviewRevision || 0;
     let stale = true;
-    try { const current = await repositorySnapshot(op.cwd); stale = current.fingerprint !== op.fingerprint || !vscode.workspace.isTrusted || !vscode.workspace.getWorkspaceFolder(vscode.Uri.file(op.cwd)); op.codeCheck = stale ? 'changed' : 'matched'; } catch { op.codeCheck = 'unknown'; }
+    try { const current = await repositorySnapshot(op.cwd); stale = revision !== (op.reviewRevision || 0) || !sameRepositorySnapshot(op, current) || !vscode.workspace.isTrusted || !vscode.workspace.getWorkspaceFolder(vscode.Uri.file(op.cwd)); op.codeCheck = stale ? 'changed' : 'matched'; } catch { op.codeCheck = 'unknown'; }
     if (this.disposed || this.operations.get(id) !== op) return;
+    const dirty = new Set(relatedDocuments(vscode, op.cwd).map(document => fileIdentity(document.uri.fsPath)));
+    op.editorCheck = dirty.size ? 'unsaved' : 'saved';
     for (const file of this.reports.get(op.cwd) || []) this.diagnostics.delete(vscode.Uri.file(file));
     const mapped = new Map();
     if (!stale) for (const [index, finding] of (Array.isArray(report.findings) ? report.findings : []).entries()) {
-      const location = findingLocation(op.cwd, finding); if (!location) continue;
+      const location = findingLocation(op.cwd, finding); if (!location || dirty.has(fileIdentity(location.file))) continue;
       const severity = finding.priority === 'P0' || finding.priority === 'P1' ? vscode.DiagnosticSeverity.Error
         : finding.priority === 'P2' ? vscode.DiagnosticSeverity.Warning : vscode.DiagnosticSeverity.Information;
       const diagnostic = new vscode.Diagnostic(new vscode.Range(location.start, 0, location.end, location.endCharacter), `${finding.title || ''}\n${finding.body || ''}`, severity);
@@ -456,7 +478,7 @@ class BridgeViews {
     const note = historical || op.codeCheck === 'unknown' ? '历史报告，尚未核对当前代码。'
       : op.codeCheck === 'changed' ? '代码已变化，当前问题列表未采用此报告的位置。' : '已核对当前磁盘快照；问题列表仅使用有效文件位置。';
     const state = op.reportStorage === 'saved' ? '完整报告已保存到本地。' : op.reportStorage === 'failed' ? '完整报告未保存，可清理已结束记录后重试保存。' : op.reportStorage === 'unavailable' ? '已保存正文不可用，可能已清理或损坏；当前窗口缓存仍可阅读。' : '本次正文仅在当前窗口可用。';
-    return [reportText(op.result), '---', state, note, `范围：${scope[op.input?.mode] || '未确认'}${op.input?.ref ? `；已解析提交：${op.input.ref}` : ''}`,
+    return [reportText(op.result), '---', state, note, op.editorCheck === 'unsaved' ? '编辑器存在未保存内容，未保存文件的诊断已撤销；磁盘匹配不代表这些编辑已被审查。' : '编辑器未保存状态：未发现范围内未保存内容，或尚未重新核对。', `范围：${scope[op.input?.mode] || '未确认'}${op.input?.ref ? `；已解析提交：${op.input.ref}` : ''}`,
       `状态：${LABELS[op.status] || '未确认'}${op.reason ? `；${op.reason}` : ''}`,
       `开始：${op.startedAt || '未确认'}；结束：${op.finishedAt || '未确认'}`,
       `来源：面板 ${op.source?.panel || '未确认'}；接入点 ${op.source?.door || '未确认'}；ACP ${op.source?.runtime?.acpVersion || '未确认'}；提供方 ${op.source?.provider?.id || '未确认'} ${op.source?.provider?.version || ''}`,
@@ -562,7 +584,7 @@ class BridgeViews {
     const current = await repositorySnapshot(op.cwd);
     if (!vscode.workspace.isTrusted) throw Object.assign(new Error(), { code: -32044 });
     if (this.operations.get(id) !== op || op.status !== 'completed') return;
-    const stale = current.fingerprint !== op.fingerprint;
+    const stale = !sameRepositorySnapshot(op, current);
     const text = reportText(op.result, stale);
     if (Buffer.byteLength(text, 'utf8') > 256 * 1024) { void vscode.window.showInformationMessage('报告过大，请从完整报告中选择需要讨论的内容。'); return; }
     const count = Array.isArray(op.result.findings) ? op.result.findings.length : 0;

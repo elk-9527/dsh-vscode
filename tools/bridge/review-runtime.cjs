@@ -21,18 +21,24 @@ function patchReviewRuntime(original) {
     ['configureReviewer(agent, locale = readHostLocale(agent.ctx))', 'configureReviewer(agent, locale = readHostLocale(agent.ctx), structured = false)'],
     ['text: outputLanguage(locale)', 'text: structured ? `Return only the JSON object required by the review rubric. Write title, body, and overall_explanation in ${locale === "en" ? "English" : "Simplified Chinese"}. Use absolute_file_path and the shortest valid line_range for every finding. Do not add prose or markdown fences.` : outputLanguage(locale)'],
     ['locale = readHostLocale(ctx))', 'locale = readHostLocale(ctx), structured = false, budget)'],
+    ['const prompt = await reviewPrompt(target, cwd, combined);', `const prompt = await reviewPrompt(target, cwd, combined);
+        const prepared = structured ? await prepareReviewContext(cwd, target, combined) : undefined;
+        let inspectionCalls = 0;`],
     ['configureReviewer(agent, locale);', 'configureReviewer(agent, locale, structured);'],
     ['configured = true;', `configured = true;
-            if (budget) {
-                agent.ctx.tools.guard(() => budget.record());
-                if (budget.scope) agent.ctx.systemPrompt.context({ name: 'michengai:review-scope', order: 101, text: budget.scope });
+            if (structured || budget) {
+                agent.ctx.tools.guard(exec => { if (isInspectionTool(exec.name)) inspectionCalls++; return budget?.record(); });
+                if (budget?.scope) agent.ctx.systemPrompt.context({ name: 'michengai:review-scope', order: 101, text: budget.scope });
             }`],
+    ["prompt: [{ type: 'text', text: prompt }],", `prompt: [{ type: 'text', text: prepared?.complete ? prompt + ${JSON.stringify(String.fromCharCode(10, 10))} + prepared.text : prompt }],`],
+    ['const report = parseReport(raw);', `if (structured && !hasReviewMaterial(target, prepared, inspectionCalls)) throw new Error('Git 上下文不可用且模型未调用代码检查工具，审查未完成');
+        const report = parseReport(raw);`],
   ];
   let result = original;
   for (const [from,to] of replacements) {
     if (result.split(from).length !== 2) throw new Error('审查格式补丁定位失败');
     result = result.replace(from,to);
   }
-  return `${startReviewSubagent.toString()}\n${result}`;
+  return `import contextRuntime from './review-context.cjs';\nconst { prepareReviewContext, hasReviewMaterial, isInspectionTool } = contextRuntime;\n${startReviewSubagent.toString()}\n${result}`;
 }
 module.exports = { patchReviewRuntime, startReviewSubagent };

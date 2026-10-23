@@ -2,7 +2,8 @@
 const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path'), os = require('node:os'), { EventEmitter } = require('node:events');
 const { DshConnectionService } = require('../src/connection/service');
 const { PublicApi } = require('../src/api/service');
-const cwd = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-api-')));
+const fixtureRoot = path.resolve(__dirname, '../../../build/test-api'); fs.mkdirSync(fixtureRoot, { recursive: true });
+const cwd = fs.realpathSync.native(fs.mkdtempSync(path.join(fixtureRoot, 'dsh-api-')));
 const client = new EventEmitter(); Object.assign(client, { isConnected: true, count: 0, active: 0, maxActive: 0, closed: [], replies: [],
   newSession: async () => ({ sessionId: 's' + ++client.count }), resumeSession: async () => ({}), closeSession: async id => client.closed.push(id), doorStatus: async () => ({ connectionCount: 1, model: { ready: true, source: 'fixture' }, capabilities: { history: true }, runtime: { acpVersion: 'fixture' }, bootstrapSecret: 'must-not-export' }), respond: (id, value) => client.replies.push({ id, value }),
   prompt: async (id, text, options) => {
@@ -69,6 +70,22 @@ const context = { subscriptions: [] }, service = new PublicApi({ vscode, context
   await api.openPanel(handle); assert.equal(panel.session.sessionId, handle.sessionId); await api.closeSession(handle); assert.equal(client.closed.length, 0, 'Panel handoff must preserve the shared session');
   const restoredPanel = await api.restoreSession({ cwd, sessionId: handle.sessionId, userInitiated: true }); assert.equal(service.sessions.get(restoredPanel.id).session, panel.session, 'An already active panel session must be adopted instead of resumed twice'); await api.closeSession(restoredPanel);
   const other = await api.createSession({ cwd, userInitiated: true }); await api.closeSession(other); assert(client.closed.includes(other.sessionId));
+  const removedDirectory = path.join(cwd, 'removed'); fs.mkdirSync(removedDirectory);
+  const removed = await api.createSession({ cwd: removedDirectory, userInitiated: true });
+  const removedPrompt = api.prompt(removed, 'removed-workspace', { userInitiated: true });
+  await new Promise(resolve => setImmediate(resolve)); fs.rmSync(removedDirectory, { recursive: true });
+  vscode.workspace.isTrusted = false;
+  assert.equal(await api.cancel(removed), true, 'Cancelling an existing turn must not require its original directory');
+  assert.equal((await removedPrompt).stopReason, 'cancelled');
+  await assert.rejects(api.prompt(removed, 'new-turn', { userInitiated: true }), /工作目录不存在/);
+  await api.closeSession(removed); assert(client.closed.includes(removed.sessionId), 'Cleanup must remain available after directory removal');
+  vscode.workspace.isTrusted = true;
+  const stale = await api.createSession({ cwd, userInitiated: true });
+  const oldClient = connections.client; connections.client = { isConnected: true };
+  await assert.rejects(api.cancel(stale), error => error.code === -32047, 'An old handle must never cancel a replacement connection');
+  await assert.rejects(api.closeSession(stale), error => error.code === -32047);
+  connections.client = oldClient; vscode.workspace.isTrusted = false;
+  await api.closeSession(stale); vscode.workspace.isTrusted = true;
   service.dispose(); panel.session.dispose(); await assert.rejects(api.listCapabilities()); assert.equal(client.listenerCount('update'), 0); fs.rmSync(cwd, { recursive: true, force: true });
   console.log('Public API sessions, FIFO turns, streaming, permission isolation, cancellation, trust, operation ownership, stale identities, events and handoff passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

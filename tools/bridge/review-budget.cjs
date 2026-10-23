@@ -7,7 +7,7 @@ function createReviewBudget({ signal, emit = () => {}, timeoutMs = 600000, maxCa
   const timer = setTimeout(() => stop('审查已达到时间预算，本次运行未完成'), timeoutMs); timer.unref?.();
   return {
     signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
-    scope: mode === 'worktree' ? 'Review only the current staged, unstaged and untracked changes. Start with git status and git diff HEAD. Read unchanged files only when needed to verify a specific changed line. Stop when the changed code has been checked; avoid repeated searches or unrelated repository exploration.' : '',
+    scope: mode === 'worktree' ? 'Review only the current staged, unstaged and untracked changes. Start with git status and check git rev-parse --verify HEAD. If HEAD exists, use git diff HEAD. In a repository before its first commit, use git diff --cached for staged files, git diff for unstaged changes and read untracked files; all initial files are changes. Do not create a commit or assume a fixed empty-tree hash. Read unchanged files only when needed to verify a specific changed line. Stop when the changed code has been checked; avoid repeated searches or unrelated repository exploration.' : '',
     record() {
       if (controller.signal.aborted || signal?.aborted) return '审查已停止';
       calls++;

@@ -1,7 +1,7 @@
 'use strict';
 const assert = require('node:assert/strict'), fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const Module = require('node:module'), { EventEmitter } = require('node:events'), { execFileSync } = require('node:child_process');
-const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-native-views-'))), cwd = path.join(root, 'repo'); fs.mkdirSync(cwd);
+const root = fs.realpathSync.native(require('../../../tools/test-workspace.cjs').createFixture('native-views')), cwd = path.join(root, 'repo'); fs.mkdirSync(cwd);
 execFileSync('git', ['init', '-q', cwd]); fs.writeFileSync(path.join(cwd, 'sample.js'), 'const sum = 1;\n');
 execFileSync('git', ['-C', cwd, 'add', '.']); execFileSync('git', ['-C', cwd, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'fixture']);
 process.env.DSH_HOME = path.join(root, 'dsh');
@@ -96,6 +96,14 @@ const context = { subscriptions: [], workspaceState: { get: (key, fallback) => s
   await commands.get('dshPanel.bridge.attachReview')(completedItem[0]);
   assert.equal(attachments.length, 1); assert.equal(attachments[0].kind, 'review'); assert(attachments[0].text.includes('Finding'));
   assert.equal(attachments[0].uri, undefined); assert.equal(invokeCount, beforeAttachCalls, 'Attaching a report must not execute a model operation');
+  const beforeStaging = await require('../src/bridge/results').repositorySnapshot(cwd);
+  execFileSync('git', ['-C', cwd, 'add', 'sample.js']);
+  const afterStaging = await require('../src/bridge/results').repositorySnapshot(cwd);
+  assert.equal(beforeStaging.fingerprint, afterStaging.fingerprint);
+  assert.notEqual(beforeStaging.indexFingerprint, afterStaging.indexFingerprint);
+  await view.presentReport(first.id, first.result);
+  assert.equal(first.codeCheck, 'changed');
+  assert.equal(diagnostics.size, 0, 'Staging-only changes invalidate new reports without changing the legacy content fingerprint');
   await view.attachReview('missing-report'); assert.equal(attachments.length, 1);
   chatCwd = root; await view.attachReview(first.id); assert.equal(attachments.length, 1, 'Reports must not enter another workspace chat'); chatCwd = cwd;
   vscode.workspace.isTrusted = false; await assert.rejects(view.attachReview(first.id), error => error.code === -32044); assert.equal(attachments.length, 1); vscode.workspace.isTrusted = true;
@@ -116,6 +124,25 @@ const context = { subscriptions: [], workspaceState: { get: (key, fallback) => s
   assert.equal(view.operations.remove(raceId), true); await pendingReport;
   assert.equal(diagnostics.size, 0, 'Late report loading must not restore removed diagnostics');
   assert(!view.reportOwners.has(cwd)); assert(!view.documents.has(`dsh-result:/review/${raceId}.md`));
+  const diskRaceId = 'disk-change-during-projection', diskRaceSnapshot = await require('../src/bridge/results').repositorySnapshot(cwd);
+  view.operations.set(diskRaceId, { id: diskRaceId, cwd, fingerprint: diskRaceSnapshot.fingerprint, status: 'completed' });
+  const fsp = require('node:fs/promises'), originalReadFile = fsp.readFile;
+  let changedDuringSnapshot = false;
+  fsp.readFile = async function(file, ...args) {
+    const bytes = await originalReadFile.call(this, file, ...args);
+    if (!changedDuringSnapshot && path.resolve(String(file)) === path.join(cwd, 'sample.js')) {
+      changedDuringSnapshot = true;
+      fs.writeFileSync(file, '// inserted after the snapshot read\n' + bytes);
+      view.invalidateReviewFile(file, true);
+    }
+    return bytes;
+  };
+  try { await view.presentReport(diskRaceId, { findings: [{ title: 'Old line', body: 'Issue', file: 'sample.js', startLine: 1, priority: 'P2' }] }); }
+  finally { fsp.readFile = originalReadFile; }
+  assert.equal(changedDuringSnapshot, true);
+  assert.equal(diagnostics.size, 0, 'A disk change observed during asynchronous validation must not reintroduce old line diagnostics');
+  assert.equal(view.operations.get(diskRaceId).codeCheck, 'changed');
+  await view.removeOperation(diskRaceId);
   panel.session = { configOptions: [{ id: 'model', currentValue: 'PRIVATE_MODEL_TOKEN', options: [{ value: 'PRIVATE_MODEL_TOKEN', name: 'Fixture model' }] }] };
   await commands.get('dshPanel.bridge.diagnoseConfig')(); await commands.get('dshPanel.bridge.copyDiagnostics')(); assert(copied.includes('custom-panel') && !copied.includes('PRIVATE_MODEL_TOKEN'));
   const diagnosis = opened.find(doc => doc.getText().includes('会话模型配置'));
@@ -170,6 +197,19 @@ const context = { subscriptions: [], workspaceState: { get: (key, fallback) => s
     releaseSession(); await running; assert.equal(startedSessions, 1, 'Root and subdirectory share one repository reservation');
   }
   connections.sessionFor = originalSessionFor; vscode.workspace.getWorkspaceFolder = previousFolder;
+  const dirtyDocument = { uri: uri('file:' + path.join(cwd, 'sample.js')), isDirty: true };
+  opened.push(dirtyDocument);
+  const checkedOperation = view.operations.get(clicked.id);
+  await view.presentReport(clicked.id, checkedOperation.result);
+  assert.equal(diagnostics.has(dirtyDocument.uri.toString()), false, 'Do not project disk locations into an unsaved editor');
+  assert.equal(checkedOperation.codeCheck, 'matched'); assert.equal(checkedOperation.editorCheck, 'unsaved');
+  assert.match(view.documents.get(checkedOperation.uri.toString()), /未保存内容/);
+  dirtyDocument.isDirty = false; await view.presentReport(clicked.id, checkedOperation.result);
+  assert(diagnostics.has(dirtyDocument.uri.toString()));
+  dirtyDocument.isDirty = true; view.invalidateReviewFile(dirtyDocument.uri.fsPath, false);
+  assert(!diagnostics.has(dirtyDocument.uri.toString())); assert.equal(checkedOperation.codeCheck, 'matched');
+  view.invalidateReviewFile(dirtyDocument.uri.fsPath, true); assert.equal(checkedOperation.codeCheck, 'changed');
+  dirtyDocument.isDirty = false; opened.splice(opened.indexOf(dirtyDocument), 1);
   const savedContext = { ...context, storageUri: { fsPath: path.join(root, 'storage') } };
   const savedView = new BridgeViews({ context: savedContext, connections, panel, log() {} }); await savedView.historyReady;
   const savedSnapshot = await require('../src/bridge/results').repositorySnapshot(cwd);

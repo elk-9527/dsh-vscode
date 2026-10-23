@@ -710,6 +710,12 @@ body.vscode-high-contrast-light .access-btn {
 }
 
 .tool-head {
+  width: 100%;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -717,6 +723,8 @@ body.vscode-high-contrast-light .access-btn {
   cursor: pointer;
   user-select: none;
 }
+
+.tool-head:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -2px; }
 
 .tool-head:hover {
   background: var(--vscode-list-hoverBackground);
@@ -898,6 +906,8 @@ body.vscode-high-contrast-light .access-btn {
 }
 
 .history-meta {
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: var(--vscode-descriptionForeground);
   font-size: var(--dsh-fs-xs);
 }
@@ -1300,6 +1310,11 @@ body.vscode-high-contrast-light .access-btn {
 /* ── 权限询问 ───────────────────────────────────────── */
 
 .permission {
+  position: fixed;
+  inset: auto 0 0;
+  z-index: 60;
+  max-height: 100%;
+  overflow: auto;
   flex: 0 0 auto;
   border-top: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-charts-yellow));
   background: var(--vscode-inputValidation-warningBackground, var(--vscode-editorWidget-background));
@@ -1342,6 +1357,11 @@ body.vscode-high-contrast-light .access-btn {
 
 .permission-actions button:hover {
   background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground));
+}
+
+.permission-actions button:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
 }
 
 /* 工具输出里的差异视图 */

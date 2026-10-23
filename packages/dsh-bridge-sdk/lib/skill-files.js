@@ -108,6 +108,7 @@ class SkillFileStore {
   }
   trash(context) {
     const records = [];
+    const compare = (a, b) => Date.parse(b.time) - Date.parse(a.time) || a.id.localeCompare(b.id);
     for (const [scope, root] of Object.entries(this.rootsFor(context))) {
       if (!fs.existsSync(root)) continue;
       for (const skill of fs.readdirSync(root, { withFileTypes: true })) {
@@ -116,7 +117,7 @@ class SkillFileStore {
         try { this.checked(file, context); } catch { continue; }
         const directory = path.join(root, skill.name, '.trash');
         if (!fs.existsSync(directory) || fs.lstatSync(directory).isSymbolicLink()) continue;
-        for (const name of fs.readdirSync(directory).slice(-256)) {
+        for (const name of fs.readdirSync(directory)) {
           if (!/^[a-f0-9-]{36}\.json$/.test(name)) continue;
           try {
             const metadataFile = path.join(directory, name);
@@ -125,14 +126,18 @@ class SkillFileStore {
             if (item.version !== 1 || item.scope !== scope || item.file !== file || item.id + '.json' !== name || typeof item.name !== 'string' || path.basename(item.name) !== item.name ||
               typeof item.time !== 'string' || !Number.isFinite(Date.parse(item.time)) || typeof item.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(item.sha256) ||
               !['update', 'enabled', 'delete'].includes(item.action)) continue;
+            // Keep only the globally newest candidates. Bodies are checked one
+            // at a time and never retained by the recovery listing.
+            if (records.length === 128 && compare(item, records[127]) >= 0) continue;
             const trashFile = path.join(directory, item.name);
             if (fs.lstatSync(trashFile).isSymbolicLink() || digest(this.read(trashFile)) !== item.sha256) continue;
             records.push({ ...item, trashFile, skillName: skill.name });
+            records.sort(compare); if (records.length > 128) records.pop();
           } catch {}
         }
       }
     }
-    return records.sort((a, b) => b.time.localeCompare(a.time)).slice(0, 128);
+    return records;
   }
 }
 module.exports = { SkillFileStore };

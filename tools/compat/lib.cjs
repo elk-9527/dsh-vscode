@@ -63,13 +63,31 @@ function sourceState() {
   walk(path.join(ROOT, 'packages/dsh-bridge-sdk/lib'));
   walk(path.join(ROOT, 'packages/dsh-bridge-sdk/examples'));
   walk(path.join(ROOT, 'tools/bridge/providers'));
-  for (const name of ['review-budget.cjs', 'review-runtime.cjs', 'build-pilots.cjs']) { hash.update(name); hash.update(content(path.join(ROOT, 'tools/bridge', name))); }
+  for (const name of ['review-budget.cjs', 'review-runtime.cjs', 'review-context.cjs', 'build-pilots.cjs']) { hash.update(name); hash.update(content(path.join(ROOT, 'tools/bridge', name))); }
   hash.update(content(path.join(ROOT, 'packages/vscode-extension/API.md')));
   for (const name of ['package.json', 'README.md', 'LICENSE']) hash.update(content(path.join(ROOT, 'packages/dsh-bridge-sdk', name)));
   for (const name of ['packages/dsh-door/package.json', 'packages/vscode-extension/package.json']) hash.update(content(path.join(ROOT, name)));
   for (const pkg of ['dsh-door', 'vscode-extension']) for (const name of ['README.md', 'CHANGELOG.md', 'LICENSE']) hash.update(content(path.join(ROOT, 'packages', pkg, name)));
   hash.update(content(path.join(ROOT, 'packages/dsh-door/cordis.patch.yml')));
-  return { commit: git(['rev-parse', 'HEAD']), dirty: Boolean(git(['status', '--porcelain'])), fingerprint: hash.digest('hex') };
+  const fingerprintFiles = files => {
+    const digest = crypto.createHash('sha256');
+    const add = file => {
+      if (!fs.existsSync(file)) return;
+      if (fs.statSync(file).isDirectory()) { for (const name of fs.readdirSync(file).sort()) add(path.join(file, name)); return; }
+      digest.update(path.relative(ROOT, file).replace(/\\/g, '/')); digest.update('\0'); digest.update(content(file)); digest.update('\0');
+    };
+    for (const file of files) add(path.join(ROOT, file));
+    return digest.digest('hex');
+  };
+  const matrix = json(path.join(ROOT, 'compat/versions.json')), editors = json(path.join(ROOT, 'compat/editors.json'));
+  // 验收要求纳入工具指纹；登记结果的时间、路径和状态不参与，避免证据自引用。
+  const requirements = { kernels: [...new Set(matrix.versions.map(entry => JSON.stringify([entry.dsh, entry.distribution, entry.platform || matrix.platform])))].sort(),
+    editors: [...new Set([editors.minimum, editors.chatBaseline, ...(editors.supported || []).map(entry => entry.editor)])].filter(Boolean).sort(), platform: editors.platform };
+  const typeConfigs = fs.readdirSync(ROOT).filter(name => /^tsconfig(?:\.[^.]+)*\.json$/.test(name)).sort();
+  const toolFingerprint = crypto.createHash('sha256').update(fingerprintFiles(['tools', '.github/workflows', ...typeConfigs, 'packages/vscode-extension/tools', 'packages/vscode-extension/test', 'packages/dsh-door/tools', 'packages/dsh-door/test', 'packages/dsh-bridge-sdk/test'])).update(JSON.stringify(requirements)).digest('hex');
+  return { commit: git(['rev-parse', 'HEAD']), dirty: Boolean(git(['status', '--porcelain'])), fingerprint: hash.digest('hex'),
+    toolFingerprint,
+    lockFingerprint: fingerprintFiles(['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml']) };
 }
 function versions() {
   return {
@@ -77,6 +95,7 @@ function versions() {
     door: json(path.join(ROOT, 'packages/dsh-door/package.json')).version,
     peer: json(path.join(ROOT, 'packages/dsh-door/package.json')).peerDependencies['@deepseek-ai/dsh-acp'],
     sdk: json(path.join(ROOT, 'packages/dsh-bridge-sdk/package.json')).version,
+    vscode: json(path.join(ROOT, 'packages/vscode-extension/package.json')).engines.vscode,
   };
 }
 function readAsar(archive, relative) {

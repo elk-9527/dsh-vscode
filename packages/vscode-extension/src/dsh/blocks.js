@@ -1,4 +1,5 @@
 'use strict';
+const { fileURLToPath } = require('node:url');
 
 /** Assemble ACP blocks from user text and explicit context snapshots. Source
  * metadata identifies the captured body; it never requests a later file read.
@@ -102,6 +103,19 @@ function buildPromptBlocks(text, attachments = []) {
       if (typeof item.mimeType === 'string' && item.mimeType) link.mimeType = item.mimeType;
       blocks.push(link);
     }
+  }
+  // 旧式链接没有正文；明确区分链接与前面的快照，避免模型沿用其他附件的内容。
+  const links = blocks.filter(block => block.type === 'resource_link');
+  if (links.length) {
+    const references = links.map(({ name, uri }) => {
+      let localPath;
+      try {
+        const parsed = new URL(uri);
+        if (parsed.protocol === 'file:' && (!parsed.hostname || parsed.hostname === 'localhost')) localPath = fileURLToPath(parsed);
+      } catch { /* 保留原地址；无法安全转换的链接不提供本机路径。 */ }
+      return { name, uri, ...(localPath ? { localPath } : {}) };
+    });
+    blocks.push({ type: 'text', text: '本轮显式提供的文件链接（只含地址，没有正文）：\n' + JSON.stringify(references) + '\n\n如果回答需要这些文件的正文，请先调用文件读取工具读取对应 localPath 或 uri，再依据读取结果回答。之前的选区和其他轮次的文件内容不能作为本轮链接的正文。\n\n' });
   }
   // 末尾始终补充一个 text 块。内核会按顺序将 text 与 resource_link 并成一段正文，
   // 输入为空时提供一句完整的话，可避免仅传入空字符串（从而不会出现"只有链接、

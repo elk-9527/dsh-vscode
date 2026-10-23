@@ -32,6 +32,8 @@ import * as acp from '@deepseek-ai/dsh-acp';
 import {
   FALLBACK_PRESETS,
   MOUNT_WAIT_MS,
+  MAX_FRAME_BYTES,
+  NdjsonBuffer,
   createOutboundRelay,
   doorStreamNotification,
   doorSessionsMethod,
@@ -305,23 +307,26 @@ function loadPresets(child, diag) {
  * @param diag - 诊断日志函数。
  * @returns 加了闸的可读流，交给 ndJsonStream。
  */
-function gatePrompts(source, state, diag) {
-  const decoder = new TextDecoder();
+export function gatePrompts(source, state, diag) {
   const encoder = new TextEncoder();
-  let buffer = '';
+  const buffer = new NdjsonBuffer(state.maxFrameBytes);
   return source.pipeThrough(
     new TransformStream({
       async transform(chunk, controller) {
-        buffer += decoder.decode(chunk, { stream: true });
-        let index;
-        while ((index = buffer.indexOf('\n')) >= 0) {
-          const line = buffer.slice(0, index + 1);
-          buffer = buffer.slice(index + 1);
+        let lines;
+        try { lines = buffer.push(chunk); }
+        catch (error) { state.closeTransport?.(error); throw error; }
+        for (const line of lines) {
           // 该插件自身的方法（历史会话 / 权限预设）在此处就地应答、不转发内核；
           // 其余帧照旧走闸。
           const incoming = parseLine(line);
           if (historyRequests.cancelHistoryRequest(incoming, state)) continue;
-          if (line.includes(BRIDGE_PREFIX) && await state.bridge?.handle(parseLine(line), state)) continue;
+          if (incoming?.id !== undefined && incoming.method?.startsWith(BRIDGE_PREFIX) && state.bridge) {
+            // handle() synchronously validates identity and reserves executions;
+            // only provider work and its response continue outside frame reading.
+            void state.bridge.handle(incoming, state).catch(error => { diag(`Bridge 应答失败：${String(error)}`); state.closeTransport?.(error); });
+            continue;
+          }
           if (line.includes(DOOR_STATUS_METHOD)) {
             const handled = handleDoorStatus(line, state, diag);
             if (handled) continue;
@@ -330,8 +335,10 @@ function gatePrompts(source, state, diag) {
             if (isDoorSessionsRequest(incoming)) { void handleDoorSessions(line, state, diag).catch(() => diag('历史请求已结束，无法继续应答')); continue; }
           }
           if (line.includes(DOOR_PERMISSION_PREFIX)) {
-            const handled = await handleDoorPermission(line, state, diag);
-            if (handled) continue;
+            if (isDoorPermissionRequest(incoming)) {
+              void handleDoorPermission(line, state, diag).catch(error => { diag(`权限应答失败：${String(error)}`); state.closeTransport?.(error); });
+              continue;
+            }
           }
           rememberSessionRequest(line, state, diag);
           await holdUntilMounted(line, state, diag);
@@ -340,7 +347,8 @@ function gatePrompts(source, state, diag) {
       },
       flush(controller) {
         // 收尾时可能存在没有换行的最后一行，原样放行。
-        if (buffer) controller.enqueue(encoder.encode(buffer));
+        const tail = buffer.flush();
+        if (tail) controller.enqueue(encoder.encode(tail));
       },
     }),
   );
@@ -450,7 +458,7 @@ async function handleDoorSessions(line, state, diag) {
  * @param {(message: string) => void} diag
  * @returns {Promise<boolean>} true = 该帧属于该插件的方法且已应答，调用方不应再转发。
  */
-async function handleDoorPermission(line, state, diag) {
+export async function handleDoorPermission(line, state, diag) {
   const frame = parseLine(line);
   if (!isDoorPermissionRequest(frame)) return false;
   const method = doorPermissionMethod(frame);
@@ -479,6 +487,10 @@ async function handleDoorPermission(line, state, diag) {
     state.respond(
       doorPermissionError(frame.id, -32602, '切换权限需要携带目标预设名（params.value）'),
     );
+    return true;
+  }
+  if (!state.sessions?.has(sessionId)) {
+    state.respond(doorPermissionError(frame.id, -32003, '会话不属于当前连接；请先创建或恢复该会话'));
     return true;
   }
   try {
@@ -739,6 +751,7 @@ export function apply(ctx, config = {}) {
       agents: new WeakSet(),
       agentsBySession: new Map(),
       bridge,
+      closeTransport: error => { diag(`连接传输预算或管道错误：${String(error)}`); socket.destroy(); },
       connectionCount: () => live.size,
     };
     const { readable, writable } = bridgeTransport(socket, state);
@@ -747,6 +760,7 @@ export function apply(ctx, config = {}) {
     const stream = ndJsonStream(
       createOutboundRelay(writable, state, diag),
       gatePrompts(readable, state, diag),
+      { maxMessageBytes: MAX_FRAME_BYTES },
     );
 
     // 每个连接挂载一份 ACP。直接调用 apply，而不使用 ctx.plugin(AcpPlugin, {...})，
@@ -772,8 +786,13 @@ export function apply(ctx, config = {}) {
       },
     });
 
-    const teardown =
+    const disposeChild =
       typeof handle === 'function' ? handle : () => handle?.dispose?.();
+    let tearingDown;
+    const teardown = () => {
+      if (!tearingDown) tearingDown = bridge.idle(state).then(disposeChild);
+      return tearingDown;
+    };
 
     const entry = { socket, teardown };
     live.add(entry);
@@ -785,7 +804,7 @@ export function apply(ctx, config = {}) {
       for (const controller of state.historyReads.values()) controller.abort();
       bridge.detach(state);
       diag('客户端已断开');
-      void bridge.idle(state).then(() => { teardown(); lifetime.schedule(); }).catch((error) => {
+      void teardown().then(() => lifetime.schedule()).catch((error) => {
         ctx.logger?.warn?.(`acp-door: 拆除连接失败：${String(error)}`);
       });
     };
@@ -834,7 +853,7 @@ export function apply(ctx, config = {}) {
   ctx.on('dispose', () => {
     disposed = true;
     lifetime.dispose();
-    bridge.dispose();
+    const settled = bridge.dispose();
     diag('该插件已被卸载');
     const closed = disposeLiveConnections(live, (phase, error) => {
       const text = `acp-door: 卸载时清理${phase === 'socket' ? '连接' : '连接桥'}失败：${String(error)}`;
@@ -843,5 +862,6 @@ export function apply(ctx, config = {}) {
     });
     if (closed > 0) diag(`卸载时已关闭 ${closed} 个客户端连接`);
     if (server.listening) server.close();
+    return settled;
   });
 }

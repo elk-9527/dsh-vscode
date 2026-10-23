@@ -39,6 +39,8 @@ class KernelManager {
     this.clearTimer = clearTimer || clearTimeout;
     /** @type {Map<string, object>} host:port → 登记项 */
     this.entries = new Map();
+    /** @type {Set<Promise<unknown>>} Started cleanup only; running providers are not included. */
+    this.pendingDisposals = new Set();
   }
 
   key(host, port) {
@@ -166,8 +168,21 @@ class KernelManager {
       return true;
     }
     this.log('info', `停止后台 DSH（${key}，${reason}）`);
-    entry.background.dispose();
+    const cleanup = entry.background.dispose();
+    if (cleanup && typeof cleanup.then === 'function') {
+      const pending = Promise.resolve(cleanup);
+      this.pendingDisposals.add(pending);
+      void pending.then(() => this.pendingDisposals.delete(pending), error => {
+        this.pendingDisposals.delete(pending);
+        this.log('warn', `后台 DSH 清理失败：${error && error.message ? error.message : error}`);
+      });
+    }
     return true;
+  }
+
+  /** Wait for already-started termination, without waiting for preserved Bridge work. */
+  async waitForCleanup() {
+    while (this.pendingDisposals.size) await Promise.allSettled([...this.pendingDisposals]);
   }
 
   /** 窗口关闭时可保留进行中的插件任务；常规显式停止仍回收全部内核。 */

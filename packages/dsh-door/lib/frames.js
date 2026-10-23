@@ -35,6 +35,37 @@ export const DOOR_SESSIONS_PREFIX = 'dsh-door/sessions/';
  */
 export const DOOR_STREAM_METHOD = 'dsh-door/stream';
 
+// ACP history and attachments have a different budget from Bridge's 1 MiB
+// structured arguments. Count raw bytes before decoding, including partial lines.
+export const MAX_FRAME_BYTES = 128 * 1024 * 1024;
+export const MAX_SEND_QUEUE_BYTES = 256 * 1024 * 1024;
+export class NdjsonBuffer {
+  constructor(maxBytes = MAX_FRAME_BYTES) {
+    this.maxBytes = maxBytes; this.bytes = 0; this.text = '';
+    this.decoder = new TextDecoder('utf-8', { fatal: true });
+  }
+  push(chunk) {
+    const data = typeof chunk === 'string' ? new TextEncoder().encode(chunk) : chunk;
+    const lines = [];
+    let start = 0;
+    while (start < data.length) {
+      const newline = data.indexOf(10, start);
+      const end = newline < 0 ? data.length : newline + 1;
+      if (this.bytes + end - start > this.maxBytes) throw new Error('ACP 消息帧超过传输预算');
+      this.bytes += end - start;
+      this.text += this.decoder.decode(data.subarray(start, end), { stream: true });
+      if (newline >= 0) { lines.push(this.text); this.text = ''; this.bytes = 0; }
+      start = end;
+    }
+    return lines;
+  }
+  flush() {
+    const tail = this.text + this.decoder.decode();
+    this.text = ''; this.bytes = 0;
+    return tail;
+  }
+}
+
 /**
  * 把 DSH 0.2 的 assistant stream 帧收窄成稳定、最小的通知形状。
  * 旧版 DSH 不产生这些帧，调用方自然继续使用标准 ACP 的完整消息。
@@ -386,41 +417,64 @@ export async function decorateLine(line, state, diag) {
  * @param diag - 诊断日志函数。
  * @returns {WritableStream} 交给 ndJsonStream 当输出端。
  */
-export function createOutboundRelay(sink, state, diag) {
-  const decoder = new TextDecoder();
+export function createOutboundRelay(sink, state, diag, { maxFrameBytes = MAX_FRAME_BYTES, maxQueueBytes = MAX_SEND_QUEUE_BYTES } = {}) {
+  const buffer = new NdjsonBuffer(maxFrameBytes);
   const encoder = new TextEncoder();
-  let buffer = '';
 
   /** 待写入 socket 的字节行。 */
   const queue = [];
   let writer = null;
-  let draining = false;
-  async function drain() {
-    if (draining) return;
-    draining = true;
-    try {
-      if (!writer) writer = sink.getWriter();
-      while (queue.length > 0) {
-        await writer.write(queue.shift());
-      }
-    } catch (error) {
-      diag(`出站管道已断开：${String(error)}`);
-    } finally {
-      draining = false;
-    }
+  let draining;
+  let queuedBytes = 0;
+  let failure;
+  function failRelay(error) {
+    if (failure) return;
+    failure = error;
+    diag(`出站管道已关闭：${String(error)}`);
+    state.closeTransport?.(error);
+    // Reject callers waiting on queued writes; the current sink write may only
+    // settle when the socket closes. No terminal message is silently discarded.
+    for (const item of queue.splice(0)) { queuedBytes -= item.bytes.length; item.reject(error); }
   }
-  state.respond = (frame) => {
-    queue.push(encoder.encode(`${JSON.stringify(frame)}\n`));
-    drain();
+  function drain() {
+    if (draining) return draining;
+    draining = (async () => {
+      if (!writer) writer = sink.getWriter();
+      while (queue.length && !failure) {
+        const item = queue.shift();
+        try { await writer.write(item.bytes); item.resolve(); }
+        catch (error) { item.reject(error); failRelay(error); }
+        finally { queuedBytes -= item.bytes.length; }
+      }
+    })().catch(failRelay).finally(() => { draining = undefined; if (queue.length && !failure) void drain(); });
+    return draining;
+  }
+  function enqueue(text) {
+    if (failure) return Promise.reject(failure);
+    const bytes = encoder.encode(text);
+    if (bytes.length > maxFrameBytes || queuedBytes + bytes.length > maxQueueBytes) {
+      const error = new Error('ACP 发送队列超过传输预算'); failRelay(error); return Promise.reject(error);
+    }
+    queuedBytes += bytes.length;
+    const promise = new Promise((resolve, reject) => queue.push({ bytes, resolve, reject }));
+    void drain(); return promise;
+  }
+  state.respond = frame => {
+    let pending;
+    try { pending = enqueue(`${JSON.stringify(frame)}\n`); }
+    catch (error) { failRelay(error); pending = Promise.reject(error); }
+    // Notification callers cannot all await backpressure. Their aggregate queue
+    // has a hard budget and closes the slow connection when exceeded.
+    void pending.catch(() => {});
+    return pending;
   };
+  state.outboundBudget = () => ({ queuedBytes, maxQueueBytes, maxFrameBytes, closed: Boolean(failure) });
 
   return new WritableStream({
     async write(chunk) {
-      buffer += decoder.decode(chunk, { stream: true });
-      let index;
-      while ((index = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, index + 1);
-        buffer = buffer.slice(index + 1);
+      let lines;
+      try { lines = buffer.push(chunk); } catch (error) { failRelay(error); throw error; }
+      for (const line of lines) {
         let out;
         try {
           out = await decorateLine(line, state, diag);
@@ -429,13 +483,17 @@ export function createOutboundRelay(sink, state, diag) {
           diag(`装饰出站帧失败（原样放行）：${String(error)}`);
           out = line;
         }
-        queue.push(encoder.encode(out));
+        await enqueue(out);
       }
-      drain();
     },
-    close() {
-      if (buffer) queue.push(encoder.encode(buffer));
-      drain();
+    async close() {
+      let tail;
+      try { tail = buffer.flush(); } catch (error) { failRelay(error); throw error; }
+      if (tail) await enqueue(tail);
+      await drain();
+      if (failure) throw failure;
+      if (writer) await writer.close();
     },
+    abort(error) { failRelay(error); return writer?.abort(error); },
   });
 }

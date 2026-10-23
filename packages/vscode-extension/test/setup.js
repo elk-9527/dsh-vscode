@@ -12,7 +12,8 @@ const {
   preparePanelProfile,
 } = require('../src/door/setup');
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-panel-setup-'));
+const fixtures = path.resolve(__dirname, '../../../build/test-setup'); fs.mkdirSync(fixtures, { recursive: true });
+const root = fs.mkdtempSync(path.join(fixtures, 'dsh-panel-setup-'));
 const env = { DSH_HOME: path.join(root, '.dsh') };
 const profile = 'vscode-panel';
 const sourceProfile = 'desktop';
@@ -48,7 +49,8 @@ function parseRegistryArgument(argument) {
   return { name: argument.slice(0, at), version: argument.slice(at + 1) };
 }
 
-function fakeRun(options) {
+async function fakeRun(options) {
+  await new Promise(resolve => setImmediate(resolve));
   calls.push(options.args);
   if (options.args.includes('--from-default-profile')) {
     writeManifest(profile, ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']);
@@ -77,7 +79,7 @@ function fakeRun(options) {
   return '';
 }
 
-try {
+(async () => { try {
   writeManifest(
     sourceProfile,
     [
@@ -116,7 +118,7 @@ try {
   console.log('  PASS  自启 vscode-panel 只读叠加 desktop 配置文件，不改写目标文件');
 
   assert.equal(inspectPanelProfile(profile, { homedir: root, env }).exists, false);
-  const created = preparePanelProfile({
+  const created = await preparePanelProfile({
     command: 'fake-dsh',
     profile,
     run: fakeRun,
@@ -162,7 +164,7 @@ try {
   console.log('  PASS  同步固定到实际安装版本，跳过本地来源、未启用依赖与无法解析的手工 bundle');
 
   calls.length = 0;
-  const updated = preparePanelProfile({
+  const updated = await preparePanelProfile({
     command: 'fake-dsh',
     profile,
     run: fakeRun,
@@ -186,14 +188,35 @@ try {
   assert.deepEqual(drift.install.map((item) => item.argument), ['beta-plugin@2.0.0']);
   console.log('  PASS  桌面端插件升级后，自启前能识别版本漂移');
 
+  writeManifest(profile, ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']); calls.length = 0;
+  const failedRun = async options => {
+    if (options.args.includes('@demo/alpha@1.2.3')) {
+      await fakeRun({ ...options, args: options.args.slice(0, 5) });
+      throw Object.assign(new Error('registry unavailable'), { code: 'EPROCESS' });
+    }
+    return fakeRun(options);
+  };
+  await assert.rejects(preparePanelProfile({ command: 'fake-dsh', profile, run: failedRun, homedir: root, env }), error => {
+    assert.equal(error.setupState.hasDoor, true); assert.deepEqual(error.setupState.synced, ['@demo/alpha']);
+    assert.deepEqual(error.setupState.pending, ['beta-plugin', '@deepseek-ai/dsh-experimental-auto-review', '@deepseek-ai/dsh-experimental-schedule-bundle']); assert.match(error.message, /已完成的更改已保留/); return true;
+  });
+  assert(inspectPanelProfile(profile, { homedir: root, env }).bundles.includes('@demo/alpha'));
+  calls.length = 0;
+  await preparePanelProfile({ command: 'fake-dsh', profile, run: fakeRun, homedir: root, env });
+  assert.deepEqual(calls[1], ['plugin', '--profile', profile, 'add', 'beta-plugin@2.0.0'], 'Retry installs only the remaining plugin');
+  const abort = new AbortController(); abort.abort(); const beforeCancel = calls.length;
+  await assert.rejects(preparePanelProfile({ command: 'fake-dsh', profile, run: fakeRun, homedir: root, env, signal: abort.signal }), error => error.code === 'ECANCELLED');
+  assert.equal(calls.length, beforeCancel);
+  console.log('  PASS  部分安装失败保留实际状态，重试仅安装缺失项，提前取消不执行命令');
+
   writeManifest(profile, ['@deepseek-ai/dsh-base']);
-  assert.throws(
+  await assert.rejects(
     () => preparePanelProfile({ command: 'fake-dsh', profile, run: fakeRun, homedir: root, env }),
     /不是可由面板自启的 web 配置集/,
   );
   console.log('  PASS  不覆盖同名的非 web 配置集');
 
-  assert.throws(
+  await assert.rejects(
     () => preparePanelProfile({ command: 'fake-dsh', profile: '../bad', run: fakeRun, homedir: root, env }),
     /名称不合法/,
   );
@@ -201,3 +224,4 @@ try {
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
+})().catch(error => { console.error(error); process.exitCode = 1; });

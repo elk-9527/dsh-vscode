@@ -57,10 +57,12 @@ class OperationStore extends Map {
     this.compact();
     return { deleted: [...this.deleted], records: [...this.values()].map(op => ({
       id: op.id, title: op.title, status: op.status, seq: op.seq, cwd: op.cwd, fingerprint: op.fingerprint,
+      indexFingerprint: op.indexFingerprint, headState: op.headState,
       instanceId: op.instanceId, clientId: op.clientId, retryOf: op.retryOf, startedAt: op.startedAt, updatedAt: op.updatedAt, finishedAt: op.finishedAt, reason: op.reason,
       savedKey: op.savedKey, caseKey: op.caseKey, requestedRef: op.requestedRef, reportStorage: op.reportStorage,
       originalOperationId: op.originalOperationId,
       evidenceLink: op.evidenceLink,
+      scopeNote: op.scopeNote,
       input: op.input && ['worktree', 'base', 'commit', 'custom'].includes(op.input.mode) ? { mode: op.input.mode, ...(typeof op.input.ref === 'string' ? { ref: op.input.ref } : {}) } : undefined,
     })) };
   }

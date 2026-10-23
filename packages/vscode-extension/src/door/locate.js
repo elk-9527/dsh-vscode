@@ -15,6 +15,7 @@ const net = require('node:net');
 const path = require('node:path');
 const fs = require('node:fs');
 const { spawn, execFileSync } = require('node:child_process');
+const { runCommand, stopOwnedProcess } = require('./process');
 // `$DSH_HOME` 的判定只有一处（sessions.js），此处复用它以避免两处规则不一致。
 const { resolveSessionsRoot } = require('../dsh/sessions');
 
@@ -101,11 +102,11 @@ function dshCommandCandidates({ dshCommand, homedir, desktopExecutables = [], ex
   );
   if (bin && fs.existsSync(bin)) list.push(`node ${quoteArg(bin)}`);
   for (const executable of desktopExecutables) {
+    const desktopCommand = desktopDshCommand(executable, { extensionDir });
+    if (desktopCommand) list.push(desktopCommand);
     // rc.2 的官方命令可直接按完整路径运行，无需注册 PATH 或修改用户环境。
     const bundledCli = path.join(path.dirname(executable), 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd');
     if (process.platform === 'win32' && existsAsFile(bundledCli)) list.push(quoteArg(bundledCli));
-    const desktopCommand = desktopDshCommand(executable, { extensionDir });
-    if (desktopCommand) list.push(desktopCommand);
   }
   return [...new Set(list)];
 }
@@ -113,7 +114,7 @@ function dshCommandCandidates({ dshCommand, homedir, desktopExecutables = [], ex
 /**
  * 从一个桌面端安装目录构造可持续运行的 dsh CLI 命令。
  *
- * DSH Desktop 0.2 将 CLI 放进 app.asar，不再生成旧版的全局 dsh.cmd。直接设置
+ * DSH Desktop 0.2 将 CLI 放进 app.asar。直接设置
  * `ELECTRON_RUN_AS_NODE=1` 执行该脚本时，Electron 44 会在脚本初始化后退出，即使
  * 内核仍持有监听句柄。这里改用桌面端随附的真正 Node 运行一个很小的代理；代理以
  * IPC fork 启动 Electron/Node 子进程，IPC 通道会维持其生命周期。这样既不复制
@@ -141,7 +142,20 @@ function desktopDshCommand(executable, { extensionDir } = {}) {
     'desktop-cli-host.cjs',
   );
   if (!existsAsFile(appAsar) || !existsAsFile(node) || !existsAsFile(proxy)) return undefined;
-  const cli = path.join(appAsar, 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js');
+  // 新发行的官方 CLI 负责注入随附 pnpm、Office 路径和 Windows 信号处理。
+  // 普通 dsh/bin.js 会绕过这些设置并落到用户 PATH 中的包管理器。沿用发行
+  // 自带启动脚本声明的入口；没有这层包装的旧发行继续使用原有入口。
+  let cliPackage = 'dsh';
+  let cliFile = 'bin.js';
+  try {
+    const launcher = path.join(resources, 'runtime', 'cli', 'bin', 'dsh.cmd');
+    if (fs.statSync(launcher).size <= 64 * 1024 &&
+        /[\\/]dsh-desktop-host[\\/]lib[\\/]cli\.js(?:["\s]|$)/i.test(fs.readFileSync(launcher, 'utf8'))) {
+      cliPackage = 'dsh-desktop-host';
+      cliFile = 'cli.js';
+    }
+  } catch { /* 旧发行未提供官方 CLI 启动脚本。 */ }
+  const cli = path.join(appAsar, 'dsh', 'node_modules', '@deepseek-ai', cliPackage, 'lib', cliFile);
   return [node, proxy, exe, cli].map(quoteArg).join(' ');
 }
 
@@ -196,6 +210,35 @@ function runningDesktopExecutables({ env = process.env, platform = process.platf
   } catch {
     // PowerShell 不可用或进程路径不可读：保留已经发现的标准安装目录即可。
   }
+  return list;
+}
+
+/** Read-only Desktop discovery without blocking the extension host. */
+async function runningDesktopExecutablesAsync({ env = process.env, platform = process.platform, signal } = {}) {
+  if (platform !== 'win32') return [];
+  // The synchronous helper checks standard locations without starting a process
+  // when its platform is not Windows; enumerate these paths directly here.
+  const list = [];
+  const push = candidate => {
+    const value = String(candidate || '').trim();
+    if (value && /deepseek harness\.exe$/i.test(value) && existsAsFile(value)
+      && !list.some(item => item.toLowerCase() === value.toLowerCase())) list.push(value);
+  };
+  push(env.DEEPSEEK_HARNESS_EXECUTABLE);
+  for (const root of [env.LOCALAPPDATA, env.ProgramFiles, env['ProgramFiles(x86)']]) {
+    if (root) push(path.join(root, 'DeepSeek Harness', 'DeepSeek Harness.exe'));
+  }
+  if (env.LOCALAPPDATA) push(path.join(env.LOCALAPPDATA, 'Programs', 'DeepSeek Harness', 'DeepSeek Harness.exe'));
+  try {
+    const powershell = env.SystemRoot
+      ? path.join(env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : 'powershell.exe';
+    const output = await runCommand({ file: powershell, args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+      "Get-Process -Name 'DeepSeek Harness' -ErrorAction SilentlyContinue | ForEach-Object { $_.Path }; " +
+      "Get-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' -ErrorAction SilentlyContinue | " +
+      "Where-Object { $_.DisplayName -like 'DeepSeek Harness*' -and $_.InstallLocation } | ForEach-Object { Join-Path $_.InstallLocation 'DeepSeek Harness.exe' }"],
+      options: { env }, timeoutMs: 5000, signal, redact: redactSensitiveOutput });
+    for (const line of output.split(/\r?\n/)) push(line);
+  } catch (error) { if (error.code === 'ECANCELLED') throw error; }
   return list;
 }
 
@@ -411,7 +454,7 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [], port, owned
           const parts = resolveCommand(command);
           return spawn(parts[0], [...parts.slice(1), ...args], {
             stdio: ['ignore', 'pipe', 'pipe'],
-            detached: false,
+            detached: true,
             env,
           });
         })();
@@ -476,6 +519,8 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [], port, owned
   attach(child.stderr, 'err', true);
 
   let disposed = false;
+  /** @type {Promise<void> | undefined} */
+  let cleanupPromise;
   child.on('error', (error) => {
     log('error', `后台 DSH 启动失败：${redactSensitiveOutput(error.message)}`);
   });
@@ -504,23 +549,23 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [], port, owned
       return safeStderrTail();
     },
     dispose() {
-      if (disposed) return;
+      if (cleanupPromise) return cleanupPromise;
       disposed = true;
-      // 进程已自行退出时（自启动失败路径即属此类），此次清理通常不会终止任何进程，
-      // taskkill 会报告"找不到进程"。该情况不是故障，日志中不应作为异常记录 ——
-      // 但仍需尝试一次：外壳进程已退出、底层内核仍在运行（Windows 上 dsh 为垫片）的情形确实存在。
       const alreadyExited = child.exitCode !== null || child.signalCode !== null;
-      try {
-        killTree(child);
+      // A finished PID may be reused. Never issue a new termination request for
+      // an already finished process, and keep disposal non-blocking.
+      cleanupPromise = killTree(child);
+      void cleanupPromise.then(() => {
         log(
           'info',
           alreadyExited
-            ? '后台 DSH 已自行退出，同时清理可能残留的子孙进程'
-            : '已停止本扩展启动的后台 DSH',
+            ? '后台 DSH 已自行退出'
+            : '已请求停止本扩展启动的后台 DSH',
         );
-      } catch (error) {
+      }, error => {
         log(alreadyExited ? 'info' : 'warn', `停止后台 DSH 失败：${redactSensitiveOutput(error.message)}`);
-      }
+      });
+      return cleanupPromise;
     },
   };
 }
@@ -534,18 +579,7 @@ function spawnBackgroundDsh({ command, profile, log, extraArgs = [], port, owned
  * 孤儿进程并继续占用端口与内存 —— 用户不可见，但该进程确实仍在运行。
  * 因此此处按 pid 连同子孙进程一并终止。
  */
-function killTree(child) {
-  if (!child || !child.pid) return;
-  if (process.platform === 'win32') {
-    require('node:child_process').execFileSync(
-      'taskkill',
-      ['/PID', String(child.pid), '/T', '/F'],
-      { stdio: 'ignore', timeout: 10000 },
-    );
-    return;
-  }
-  child.kill('SIGTERM');
-}
+function killTree(child) { return stopOwnedProcess(child); }
 
 /**
  * 同步执行一条 `dsh` 命令并获取其输出（仅在成功时返回；失败时抛出异常，附带 stderr）。
@@ -579,6 +613,22 @@ function runDshSync({ command, args = [], timeoutMs = 120000 }) {
     const detail = redactSensitiveOutput([error.stdout, error.stderr].filter(Boolean).join('\n').trim());
     const safeCommand = redactSensitiveOutput(`${command} ${args.join(' ')}`);
     throw new Error(`${safeCommand} 失败：${detail || redactSensitiveOutput(error.message)}`);
+  }
+}
+
+/** Product CLI path; each invocation owns its cancellation and timeout scope. */
+async function runDshAsync({ command, args = [], timeoutMs = 120000, signal, onOutput, env = process.env }) {
+  const quoted = commandLine(command, args), parts = resolveCommand(command);
+  try {
+    return await runCommand({
+      file: process.platform === 'win32' ? env.ComSpec || 'cmd.exe' : parts[0],
+      args: process.platform === 'win32' ? ['/d', '/s', '/c', `"${quoted}"`] : [...parts.slice(1), ...args],
+      options: { env, windowsVerbatimArguments: process.platform === 'win32' },
+      timeoutMs, signal, onOutput, redact: redactSensitiveOutput,
+    });
+  } catch (error) {
+    error.message = `${redactSensitiveOutput(`${command} ${args.join(' ')}`)} 失败：${redactSensitiveOutput(error.message)}`;
+    throw error;
   }
 }
 
@@ -691,6 +741,7 @@ module.exports = {
   waitForPort,
   spawnBackgroundDsh,
   runDshSync,
+  runDshAsync,
   delay,
   quoteArg,
   splitCommand,
@@ -701,6 +752,7 @@ module.exports = {
   dshCommandCandidates,
   desktopDshCommand,
   runningDesktopExecutables,
+  runningDesktopExecutablesAsync,
   explainKernelFailure,
   panelProfileCandidates,
 };

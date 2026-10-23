@@ -28,7 +28,8 @@ async function bounded(promise, timeout = 45000) {
 function npmRun(args) { return locate.runDshSync({ command: 'npm', args, timeoutMs: 300000 }); }
 async function run(options) {
   const folder = runDir(options.dsh || 'local');
-  const report = { schemaVersion: 1, time: new Date().toISOString(), source: sourceState(), node: process.version, platform: process.platform,
+  const start = sourceState();
+  const report = { schemaVersion: 2, time: new Date().toISOString(), source: start, sourceStart: start, node: process.version, platform: process.platform,
     packages: versions(), requested: options.dsh, status: 'failed', stages: [], artifacts: [], model: 'fixture' };
   let kernel, client, session, provider, port;
   const previousHome = process.env.DSH_HOME;
@@ -41,6 +42,11 @@ async function run(options) {
     catch (error) { report.stages.push({ name, status: error.kind || 'failed', ms: Date.now() - started, error: redact(error.message) }); throw error; }
   };
   try {
+    await stage('package', async () => {
+      const artifact = require('../bridge/packages.cjs').verifyCandidate(options.tgz, 'tgz');
+      report.artifacts.push(require('../bridge/packages.cjs').artifactRecord(artifact));
+      return { sha256: artifact.sha256, file: path.basename(artifact.file) };
+    });
     await stage('loopback-environment', () => require('./loopback.cjs').verifyLoopback());
     process.env.DSH_HOME = path.join(folder, 'home');
     fs.mkdirSync(process.env.DSH_HOME, { recursive: true });
@@ -58,12 +64,6 @@ async function run(options) {
       assert(actual.includes(runtime.version));
       report.runtime = runtime;
       return { version: runtime.version, distribution: runtime.distribution };
-    });
-    await stage('package', async () => {
-      const packed = JSON.parse(npmRun(['pack', path.join(ROOT, 'packages/dsh-door'), '--pack-destination', folder, '--json']));
-      const file = path.join(folder, packed[0].filename);
-      report.artifacts.push({ kind: 'tgz', file: path.relative(ROOT, file).replace(/\\/g, '/'), sha256: sha256(file) });
-      return { sha256: sha256(file), file: path.basename(file) };
     });
     await stage('installation', async () => {
       locate.runDshSync({ command: runtime.command, args: ['--profile', 'compat', '--from-default-profile', 'web', '--dump-config'] });
@@ -242,6 +242,7 @@ async function run(options) {
     delete process.env.DSH_COMPAT_FIXTURE_KEY;
     for (const [key, value] of Object.entries(savedProxy)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     report.finishedAt = new Date().toISOString();
+    require('../bridge/packages.cjs').finishEvidence(report);
     const file = writeReport(folder, report);
     if (options.record && report.status === 'passed') console.log(`矩阵证据：${require('./matrix.cjs').recordEvidence(file)}`);
     console.log(`${report.status}: ${file}${report.error ? `\n${report.error}` : ''}`);

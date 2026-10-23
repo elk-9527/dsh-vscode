@@ -14,7 +14,7 @@
 
 const net = require('node:net');
 const { EventEmitter } = require('node:events');
-const { StringDecoder } = require('node:string_decoder');
+const { FrameReader, SocketWriter, MAX_FRAME_BYTES, MAX_SEND_BYTES } = require('./transport-budget');
 
 const { buildPromptBlocks } = require('../dsh/blocks');
 const { requireLoopbackHost } = require('./endpoint');
@@ -85,8 +85,8 @@ class DoorTimeoutError extends Error {
 
 class DoorClient extends EventEmitter {
   #socket = null;
-  #buffer = '';
-  #decoder = new StringDecoder('utf8');
+  #reader;
+  #writer;
   #nextId = 1;
   #pending = new Map();
   #closed = false;
@@ -99,13 +99,15 @@ class DoorClient extends EventEmitter {
    * @param {number} options.port
    * @param {(level: string, message: string) => void} [options.log]
    */
-  constructor({ host, port, log }) {
+  constructor({ host, port, log, maxFrameBytes = MAX_FRAME_BYTES, maxSendBytes = MAX_SEND_BYTES, maxPending = 256 }) {
     super();
     // 连接目标在客户端层再次收紧：即使未来有其它调用方绕过面板配置，
     // 也不会把 ACP 请求发送到非本机地址。
     this.host = requireLoopbackHost(host);
     this.port = port;
     this.log = log || (() => {});
+    this.maxFrameBytes = maxFrameBytes; this.maxSendBytes = maxSendBytes; this.maxPending = maxPending;
+    this.#reader = new FrameReader({ maxBytes: maxFrameBytes, receive: line => this.#onLine(line) });
     /** 内核在 initialize 中返回的自身信息。 */
     this.agentInfo = null;
     /** 内核声明的能力。 */
@@ -129,12 +131,15 @@ class DoorClient extends EventEmitter {
     this.#closeReason = '';
     // TCP 数据块边界与 UTF-8 字符边界无关。每次新连接使用新的有状态解码器，
     // 既保留跨 chunk 的多字节字符，也丢弃上一次断线留下的半帧/半字符。
-    this.#buffer = '';
-    this.#decoder = new StringDecoder('utf8');
     this.#liveStream.reset();
 
     const socket = net.connect({ host: this.host, port: this.port });
     this.#socket = socket;
+    const writer = new SocketWriter(socket, { maxBytes: this.maxSendBytes });
+    this.#writer = writer;
+    this.#reader = new FrameReader({ maxBytes: this.maxFrameBytes, receive: line => {
+      if (this.#socket === socket) this.#onLine(line);
+    } });
     socket.setNoDelay(true);
 
     try {
@@ -143,6 +148,7 @@ class DoorClient extends EventEmitter {
           clearTimeout(timer);
           socket.off('connect', onConnect);
           socket.off('error', onError);
+          socket.off('close', onClose);
         };
         const onConnect = () => {
           cleanup();
@@ -152,22 +158,29 @@ class DoorClient extends EventEmitter {
           cleanup();
           reject(error);
         };
+        const onClose = () => { cleanup(); reject(new Error('连接在建立期间已关闭')); };
         const timer = setTimeout(() => {
           cleanup();
           reject(new Error(`连接 ${this.host}:${this.port} 超时`));
         }, timeoutMs);
         socket.once('connect', onConnect);
         socket.once('error', onError);
+        socket.once('close', onClose);
       });
     } catch (error) {
-      this.#socket = null;
+      if (this.#socket === socket) this.#socket = null;
+      writer.dispose();
       socket.destroy();
       throw error;
     }
 
-    socket.on('data', (chunk) => this.#onData(chunk));
-    socket.on('error', (error) => this.#fail(error));
-    socket.on('close', () => this.#fail(new Error('连接被对方关闭')));
+    if (this.#socket !== socket || this.#closed || socket.destroyed) {
+      writer.dispose(); socket.destroy(); throw new Error('连接在建立期间已关闭或被替换');
+    }
+
+    socket.on('data', (chunk) => { if (this.#socket === socket) this.#onData(chunk); });
+    socket.on('error', (error) => { if (this.#socket === socket) this.#fail(error); });
+    socket.on('close', () => { if (this.#socket === socket) this.#fail(new Error('连接被对方关闭')); });
 
     let result;
     try {
@@ -184,9 +197,11 @@ class DoorClient extends EventEmitter {
     } catch (error) {
       // TCP 已连通但握手失败时同样要关掉 socket；否则一个“只占端口、不说 ACP”的
       // 本机程序会留下一条无用连接，面板也无法干净地重试其它内核。
-      this.close();
+      if (this.#socket === socket) this.close();
+      else { writer.dispose(); socket.destroy(); }
       throw error;
     }
+    if (this.#socket !== socket || this.#closed) throw new Error('ACP 握手所属连接已关闭或被替换');
     this.agentInfo = result && result.agentInfo ? result.agentInfo : null;
     this.capabilities = result && result.agentCapabilities ? result.agentCapabilities : null;
     if (result && result.protocolVersion !== PROTOCOL_VERSION) {
@@ -219,6 +234,7 @@ class DoorClient extends EventEmitter {
     } = {},
   ) {
     const id = this.#nextId++;
+    if (this.#pending.size >= this.maxPending) return Promise.reject(new DoorRequestError(-32000, 'ACP 活动请求超过限制。'));
     if (signal && signal.aborted) {
       return Promise.reject(new DoorRequestError(-32800, `请求已取消：${method}`));
     }
@@ -233,7 +249,7 @@ class DoorClient extends EventEmitter {
         reject(error);
       };
       const onAbort = () => {
-        this.cancel(id);
+        try { this.cancel(id); } catch (error) { failPending(error); return; }
         if (Number.isFinite(abortTimeoutMs) && abortTimeoutMs > 0) {
           clearTimeout(abortTimer);
           abortTimer = setTimeout(() => {
@@ -500,27 +516,29 @@ class DoorClient extends EventEmitter {
   #write(message) {
     const socket = this.#socket;
     if (!socket || socket.destroyed) throw new Error('尚未连接到 DSH。');
-    socket.write(JSON.stringify(message) + '\n');
+    try {
+      const text = JSON.stringify(message) + '\n';
+      if (Buffer.byteLength(text) - 1 > this.maxFrameBytes) throw Object.assign(new Error('ACP 消息帧超过传输预算。'), { code: 'ACP_TRANSPORT_LIMIT' });
+      this.#writer.write(text);
+    } catch (error) { this.#fail(error); socket.destroy(); throw error; }
   }
 
   #onData(chunk) {
-    this.#buffer += this.#decoder.write(chunk);
-    // JSON 中不会出现未转义的换行（stringify 会转义），因此按行切分是安全的。
-    let index;
-    while ((index = this.#buffer.indexOf('\n')) >= 0) {
-      const line = this.#buffer.slice(0, index);
-      this.#buffer = this.#buffer.slice(index + 1);
+    try { this.#reader.push(chunk); }
+    catch (error) { this.#fail(error); this.#socket?.destroy(); }
+  }
+  #onLine(line) {
+      if (this.#closed) return;
       const trimmed = line.trim();
-      if (!trimmed) continue;
+      if (!trimmed) return;
       let message;
       try {
         message = JSON.parse(trimmed);
       } catch {
         this.log('error', `收到无法解析的帧：${trimmed.slice(0, 400)}`);
-        continue;
+        return;
       }
       this.#onMessage(message);
-    }
   }
 
   #onMessage(message) {
@@ -598,6 +616,7 @@ class DoorClient extends EventEmitter {
   #fail(error, { silent = false } = {}) {
     if (this.#closed) return;
     this.#closed = true;
+    this.#reader.clear(); this.#writer?.dispose();
     this.#closeReason = error && error.message ? error.message : String(error);
     for (const entry of this.#pending.values()) {
       entry.cleanup();

@@ -14,12 +14,10 @@
  * 用法：node test/resume.js
  */
 
-const path = require('node:path');
-
 const { DoorClient } = require('../src/door/client');
-const { ensureDoor, isMissingModelCredentials, HOST, PORT } = require('./helpers/door');
+const { ensureDoor, isMissingModelCredentials, createTestWorkspace, HOST, PORT } = require('./helpers/door');
 
-const SCRATCH = path.resolve(__dirname, '..', '..', '..', 'spike', 'scratch');
+const SCRATCH = createTestWorkspace('resume');
 
 let passed = 0;
 let failed = 0;
@@ -64,10 +62,12 @@ const log = () => {};
 (async () => {
   const door = await ensureDoor({ log });
   const secret = String(1000 + Math.floor(Math.random() * 8999));
+  let first, second;
+  try {
 
   // ── 1. 第一个连接：建立会话并令其记住一个数字 ──────────────
   section('1. 建会话，让它记住一个数字');
-  const first = new DoorClient({ host: HOST, port: PORT, log });
+  first = new DoorClient({ host: HOST, port: PORT, log });
   await first.connect();
   const created = await first.newSession(SCRATCH);
   const originalId = created.sessionId;
@@ -81,10 +81,10 @@ const log = () => {};
     });
   } catch (error) {
     first.close();
-    door.stop();
     if (isMissingModelCredentials(error)) {
       console.log('  ⏭  ACP 握手与建会话成功，但本机没有当前模型的凭据；跳过记忆恢复回合。');
-      process.exit(2);
+      process.exitCode = 2;
+      return;
     }
     throw error;
   }
@@ -107,7 +107,7 @@ const log = () => {};
 
   // ── 3. 新连接：resume 是否可以恢复上下文 ────────────────
   section('3. 新连接里 session/resume');
-  const second = new DoorClient({ host: HOST, port: PORT, log });
+  second = new DoorClient({ host: HOST, port: PORT, log });
   await second.connect();
 
   let resumeOk = false;
@@ -152,8 +152,10 @@ const log = () => {};
     console.log('     但必须明确告诉用户「上下文没了」，不能让他以为还记得。');
   }
 
-  second.close();
-  door.stop();
+  } finally {
+    first?.close(); second?.close();
+    await door.stop();
+  }
 
   console.log(`\n${'═'.repeat(56)}`);
   if (failed === 0) console.log(`✅ 全部通过：${passed} 项检查`);

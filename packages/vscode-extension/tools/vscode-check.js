@@ -42,7 +42,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync, spawn } = require('node:child_process');
-const { isolatedEditorOptions, ownsEditorProcess, belongsToEditor } = require('./editor-isolation.cjs');
+const { isolatedEditorOptions, ownsEditorProcess, belongsToEditor, isDshKernelLauncher } = require('./editor-isolation.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 /**
@@ -222,32 +222,12 @@ function belongsToDesktopApp(item, all) {
  *
  * DSH 启动外壳的命令行形状：
  *   cmd.exe /d /s /c "dsh --profile desktop --no-open --host 127.0.0.1 --port 0"
- * 其后才是真正的内核 `DSH Desktop.exe`（其命令行中没有 --profile/--no-open，
- * 因此需识别该 cmd.exe，不能仅按实际内核的进程名判断测试归属）。
- *
- * 排除以下两类，目的均为避免误终止：
- * - 本脚本自身的 powershell/node（其命令行中写有过滤条件，会匹配到自身）；
- * - 祖先是用户自身 DSH Desktop 的进程。
+ * 新 Desktop 入口是 Node 运行 desktop-cli-host.cjs，再以 IPC 启动同一安装的官方 CLI。
+ * 只识别 cmd.exe 的实际执行入口，不将任意参数中的 DSH 路径当作启动证明。
+ * 归属仍由新 PID、隔离编辑器祖先及排除日常 Desktop 后代共同判断。
  */
 function isOurKernel(item, all) {
-  const cmd = item.cmdline;
-  if (!cmd) return false;
-  if (/^(powershell|pwsh|node)\.exe$/i.test(item.name)) return false;
-  if (!/--no-open/.test(cmd)) return false;
-  if (!/--profile\s+\S+/.test(cmd)) return false;
-  /*
-   * 「命令行中运行 dsh」存在两种写法，均需识别：
-   *   ① 直接命令         dsh --profile desktop --no-open …
-   *   ② node 启动该脚本  node C:\…\@deepseek-ai\dsh\lib\bin.js --profile desktop …
-   * `dsh` 不在 PATH 上时，`dshPanel.dshCommand` 可以使用写法 ②；两种写法均需识别。
-   * 匹配的是 cmd.exe 这一层外壳：真正的内核进程名为 node.exe，已被上一条按名称排除，
-   * 而其外壳（cmd /d /s /c "…"）才是稳定信号，说明见下面这一段。
-   */
-  const runsDsh =
-    /(^|[\s"'\\/])dsh(\.cmd)?["'\s]/.test(cmd) || /[\\/]dsh[\\/]lib[\\/]bin\.js/i.test(cmd);
-  if (!runsDsh) return false;
-  if (belongsToDesktopApp(item, all)) return false;
-  return true;
+  return isDshKernelLauncher(item) && !belongsToDesktopApp(item, all);
 }
 
 /** 找出本次新启动的内核。 */
@@ -360,13 +340,16 @@ async function main() {
   console.log(`  启动前：${before.size} 个 VS Code 进程、共 ${beforePids.size} 个进程（这些一个都不会碰）`);
 
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const sandbox = path.join(os.tmpdir(), `dsh-vscode-e2e-${stamp}`);
+  const validationRoot = path.resolve(ROOT, '../../build/editor-checks');
+  fs.mkdirSync(validationRoot, { recursive: true });
+  const sandbox = fs.mkdtempSync(path.join(validationRoot, `dsh-vscode-e2e-${stamp}-`));
   const userData = path.join(sandbox, 'user-data');
   const extensions = path.join(sandbox, 'extensions');
   const sharedData = path.join(sandbox, 'shared-data');
   const ourEditors = () => allProcesses().filter(item => /^Code\.exe$/i.test(item.name) && ownsEditorProcess(item.cmdline, userData)).map(item => item.pid);
   const ownedKernelPids = new Set();
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-e2e-ws-'));
+  const workspace = path.join(sandbox, 'workspace');
+  fs.mkdirSync(workspace);
   fs.mkdirSync(userData, { recursive: true });
   copyDir(EXTENSION_SOURCE, path.join(extensions, EXT_DIR_NAME));
   console.log(`  隔离目录：${sandbox}`);

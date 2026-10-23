@@ -9,6 +9,7 @@
  */
 
 const vscode = require('vscode');
+const { runtimeSupport } = require('./runtime-support');
 const { DshPanelView, VIEW_ID } = require('./panel/view');
 const { DshConnectionService } = require('./connection/service');
 const { BridgeViews } = require('./bridge/views');
@@ -20,9 +21,9 @@ const { ReviewTests } = require('./workflow/review-tests');
 const { randomUUID } = require('node:crypto');
 const { kernelManager } = require('./panel/kernel-manager');
 const {
-  runDshSync,
+  runDshAsync,
   redactSensitiveOutput,
-  runningDesktopExecutables,
+  runningDesktopExecutablesAsync,
 } = require('./door/locate');
 const { preparePanelProfile } = require('./door/setup');
 /**
@@ -44,7 +45,12 @@ function makeLogger(channel) {
 /**
  * @param {vscode.ExtensionContext} context
  */
-function activate(context) {
+async function activate(context) {
+  const support = runtimeSupport({ remoteName: vscode.env?.remoteName, uiKind: vscode.env?.uiKind, workspaceFolders: vscode.workspace.workspaceFolders });
+  if (!support.supported) {
+    void vscode.window.showWarningMessage(support.reason);
+    return Object.freeze({ apiVersion: 1, apiRevision: 2, features: Object.freeze([]), unavailableReason: support.reason });
+  }
   const channel = vscode.window.createOutputChannel('DSH Panel');
   const log = makeLogger(channel);
   log('info', `DSH Panel 启动（VS Code ${vscode.version}）`);
@@ -53,7 +59,7 @@ function activate(context) {
   // globalState 中。之后桌面端关闭，面板仍能找到同一套 0.2 CLI 并自启 web 配置集。
   const DESKTOP_PATH_KEY = 'dshPanel.desktopExecutable';
   const rememberedDesktop = context.globalState.get(DESKTOP_PATH_KEY);
-  const detectedDesktops = runningDesktopExecutables();
+  const detectedDesktops = await runningDesktopExecutablesAsync();
   if (detectedDesktops[0] && detectedDesktops[0] !== rememberedDesktop) {
     context.globalState.update(DESKTOP_PATH_KEY, detectedDesktops[0]);
   }
@@ -120,9 +126,11 @@ function activate(context) {
      * 或者需要确认是否残留由本扩展启动的进程，可使用这条命令。
      * 该命令只回收**本扩展自行启动的内核**，不涉及桌面端启动的内核。
      */
-    vscode.commands.registerCommand('dshPanel.stopKernel', () => {
-      const stopped = kernelManager(log).disposeAll('用户手动停止');
-      const text = stopped > 0 ? `已停止 ${stopped} 个后台 DSH。` : '没有本扩展启动的后台 DSH。';
+    vscode.commands.registerCommand('dshPanel.stopKernel', async () => {
+      const manager = kernelManager(log);
+      const stopped = manager.disposeAll('用户手动停止');
+      await manager.waitForCleanup();
+      const text = stopped > 0 ? `已请求停止 ${stopped} 个后台 DSH。` : '没有本扩展启动的后台 DSH。';
       log('info', text);
       vscode.window.showInformationMessage(text);
     }),
@@ -133,28 +141,31 @@ function activate(context) {
      */
     vscode.commands.registerCommand('dshPanel.setupProfile', async () => {
       const profile = view.config().fallbackProfile;
-      const stopped = kernelManager(log).disposeAll('准备或修复配置集');
-      if (stopped) log('info', `准备配置前停止了 ${stopped} 个由面板启动的后台内核`);
-      const candidates = view.candidatesFor(view.config());
       try {
+        const candidates = await view.candidatesFor(view.config());
         const result = await vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
             title: `正在准备 DSH 配置集 ${profile}`,
-            cancellable: false,
+            cancellable: true,
           },
-          async (progress) => {
+          async (progress, token) => {
+            const controller = new AbortController();
+            const cancellation = token.onCancellationRequested(() => controller.abort());
+            if (token.isCancellationRequested) controller.abort();
+            const onOutput = ({ text }) => log('info', `配置准备：${text}`);
+            try {
             // 先找出真正可执行的一条；默认的裸 `dsh` 不在 PATH 时继续尝试 Desktop 0.2 入口。
             let command;
             const failures = [];
             for (const candidate of candidates) {
               progress.report({ message: `检测 ${redactSensitiveOutput(candidate)}` });
-              await new Promise((resolve) => setImmediate(resolve));
               try {
-                runDshSync({ command: candidate, args: ['--version'], timeoutMs: 15000 });
+                await runDshAsync({ command: candidate, args: ['--version'], timeoutMs: 15000, signal: controller.signal, onOutput });
                 command = candidate;
                 break;
               } catch (error) {
+                if (error.code === 'ECANCELLED') throw error;
                 failures.push(error.message);
               }
             }
@@ -164,8 +175,9 @@ function activate(context) {
               );
             }
             progress.report({ message: '创建配置并同步插件…' });
-            await new Promise((resolve) => setImmediate(resolve));
-            return preparePanelProfile({ command, profile });
+            return await preparePanelProfile({ command, profile, signal: controller.signal, onOutput,
+              onProgress: message => progress.report({ message }) });
+            } finally { cancellation.dispose(); }
           },
         );
         const synced = Array.isArray(result.syncedPlugins) ? result.syncedPlugins.length : 0;
@@ -264,13 +276,15 @@ function activate(context) {
   return api.exports;
 }
 
-function deactivate() {
+async function deactivate() {
   /*
    * 窗口关闭时回收空闲的自启内核；有插件任务的内核继续完成任务，
    * 接入点在无连接且任务结束后的宽限期自行退出。
    */
   try {
-    const count = kernelManager().disposeAll('VS Code 窗口关闭', { preserveBridgeRuns: true });
+    const manager = kernelManager();
+    const count = manager.disposeAll('VS Code 窗口关闭', { preserveBridgeRuns: true });
+    await manager.waitForCleanup();
     if (count > 0) console.log(`[dsh-panel] 窗口关闭，回收 ${count} 个后台 DSH 内核`);
   } catch (error) {
     console.error(`[dsh-panel] 回收后台内核出错：${error && error.message ? error.message : error}`);

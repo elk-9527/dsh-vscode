@@ -22,6 +22,8 @@ function createAsyncHistory({ summarizeSession, sessionTranscript, historyOption
         check(signal);
         await Promise.all(entries.slice(i, i + 16).filter(entry => entry.isDirectory()).map(async entry => {
           const file = path.join(root, group.name, entry.name, SESSION_FILE);
+          const modern = path.join(root, group.name, entry.name, 'session.v4.jsonl.zstd');
+          try { const st = await fs.stat(modern); if (st.isFile()) { found.push({ file: modern, unsupported: true, dirName: entry.name, mtime: st.mtimeMs }); return; } } catch {}
           try { const st = await fs.stat(file); if (st.isFile()) found.push({ file, mtime: st.mtimeMs, size: st.size, dirName: entry.name, key: `${st.dev}:${st.ino}:${st.ctimeMs}:${st.mtimeMs}:${st.size}` }); } catch {}
         }));
       }
@@ -69,20 +71,25 @@ function createAsyncHistory({ summarizeSession, sessionTranscript, historyOption
   }
   async function listSessionsAsync(root, params = {}) {
     const signal = params.signal, options = historyOptions(params);
-    const found = await files(root, signal);
+    const scanned = await files(root, signal), unsupported = scanned.filter(item => item.unsupported).length;
+    const found = scanned.filter(item => !item.unsupported);
     const present = new Set(found.map(item => item.file));
     for (const [file, held] of cache) if (path.relative(root, file).startsWith('..') === false && !present.has(file)) { cacheBytes -= held.bytes; cache.delete(file); }
     const filtering = Boolean(options.query || options.cwd);
     const taken = filtering ? found : found.slice(options.offset, options.offset + options.limit), cards = [];
     for (let i = 0; i < taken.length; i += 4) { check(signal); cards.push(...await Promise.all(taken.slice(i, i + 4).map(item => card(item, signal)))); await yieldTurn(); }
-    return filtering ? historyPage(cards, options) : pageMetadata(cards, found.length, options);
+    const result = filtering ? historyPage(cards, options) : pageMetadata(cards, found.length, options);
+    return unsupported ? { ...result, unsupported, limited: true, limitation: '本地读取仅包含旧格式会话；新版历史需要连接 DSH 内核，筛选范围可能不完整。' } : result;
   }
   async function getSessionAsync(root, id, options = {}) {
     const wanted = String(id || ''); if (!/^[A-Za-z0-9._-]+$/.test(wanted)) throw new Error('会话 id 不合法');
-    const found = await files(root, options.signal);
+    const scanned = await files(root, options.signal), unsupported = scanned.filter(item => item.unsupported);
+    const found = scanned.filter(item => !item.unsupported);
+    const unavailable = () => Object.assign(new Error('该会话可能使用新版格式，需要连接 DSH 内核读取；本地历史读取不代表会话已删除。'), { code: 'HISTORY_FORMAT_UNSUPPORTED' });
+    if (unsupported.some(item => [wanted, `session-${wanted}`].includes(item.dirName) || `session-${item.dirName}` === wanted)) throw unavailable();
     let item = found.find(item => [wanted, `session-${wanted}`].includes(item.dirName) || `session-${item.dirName}` === wanted);
     if (!item) for (const candidate of found) if ((await card(candidate, options.signal)).id === wanted) { item = candidate; break; }
-    if (!item) throw new Error(`找不到会话 ${wanted}`);
+    if (!item) { if (unsupported.length) throw unavailable(); throw new Error(`找不到会话 ${wanted}`); }
     const decoded = await decode(item, options.signal), result = summarizeSession(decoded.events, item); delete result.file;
     if (decoded.error) result.decodeError = decoded.error;
     check(options.signal); return { card: result, ...sessionTranscript(decoded.events, options) };

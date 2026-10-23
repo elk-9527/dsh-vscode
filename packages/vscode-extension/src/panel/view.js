@@ -19,8 +19,12 @@ const os = require('node:os');
 const { historyOptions } = require('../dsh/history-query');
 const { historyMarkdown } = require('../dsh/history-export');
 const { normalizeDraft, draftKey } = require('./drafts');
+const { DraftPersistence } = require('./draft-persistence');
 const { ComposerContext } = require('./completions');
 const { MessageQueue, snapshotMessage } = require('./queue');
+const { QueuePersistence } = require('./queue-persistence');
+const { HistorySummaryCache } = require('./history-cache');
+const { validWebviewMessage } = require('./protocol');
 const { DshConnectionService } = require('../connection/service');
 const { DshSession } = require('../dsh/session');
 const { describeError } = require('../dsh/errors');
@@ -29,7 +33,7 @@ const { decorateOptions, currentLabel, explainPermissionFailure, DISPLAY_ONLY } 
 const {
   probePort,
   dshCommandCandidates,
-  runningDesktopExecutables,
+  runningDesktopExecutablesAsync,
   explainKernelFailure,
   panelProfileCandidates,
   redactSensitiveOutput,
@@ -68,6 +72,8 @@ class DshPanelView {
   constructor({ extensionUri, log, spawnArgs = [], kernels, desktopExecutables = [], connections, workspaceState }) {
     this.workspaceState = workspaceState;
     this.draftWrites = Promise.resolve();
+    this.draftStore = new DraftPersistence({ get: key => this.workspaceState?.get(key), update: (key, value) => this.workspaceState.update(key, value) },
+      { onError: error => this.log('warn', `保存草稿失败：${error.message}`) });
     this.contextTrustEpoch = 0;
     this.contextSessionSerial = 0;
     this.editorContextReads = new Set();
@@ -210,8 +216,18 @@ class DshPanelView {
     /** 当前已经显示在 webview 中的权限请求 id；undefined 表示没有。 */
     this.visiblePermissionRequestId = undefined;
     this.queue = new MessageQueue({ onChange: () => this.post(this.queue.state()) });
+    this.pendingQueueEdits = new Map();
+    this.queuePersistence = new QueuePersistence(workspaceState);
+    try {
+      const restored = this.queuePersistence.load();
+      if (restored) { this.queue.items = restored.items; this.queue.paused = restored.paused; this.queue.reason = restored.reason; }
+    } catch (error) { this.queue.recoveryBlocked = true; this.queue.paused = true; this.queue.reason = error.message; }
     this.queueEpoch = 0;
     this.sendRequests = new Map();
+    for (const entry of this.queue.items) if (entry.requestId !== undefined) this.sendRequests.set(entry.requestId, {
+      digest: entry.requestDigest || require('node:crypto').createHash('sha256').update(JSON.stringify({ text: entry.text, attachments: entry.attachments })).digest('hex'),
+      promise: Promise.resolve(true), completed: false,
+    });
     this.liveTranscript = [];
     this.liveTranscriptBytes = 0;
     this.liveTranscriptTruncated = false;
@@ -247,6 +263,7 @@ class DshPanelView {
     webviewView.onDidDispose(() => {
       if (this.view !== webviewView) return;
       this.view = undefined;
+      this.pendingQueueEdits.clear();
       this.pauseQueue('面板已关闭，请重新打开后显式继续。');
       this.composerQuery?.abort();
       this.composerSelection?.abort();
@@ -338,9 +355,11 @@ class DshPanelView {
   }
 
   postWorkspaceMeta(cwd = this.workdir()) {
+    if (this.lastDraftCwd && this.lastDraftCwd !== cwd) void this.draftStore.flush(this.lastDraftCwd).catch(error => this.log('warn', `保存草稿失败：${error.message}`));
+    this.lastDraftCwd = cwd;
     const trusted = vscode.workspace.isTrusted;
     this.post({ type: 'meta', cwd, trusted, sessionId: this.session?.sessionId });
-    this.post({ type: 'draftRestore', cwd, draft: normalizeDraft(this.workspaceState?.get(draftKey(cwd)), { cwd, trusted }) });
+    this.post({ type: 'draftRestore', cwd, draft: normalizeDraft(this.draftStore.read(cwd), { cwd, trusted }) });
   }
 
   contextRequestScope(message = {}) {
@@ -382,7 +401,7 @@ class DshPanelView {
   // ── 界面发来的消息 ──────────────────────────────────
 
   async onWebviewMessage(message) {
-    if (!message || typeof message.type !== 'string') return;
+    if (!validWebviewMessage(message)) return;
     try {
       switch (message.type) {
         case 'ready': {
@@ -423,7 +442,7 @@ class DshPanelView {
           // its own storage key instead of being rebound to the new directory.
           if (draftKey(cwd) !== draftKey(this.workdir()) && (!vscode.workspace.isTrusted || !vscode.workspace.getWorkspaceFolder?.(vscode.Uri.file(cwd)))) break;
           const draft = normalizeDraft(message.draft, { cwd, trusted: vscode.workspace.isTrusted });
-          if (draft && this.workspaceState) this.draftWrites = this.draftWrites.catch(() => {}).then(() => this.workspaceState.update(draftKey(draft.cwd), draft)).catch(error => this.log('warn', `保存草稿失败：${error.message}`));
+          if (draft && this.workspaceState) this.draftWrites = this.draftStore.set(draft).catch(error => this.log('warn', `保存草稿失败：${error.message}`));
           break;
         }
         case 'composerQuery': {
@@ -622,10 +641,10 @@ class DshPanelView {
    * 后备启动时需要尝试的候选命令（单独成方法：测试中可以隔离自动候选，
    * 仅测试「命令不可用」这一条路径）。
    */
-  candidatesFor(cfg) {
+  async candidatesFor(cfg) {
     const desktops = [
       ...this.desktopExecutables,
-      ...runningDesktopExecutables(),
+      ...await runningDesktopExecutablesAsync(),
     ].filter((value, index, all) => value && all.indexOf(value) === index);
     return dshCommandCandidates({
       dshCommand: cfg.dshCommand,
@@ -692,7 +711,7 @@ class DshPanelView {
     // 启动过程只显示在顶栏状态中；配置集与等待细节写入日志。
     this.log('info', `端口上不存在接入点，按配置自行启动一个 DSH 内核（配置集：${profiles[0]}，接入点固定为 ${cfg.host}:${cfg.selfStartPort}）`);
 
-    const candidates = this.candidatesFor(cfg);
+    const candidates = await this.candidatesFor(cfg);
     if (candidates.length === 0) {
       return {
         ok: false,
@@ -742,7 +761,7 @@ class DshPanelView {
         syncAttempts.add(syncKey);
         this.post({ type: 'status', state: 'connecting', detail: '正在同步插件与配置…' });
         try {
-          const result = syncPanelProfilePlugins({ command, profile });
+          const result = await syncPanelProfilePlugins({ command, profile });
           syncedProfiles.add(profile);
           if (result.synced.length > 0) {
             this.log('info', `已将桌面端的 ${result.synced.length} 个插件同步到 ${profile}：${result.synced.join('、')}`);
@@ -1313,20 +1332,34 @@ class DshPanelView {
 
   pauseQueue(reason) {
     this.queueEpoch++;
+    void this.draftStore.flush().catch(error => this.log('warn', `保存草稿失败：${error.message}`));
+    if (this.queue.recoveryBlocked) { this.queue.onChange(); return; }
     if (this.queue.active || this.queue.items.length) this.queue.pause(reason);
     else this.queue.resume();
   }
 
+  persistQueue() {
+    if (this.queue.recoveryBlocked) return Promise.reject(new Error(this.queue.reason));
+    return this.queuePersistence.save(this.queue);
+  }
+
+  changeQueue(action) {
+    const pending = (this.queueChanges || Promise.resolve()).catch(() => {}).then(action);
+    this.queueChanges = pending; return pending;
+  }
+
   async acceptMessage(message) {
     const requestId = message.requestId ?? require('node:crypto').randomUUID();
-    let input, fingerprint;
+    let input, fingerprint, digest;
     try {
       input = structuredClone({ text: message.text, attachments: message.attachments ?? [] });
       if (typeof input.text !== 'string' || Buffer.byteLength(input.text) > 256 * 1024 || !Array.isArray(input.attachments) || input.attachments.length > 20) throw new Error('消息或附件超过限制，请缩小内容后重试。');
       fingerprint = JSON.stringify(input);
+      digest = require('node:crypto').createHash('sha256').update(fingerprint).digest('hex');
+      if (!(typeof requestId === 'string' && requestId.length <= 512 || typeof requestId === 'number' && Number.isFinite(requestId))) throw new Error('发送标识无效。');
       const previous = this.sendRequests.get(requestId);
       if (previous) {
-        if (previous.fingerprint !== fingerprint) throw new Error('发送标识已使用，请重新发送。');
+        if (previous.digest ? previous.digest !== digest : previous.fingerprint !== fingerprint) throw new Error('发送标识已使用，请重新发送。');
         return previous.promise;
       }
     } catch (error) {
@@ -1335,18 +1368,20 @@ class DshPanelView {
       return false;
     }
     const epoch = this.queueEpoch;
-    const record = { fingerprint };
+    const record = { fingerprint, digest };
     // The active queue item also owns its baseline preparation and final change
     // capture. Follow-up messages may queue during those phases; an independent
     // capture still blocks new messages.
     const recordingBlocksSend = () => this.workflow?.recording && (!this.queue.active || !this.queueBindingMatches(this.queue.active));
     record.promise = (async () => {
       try {
+        if (this.queue.recoveryBlocked) throw new Error(this.queue.reason);
         if (this.historyReadonly) throw new Error('当前是只读历史，请先返回当前对话或接回该会话。');
         if (!this.view) throw new Error('请先打开面板再发送。');
         if (this.newSessionPending || this.configPending || this.reconnectPending) throw new Error('会话、设置或连接正在调整，请稍后发送。');
         if (this.workflow?.activeTest || this.workflow?.undoing || recordingBlocksSend()) throw new Error('请等测试、撤销或改动整理完成后再发送消息。');
         const cwd = this.workdir();
+        await this.draftStore.flush(cwd);
         const session = await this.ensureConnection();
         if (!session?.sessionId) throw new Error('对话未连接，请检查连接后重试。');
         if (session.cwd && session.cwd !== cwd) throw new Error('当前工作目录与对话目录不同，请新建对话后发送。');
@@ -1358,7 +1393,15 @@ class DshPanelView {
         if (this.workflow?.activeTest || this.workflow?.undoing || recordingBlocksSend()) throw new Error('请等测试、撤销或改动整理完成后再发送消息。');
         if (this.queue.paused && !this.queue.items.length && !this.queue.active) this.queue.resume();
         const queued = Boolean(this.queue.active || this.queue.items.length || this.queue.paused || session.busy || this.workflow?.recording || this.workflow?.activeTest || this.workflow?.undoing);
-        const entry = this.queue.add(draft, { cwd, sessionId: session.sessionId, instanceId: this.connections.snapshot?.().instanceId }, requestId);
+        const sessionId = session.sessionId, instanceId = this.connections.snapshot?.().instanceId;
+        const entry = await this.changeQueue(async () => {
+          if (epoch !== this.queueEpoch || this.historyReadonly || !this.view || cwd !== this.workdir() || session !== this.session || session.sessionId !== sessionId || instanceId !== this.connections.snapshot?.().instanceId ||
+            this.newSessionPending || this.configPending || this.reconnectPending || draft.attachments.length && vscode.workspace.isTrusted === false) throw new Error('对话或工作区已变化，请重新发送。');
+          if (this.workflow?.activeTest || this.workflow?.undoing || recordingBlocksSend()) throw new Error('请等测试、撤销或改动整理完成后再发送消息。');
+          const accepted = this.queue.add(draft, { cwd, sessionId, instanceId, requestDigest: digest }, requestId);
+          try { await this.persistQueue(); return accepted; }
+          catch (error) { this.queue.remove(accepted.id); throw error; }
+        });
         this.post({ type: 'sendResult', requestId, success: true, phase: 'accepted', queued, id: entry.id });
         void this.drainQueue();
         return true;
@@ -1375,31 +1418,78 @@ class DshPanelView {
     return record.promise;
   }
 
-  async queueAction({ action, id }) {
-    if (action === 'remove' || action === 'edit') {
+  async queueAction({ action, id, token, draft: editedDraft }) {
+    if (action === 'discardRecovery') {
+      if (!this.queue.recoveryBlocked) return;
+      await this.queuePersistence.discard(); this.queue.recoveryBlocked = false; this.queue.resume(); return;
+    }
+    if (action === 'remove' || action === 'edit' || action === 'confirmEdit') {
       try {
         if (action === 'edit' && !this.view) throw new Error('请先打开面板再取回消息。');
-        const entry = this.queue.items.find(item => item.id === id);
-        if (!entry) throw new Error('此消息已不在队列中');
-        // Prepare the complete reply before changing the queue. No asynchronous
-        // operation can switch the session or close the view during retrieval.
-        const reply = { type: 'queueEdit', id, cwd: entry.cwd, text: entry.text, attachments: entry.attachments };
-        this.queue.remove(id);
+        const entry = await this.changeQueue(async () => {
+          // Resolve inside the serialized change: an earlier removal may have
+          // completed while this request waited for durable storage.
+          const index = this.queue.items.findIndex(item => item.id === id);
+          if (index < 0) throw new Error('此消息已不在队列中');
+          const entry = this.queue.items[index];
+          if (action === 'edit') {
+            if (!this.view) throw new Error('请先打开面板再取回消息。');
+            const existing = this.pendingQueueEdits.get(id);
+            if (existing?.entry === entry && existing.view === this.view) {
+              this.post({ type: 'queueEdit', phase: 'prepared', id, token: existing.token, cwd: entry.cwd, text: entry.text, attachments: entry.attachments });
+              return;
+            }
+            this.queue.pause('正在取回消息，队列已暂停。');
+            const pending = { entry, view: this.view, token: require('node:crypto').randomUUID() };
+            this.pendingQueueEdits.set(id, pending);
+            this.post({ type: 'queueEdit', phase: 'prepared', id, token: pending.token, cwd: entry.cwd, text: entry.text, attachments: entry.attachments });
+            return;
+          }
+          if (action === 'confirmEdit') {
+            const pending = this.pendingQueueEdits.get(id);
+            const current = () => pending && pending.token === token && pending.entry === entry && this.pendingQueueEdits.get(id) === pending && this.view && this.view === pending.view;
+            if (!current()) throw new Error('取回请求已变化，原消息仍保留在队列中。');
+            if (draftKey(entry.cwd) !== draftKey(this.workdir()) && (!vscode.workspace.isTrusted || !vscode.workspace.getWorkspaceFolder?.(vscode.Uri.file(entry.cwd)))) throw new Error('原消息目录已不在受信任工作区。');
+            const draft = normalizeDraft(editedDraft, { cwd: entry.cwd, trusted: vscode.workspace.isTrusted });
+            const contains = value => value && [value, ...(value.recoveries || []), ...(value.recovery ? [value.recovery] : [])].some(item => {
+              try { return JSON.stringify(snapshotMessage(item.text, item.attachments)) === JSON.stringify({ text: entry.text, attachments: entry.attachments }); }
+              catch { return false; }
+            });
+            if (!contains(draft)) throw new Error('取回内容未能完整保存为草稿，原消息仍保留在队列中。');
+            await Promise.all([this.draftStore.set(draft), this.draftStore.flush(entry.cwd)]);
+            if (!current()) throw new Error('面板已变化，原消息仍保留在队列中。');
+            if (!contains(normalizeDraft(this.workspaceState?.get(draftKey(entry.cwd)), { cwd: entry.cwd, trusted: vscode.workspace.isTrusted }))) throw new Error('取回内容尚未保存，原消息仍保留在队列中。');
+          }
+          this.queue.remove(id);
+          try { await this.persistQueue(); }
+          catch (error) { this.queue.items.splice(index, 0, entry); this.queue.onChange(); throw error; }
+          this.pendingQueueEdits.delete(id);
+          return entry;
+        });
+        if (!entry) return;
         const record = this.sendRequests.get(entry.requestId); if (record) record.completed = true;
-        if (action === 'edit') this.post(reply);
+        if (action === 'confirmEdit') this.post({ type: 'queueEdit', phase: 'completed', id, token });
         if (!this.queue.active && !this.queue.items.length) this.queue.resume();
       } catch (error) {
-        if (action === 'edit') this.post({ type: 'queueEdit', id, error: this.errText(error) });
+        if (action === 'edit' || action === 'confirmEdit') {
+          if (!token || this.pendingQueueEdits.get(id)?.token === token) this.pendingQueueEdits.delete(id);
+          this.post({ type: 'queueEdit', ...(action === 'confirmEdit' ? { phase: 'completed', token } : {}), id, error: this.errText(error) });
+        }
         else throw error;
       }
       return;
     }
     if (action !== 'continue') return;
+    if (this.pendingQueueEdits.size) throw new Error('请等取回消息完成后再继续队列。');
     if (this.configPending || this.reconnectPending) throw new Error('请等设置或连接恢复完成后再继续队列。');
     if (this.historyReadonly || !this.view) throw new Error('请先返回当前对话再继续排队消息。');
     const first = this.queue.items[0];
+    if (this.queue.recoveryBlocked) throw new Error(this.queue.reason);
+    if (first?.uncertain) throw new Error('执行结果待确认，请核对历史后取回编辑；不能直接重发。');
+    if (first?.restored && (!vscode.workspace.isTrusted || !vscode.workspace.getWorkspaceFolder?.(vscode.Uri.file(first.cwd)) || !require('node:fs').existsSync(first.cwd))) throw new Error('恢复消息的目录不可用或工作区尚未受信任，请取回编辑。');
     if (first && !this.queueBindingMatches(first)) throw new Error('排队消息属于原会话或目录，请取回编辑后重新发送。');
     this.queue.resume();
+    await this.persistQueue();
     await this.drainQueue();
   }
 
@@ -1413,17 +1503,44 @@ class DshPanelView {
     if (!this.view || this.historyReadonly) { this.pauseQueue('请返回当前对话后显式继续。'); return; }
     if (this.session?.busy || this.newSessionPending || this.configPending || this.reconnectPending || this.workflow?.recording || this.workflow?.activeTest || this.workflow?.undoing || this.connections.turns?.has(this.session?.sessionId)) return;
     const first = this.queue.items[0];
+    if (first.restored && (!vscode.workspace.isTrusted || !vscode.workspace.getWorkspaceFolder?.(vscode.Uri.file(first.cwd)) || !require('node:fs').existsSync(first.cwd))) { this.pauseQueue('恢复消息的目录不可用或工作区尚未受信任，请取回编辑。'); return; }
+    if (first.uncertain || this.queue.recoveryBlocked) { this.pauseQueue('执行结果待确认，请先核对历史后取回编辑。'); return; }
     if (!this.queueBindingMatches(first) || !this.client?.isConnected) { this.pauseQueue('会话或连接已变化，请确认后显式继续。'); return; }
-    const entry = this.queue.take();
     const epoch = this.queueEpoch;
+    let entry;
+    try {
+      entry = await this.changeQueue(async () => {
+        const taken = this.queue.take(); if (!taken) return;
+        try { await this.persistQueue(); return taken; }
+        catch (error) { this.queue.finish('启动前保存失败，未执行'); this.queue.pause('队列保存失败，消息尚未执行，请修复存储后重试。'); throw error; }
+      });
+    } catch (error) { this.postError(this.errText(error)); return; }
+    if (!entry) return;
+    if (epoch !== this.queueEpoch || this.queue.paused || !this.queueBindingMatches(entry) || !this.view || this.historyReadonly) {
+      await this.changeQueue(async () => {
+        this.queue.active = undefined; this.queue.items.unshift(entry);
+        this.queue.pause(this.queue.reason || '发送前会话或目录已变化，请确认后显式继续。');
+        try { await this.persistQueue(); }
+        catch (error) { this.postError(this.errText(error)); }
+      });
+      return;
+    }
     let result, error;
-    try { result = await this.send(entry.text, entry.attachments, { entry, epoch }); }
+    try {
+      if (entry.restored && !vscode.workspace.isTrusted) throw new Error('恢复消息需要受信任工作区。');
+      result = await this.send(entry.text, entry.attachments, { entry, epoch });
+    }
     catch (failure) { error = failure; this.postError(this.errText(failure)); }
     const success = !error && result !== false && (!result?.stopReason || result.stopReason === 'end_turn');
-    if (!success) this.pauseQueue(result?.stopReason === 'cancelled' ? '当前回合已取消，请确认后显式继续。' : '当前回合未完成，请处理后显式继续。');
-    this.post({ type: 'sendCompleted', requestId: entry.requestId, id: entry.id, cwd: entry.cwd, success, retained: !success, stopReason: result?.stopReason || (error ? 'error' : 'end_turn'), text: entry.text, attachments: entry.attachments });
+    const uncertain = Boolean(error && (!this.client?.isConnected || error.code === 'ACP_REQUEST_TIMEOUT' || /ECONNRESET|EPIPE|ETIMEDOUT|connection.*closed|连接已断开|连接已关闭/i.test(`${error.code || ''} ${error.message || ''}`)));
+    if (uncertain && this.queue.active) this.queue.active = Object.freeze({ ...this.queue.active, uncertain: true, phase: 'uncertain' });
+    if (!success) this.pauseQueue(uncertain ? '执行结果待确认；请核对历史后取回编辑。' : result?.stopReason === 'cancelled' ? '当前回合已取消，请确认后显式继续。' : '当前回合未完成，请处理后显式继续。');
     const record = this.sendRequests.get(entry.requestId); if (record) record.completed = success;
-    this.queue.finish(success ? undefined : error ? this.errText(error) : '回合未完成');
+    await this.changeQueue(async () => {
+      this.queue.finish(success ? undefined : uncertain ? '执行结果待确认，请先核对历史记录。' : error ? this.errText(error) : '回合未完成');
+      try { await this.persistQueue(); } catch (failure) { this.queue.pause('回合结果的保存失败，重新加载后请核对历史记录。'); this.postError(this.errText(failure)); }
+    });
+    this.post({ type: 'sendCompleted', requestId: entry.requestId, id: entry.id, cwd: entry.cwd, success, retained: !success, stopReason: result?.stopReason || (error ? 'error' : 'end_turn'), text: entry.text, attachments: entry.attachments });
     if (success && epoch === this.queueEpoch) await this.drainQueue();
   }
 
@@ -1556,6 +1673,9 @@ class DshPanelView {
   async readHistory(kind, id, options = {}) {
     const localRoot = localSessions.resolveSessionsRoot();
     const client = this.client;
+    this.historyCache ||= new HistorySummaryCache(this.workspaceState);
+    const config = this.config(), source = JSON.stringify([localRoot, config.host, config.port]);
+    let remoteError;
 
     // 能够向该插件查询时即通过该插件查询：这是本机 DSH 返回的正式数据来源。
     // `historyVia === 'local'` 表示本轮连接中已确认该插件没有此方法，
@@ -1565,22 +1685,40 @@ class DshPanelView {
         const result = kind === 'list'
           ? await client.listHistory(options)
           : await client.getHistory(String(id || ''));
+        options.signal?.throwIfAborted();
         this.historyVia = 'door';
+        if (kind === 'list') {
+          try { await this.historyCache.put(source, options, result); }
+          catch (error) { this.log('warn', `缓存历史摘要失败：${error.message}`); }
+        }
         return { result, via: 'door' };
       } catch (error) {
+        options.signal?.throwIfAborted();
         const text = this.errText(error);
-        if (!isMissingMethod(error, text)) throw error;
-        this.historyVia = 'local';
-        this.log('info', '该插件未提供历史会话的旁路方法（需要 0.0.8+），改为面板自行读取 $DSH_HOME/sessions');
+        if (!isMissingMethod(error, text) && client.isConnected && !/ECONNREFUSED|ECONNRESET|ETIMEDOUT|EPIPE|connection.*closed|连接已关闭|连接已断开/i.test(`${error.code || ''} ${text}`)) throw error;
+        remoteError = error;
+        if (isMissingMethod(error, text)) {
+          this.historyVia = 'local';
+          this.log('info', '历史会话旁路方法不可用，改为只读本地旧格式历史');
+        }
       }
     }
-
+    if (kind === 'list') {
+      const cached = this.historyCache.get(source, options);
+      if (cached) return { result: cached, via: 'cache' };
+    }
     if (!localSessions.hasZstdSupport()) {
       throw new Error('本机 Node 不支持 zstd 压缩格式，无法解析会话文件');
     }
     const result = kind === 'list'
       ? await localSessions.listSessionsAsync(localRoot, options)
       : await localSessions.getSessionAsync(localRoot, String(id || ''), options);
+    if (kind === 'list') {
+      result.offline = !client?.isConnected || Boolean(remoteError);
+      if (!result.limitation) result.limitation = '当前只显示可本地读取的旧格式会话；新版完整历史需要连接 DSH 内核。';
+      if (result.unsupported && !result.sessions.length) result.emptyReason = 'unsupported-format';
+      else if (!result.sessions.length) result.emptyReason = 'local-empty';
+    }
     return { result, via: 'local' };
   }
 
@@ -1601,6 +1739,7 @@ class DshPanelView {
       // 本地读取失败时（目录不可读等）原因会写入 error 字段，不应将其视为「没有历史会话」。
       if (sessions.length === 0 && result && result.error) throw new Error(result.error);
       this.post({ type: 'history', via, sessions, requestId, skipped: result?.skipped || 0, total: result?.total, offset: result?.offset || 0, nextOffset: result?.nextOffset,
+        cachedAt: result?.cachedAt, cacheScope: result?.cacheScope, limited: result?.limited, limitation: result?.limitation, offline: result?.offline, unsupported: result?.unsupported, emptyReason: result?.emptyReason,
         queryUnsupported: (options.query || options.cwd || options.offset) && result?.offset === undefined });
     } catch (error) {
       if (controller.signal.aborted) return;
@@ -2330,6 +2469,8 @@ class DshPanelView {
   }
 
   dispose() {
+    this.pendingQueueEdits.clear();
+    void this.draftStore.flush().catch(error => this.log('warn', `保存草稿失败：${error.message}`));
     this.composerQuery?.abort();
     this.composerSelection?.abort();
     for (const controller of this.editorContextReads) controller.abort();

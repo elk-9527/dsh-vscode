@@ -2,7 +2,7 @@
   "name": "dsh-vscode-workspace",
   "private": true,
   "version": "0.0.0",
-  "packageManager": "pnpm@11.19.0",
+  "packageManager": "pnpm@11.28.6",
   "type": "module",
   "description": "将 DeepSeek Harness 接入 VS Code 的两个组成部分：VS Code 扩展 dsh-panel 与 DSH 插件 dsh-acp-door",
   "license": "MIT",
@@ -27,12 +27,15 @@
     "bridge:test": "node tools/bridge/test-live.cjs --editor",
     "bridge:real": "node tools/bridge/test-real.cjs",
     "bridge:scenarios": "node tools/bridge/test-scenarios.cjs",
-    "bridge:install": "node tools/bridge/install-local.cjs"
+    "bridge:install": "node tools/bridge/install-local.cjs",
+    "check:types": "tsc -p tsconfig.product.json"
   },
   "devDependencies": {
-    "@agentclientprotocol/sdk": "^1.4.0",
-    "semver": "7.7.3",
+    "@agentclientprotocol/sdk": "^1.9.0",
+    "@types/node": "24.19.2",
+    "semver": "7.8.5",
+    "tar": "7.5.22",
     "typescript": "^7.0.2",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   }
 }

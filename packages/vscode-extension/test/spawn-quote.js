@@ -21,15 +21,19 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const Module = require('node:module');
 
 const {
   commandLine,
   resolveCommand,
   runDshSync,
+  runDshAsync,
   spawnBackgroundDsh,
   splitCommand,
   stripOuterQuotes,
   redactSensitiveOutput,
+  desktopDshCommand,
+  dshCommandCandidates,
 } = require('../src/door/locate');
 
 let passed = 0;
@@ -65,10 +69,30 @@ async function waitForOutput(file) {
   while ((!fs.existsSync(file) || fs.statSync(file).size === 0) && Date.now() < deadline) await wait(50);
 }
 
+function loadWithDependencies(file, dependencies) {
+  const previous = require.cache[file], load = Module._load;
+  try {
+    delete require.cache[file];
+    Module._load = function (request, parent, ...rest) {
+      if (parent?.filename === file && Object.hasOwn(dependencies, request)) return dependencies[request];
+      return load.call(this, request, parent, ...rest);
+    };
+    return require(file);
+  } finally {
+    Module._load = load;
+    if (previous) require.cache[file] = previous; else delete require.cache[file];
+  }
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+
 async function main() {
-  // 使用系统临时目录，不使用仓库中的 build/ —— 该目录会被打包脚本清空，
-  // 且不纳入版本控制。测试的现场文件应放在临时目录中，运行结束后自行删除。
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-quote-'));
+  const fixtures = path.resolve(__dirname, '../../../build/test-spawn'); fs.mkdirSync(fixtures, { recursive: true });
+  const root = fs.mkdtempSync(path.join(fixtures, 'dsh-quote-'));
   const spacedDir = path.join(root, 'probe space');   // 路径含空格 —— 主要测试对象
   const plainDir = path.join(root, 'probe-plain');    // 路径不含空格 —— 对照组
   fs.mkdirSync(spacedDir, { recursive: true });
@@ -125,7 +149,7 @@ async function main() {
       const bg = spawnBackgroundDsh({ command, profile: 'desktop', log });
       await waitForOutput(spacedOut);
       const text = outText(spacedOut);
-      bg.dispose();
+      await bg.dispose();
       await wait(200);
       check(label, text.length > 0, text ? `垫片收到：${text}` : '垫片根本没跑（out.txt 没生成）');
     }
@@ -135,7 +159,7 @@ async function main() {
     const bgPlain = spawnBackgroundDsh({ command: plainCmd, profile: 'desktop', log });
     await waitForOutput(plainOut);
     const plainText = outText(plainOut);
-    bgPlain.dispose();
+    await bgPlain.dispose();
     await wait(200);
     check('D. 不带空格的路径', plainText.length > 0, plainText || '垫片没跑');
 
@@ -148,6 +172,11 @@ async function main() {
     } catch (error) {
       check('E. 带空格的路径 + 参数', false, String(error.message).split('\n')[0]);
     }
+    for (const command of [spacedCmd, `"${spacedCmd}"`, `${spacedCmd} 自带参数`]) {
+      resetOut(spacedOut);
+      await runDshAsync({ command, args: ['async-arg'], timeoutMs: 15000 });
+      check('异步命令支持带空格的路径及自带参数', outText(spacedOut).includes('async-arg'));
+    }
 
     section('5. 参数真的原样到达（没有被多转义/少转义）');
     resetOut(spacedOut);
@@ -159,7 +188,7 @@ async function main() {
     });
     await wait(1000);
     const argText = outText(spacedOut);
-    bgArgs.dispose();
+    await bgArgs.dispose();
     await wait(200);
     check('带空格的参数原样到达', argText.includes('--patch') && argText.includes('a b.yml'), argText);
     check('profile 名也在（顺带证明参数是按顺序传的）', argText.includes('--profile desktop'), argText);
@@ -174,13 +203,88 @@ async function main() {
     await wait(1000);
     const logged = secretLogs.join('\n');
     const tail = secretBg.stderrTail();
-    secretBg.dispose();
+    await secretBg.dispose();
     check('网页地址中的访问凭据已隐藏',
       !logged.includes(fakeWebToken) && logged.includes('token=[已隐藏]') && logged.includes('keep=1'), logged);
     check('认证头中的访问凭据已隐藏',
       !logged.includes(fakeBearer) && !tail.includes(fakeBearer) && tail.includes('Bearer [已隐藏]'), tail);
     check('独立脱敏函数保留无关诊断信息',
       redactSensitiveOutput('error: port=47831').includes('port=47831'));
+
+    section('7. Desktop 官方 CLI 保留随附包管理器及 IPC 生命周期');
+    const desktopRoot = path.join(root, 'Desktop install');
+    const desktopExe = path.join(desktopRoot, 'DeepSeek Harness.exe');
+    const bundledNode = path.join(desktopRoot, 'resources/runtime/primary-runtime/dependencies/node/bin/node.exe');
+    const bundledCli = path.join(desktopRoot, 'resources/runtime/cli/bin/dsh.cmd');
+    const extensionDir = path.join(root, 'test extension');
+    const proxy = path.join(extensionDir, 'src/door/desktop-cli-host.cjs');
+    for (const file of [desktopExe, bundledNode, bundledCli, proxy]) fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(desktopExe, 'fixture executable identity');
+    fs.copyFileSync(process.execPath, bundledNode);
+    fs.writeFileSync(path.join(desktopRoot, 'resources/app.asar'), 'fixture archive identity');
+    fs.writeFileSync(bundledCli, '@echo off\r\n"%~dp0..\\..\\..\\..\\DeepSeek Harness.exe" --expose-internals "%~dp0..\\..\\..\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\cli.js" %*\r\n');
+    fs.writeFileSync(proxy, [
+      'const path = require("node:path");',
+      'const selected = process.argv[3].replace(/\\\\/g, "/");',
+      'if (!selected.endsWith("/@deepseek-ai/dsh-desktop-host/lib/cli.js")) { console.error("legacy entry uses external package manager"); process.exit(23); }',
+      'console.log("BUNDLED_PACKAGE_MANAGER " + process.argv.slice(4).join(" "));',
+    ].join('\n'));
+    const desktopCommand = desktopDshCommand(desktopExe, { extensionDir });
+    try {
+      const output = runDshSync({ command: desktopCommand, args: ['--version'], timeoutMs: 15000 });
+      check('官方入口通过随附 Node 与 IPC 代理执行，参数原样传入', output.includes('BUNDLED_PACKAGE_MANAGER --version'), output);
+    } catch (error) {
+      check('官方入口通过随附 Node 与 IPC 代理执行，参数原样传入', false, error.message);
+    }
+    equal('优先使用可维持生命周期的 IPC 命令，官方 cmd 为后备',
+      dshCommandCandidates({ desktopExecutables: [desktopExe], extensionDir })[0], desktopCommand);
+    fs.unlinkSync(bundledCli);
+    check('旧发行没有官方 CLI 时保留普通 bin.js 兼容入口',
+      /[\\/]dsh[\\/]lib[\\/]bin\.js/.test(desktopDshCommand(desktopExe, { extensionDir })));
+
+    section('8. 清理完成是可等待的共享边界，测试不得先行退出');
+    const { EventEmitter } = require('node:events'), { PassThrough } = require('node:stream');
+    const cleanup = deferred(), child = new EventEmitter();
+    Object.assign(child, { pid: 123456, exitCode: null, signalCode: null, stdout: new PassThrough(), stderr: new PassThrough() });
+    let stops = 0;
+    const isolatedLocate = loadWithDependencies(require.resolve('../src/door/locate'), {
+      'node:child_process': { ...require('node:child_process'), spawn: () => child },
+      './process': { ...require('../src/door/process'), stopOwnedProcess: () => { stops++; return cleanup.promise; } },
+    });
+    const background = isolatedLocate.spawnBackgroundDsh({ command: process.execPath, profile: 'fixture', log() {} });
+    const stopping = background.dispose(), repeated = background.dispose();
+    let stopped = false; void Promise.resolve(stopping).then(() => { stopped = true; });
+    await wait(10);
+    check('dispose 返回同一个清理 Promise，重复调用只启动一次终止', stopping instanceof Promise && repeated === stopping && stops === 1);
+    check('清理尚未完成时，等待 dispose 的调用方不能继续', stopped === false);
+    cleanup.resolve(); await stopping;
+    check('实际清理结束后再调用 dispose 仍取得同一完成结果', background.dispose() === stopping && stopped === true);
+
+    const helperPath = require.resolve('./helpers/door');
+    function helperFor({ startupFails = false, existing = false } = {}) {
+      const gate = deferred(); let probes = 0, spawned = 0;
+      const kernel = { child: { exitCode: startupFails ? 1 : null, signalCode: null }, dispose: () => gate.promise, stderrTail: () => 'fixture startup failure' };
+      const helper = loadWithDependencies(helperPath, { '../../src/door/locate': {
+        probePort: async () => existing || ++probes > 1 && !startupFails,
+        spawnBackgroundDsh: () => { spawned++; return kernel; }, runDshSync: () => 'fixture',
+        dshCommandCandidates: () => ['fixture'], runningDesktopExecutables: () => [],
+      } });
+      return { helper, gate, spawned: () => spawned };
+    }
+    const owned = helperFor(), door = await owned.helper.ensureDoor();
+    let stopFinished = false; const completion = door.stop();
+    void Promise.resolve(completion).then(() => { stopFinished = true; }); await wait(10);
+    check('真实测试 helper.stop 原样保留待完成的清理 Promise', completion === owned.gate.promise && !stopFinished);
+    owned.gate.resolve(); await completion;
+    const failedStartup = helperFor({ startupFails: true }); let startupError;
+    const starting = failedStartup.helper.ensureDoor().catch(error => { startupError = error; }); await wait(10);
+    check('启动失败也必须先等待已创建内核的清理', startupError === undefined);
+    failedStartup.gate.resolve(); await starting;
+    check('清理完成后仍保留原始启动失败诊断', /fixture startup failure/.test(startupError?.message));
+    const shared = helperFor({ existing: true }), attached = await shared.helper.ensureDoor();
+    const sharedStop = attached.stop();
+    check('接入已有内核返回可等待的空清理且不启动或停止它', sharedStop instanceof Promise && attached.stop() === sharedStop && shared.spawned() === 0);
+    await sharedStop;
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

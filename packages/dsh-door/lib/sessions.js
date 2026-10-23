@@ -213,7 +213,7 @@ export function summarizeSession(events, meta = {}) {
 export function listSessions(root, params = {}) {
   const options = historyOptions(params);
   const found = [];
-  let groups = 0;
+  let groups = 0, unsupported = 0;
   let dirs;
   try {
     dirs = fs.readdirSync(root, { withFileTypes: true });
@@ -234,6 +234,7 @@ export function listSessions(root, params = {}) {
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const file = path.join(groupDir, entry.name, SESSION_FILE);
+      if (fs.existsSync(path.join(groupDir, entry.name, 'session.v4.jsonl.zstd'))) { unsupported++; continue; }
       let st;
       try {
         st = fs.statSync(file);
@@ -258,7 +259,8 @@ export function listSessions(root, params = {}) {
     sessions.push(card);
   }
   void groups;
-  return filtering ? historyPage(sessions, options) : pageMetadata(sessions, found.length, options);
+  const result = filtering ? historyPage(sessions, options) : pageMetadata(sessions, found.length, options);
+  return unsupported ? { ...result, unsupported, limited: true, limitation: '本地读取仅包含旧格式会话；新版历史需要连接 DSH 内核，筛选范围可能不完整。' } : result;
 }
 
 /**
@@ -286,6 +288,8 @@ export function getSession(root, id, options = {}) {
     throw new Error(`读不了会话目录：${error && error.message ? error.message : error}`);
   }
   const candidates = [];
+  let unsupported = false;
+  const unavailable = () => Object.assign(new Error('该会话可能使用新版格式，需要连接 DSH 内核读取；本地历史读取不代表会话已删除。'), { code: 'HISTORY_FORMAT_UNSUPPORTED' });
   for (const group of groups) {
     if (!group.isDirectory()) continue;
     let entries;
@@ -296,6 +300,10 @@ export function getSession(root, id, options = {}) {
     }
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
+      if (fs.existsSync(path.join(root, group.name, entry.name, 'session.v4.jsonl.zstd'))) {
+        if ([wanted, `session-${wanted}`].includes(entry.name) || `session-${entry.name}` === wanted) throw unavailable();
+        unsupported = true; continue;
+      }
       candidates.push(path.join(root, group.name, entry.name, SESSION_FILE));
     }
   }
@@ -317,6 +325,7 @@ export function getSession(root, id, options = {}) {
     const head = events.find((event) => event.type === 'session');
     if (head && head.id === wanted) return pick(file);
   }
+  if (unsupported) throw unavailable();
   throw new Error(`找不到会话 ${wanted}`);
 }
 

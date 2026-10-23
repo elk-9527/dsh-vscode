@@ -1,130 +1,42 @@
 #!/usr/bin/env node
-/*
- * 将 ACP 接入点插件（`dsh-acp-door`）发布到 npm（DSH 的插件市场从 npm / GitHub Release 安装）。
- *
- * 背景（2026-09-20 查证）：DSH 的"插件市场"不是一个上传后台，
- * 而是 —— ① 官方客户端中的市场（dsh-market / dsh-community-market）与
- * ② 目录站，两者都读取同一份**精选列表** `awesome-dsh-plugin/awesome-dsh-plugin`。
- * 上架的完整步骤是：
- *
- *   1. 将包发布到 npm（可选，但建议执行：市场安装插件优先采用"经仓库验证的 npm 包"）；
- *   2. 向该精选列表提交一个 PR，新增 **一个文件**
- *      `data/plugins/<owner>__<repo>.yml`（内容由本脚本打印，可直接复制）。
- *
- * 凭据：脚本不读取、不打印 token。`npm publish` 自行识别 `npm login` 或
- * 环境变量 `NODE_AUTH_TOKEN`（配置在 .npmrc 中）。
- *
- * 用法：
- *   node tools/publish.cjs          # 试运行：自检 + npm pack --dry-run + 打印拟提交的 PR 内容
- *   node tools/publish.cjs --yes    # 实际发布到 npm
- */
+'use strict';
+/** Upload only the tarball accepted by the current release approval. */
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-
-const ROOT = path.join(__dirname, '..');
+const { argsOf } = require('../../../tools/compat/lib.cjs');
+const { quoteArg } = require('../../vscode-extension/src/door/locate');
+const ROOT = path.resolve(__dirname, '..');
 const NPM_REGISTRY = 'https://registry.npmjs.org';
-const go = process.argv.slice(2).includes('--yes');
-const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-const publicCheck = spawnSync(process.execPath, [path.resolve(ROOT, '../../tools/check-public-paths.cjs')], { cwd: ROOT, stdio: 'inherit', windowsHide: true });
-if (publicCheck.status !== 0) process.exit(1);
-
-const repoUrl = (pkg.repository && pkg.repository.url) || '';
-const dir = (pkg.repository && pkg.repository.directory) || '';
-const m = repoUrl.match(/github\.com[/:]([^/]+)\/([^/.]+)/);
-const owner = m ? m[1] : 'TODO-owner';
-const repo = m ? m[2] : 'TODO-repo';
-const problems = [];
-
-function check(ok, label, detail) {
-  if (!ok) problems.push(label);
-  console.log(`  ${ok ? '✅' : '❌'} ${label}${detail ? `  （${detail}）` : ''}`);
-}
-
-console.log(`  发布自检：${pkg.name}@${pkg.version}`);
-check(pkg.private !== true, 'private 已经去掉', String(pkg.private));
-check(Boolean(pkg.license) && pkg.license !== 'UNLICENSED', 'license 已填', pkg.license);
-check(Boolean(m) && !/TODO/.test(repoUrl), 'repository 是真实 GitHub 地址', repoUrl || '（空）');
-check(
-  Boolean(pkg.dsh && pkg.dsh.bundle && pkg.dsh.bundle.patch),
-  '声明了 dsh.bundle（市场收录的硬要求）',
-  JSON.stringify(pkg.dsh || {}),
-);
-check(fs.existsSync(path.join(ROOT, 'cordis.patch.yml')), 'cordis.patch.yml 在包根', 'cordis.patch.yml');
-check(fs.existsSync(path.join(ROOT, 'README.md')), '有 README.md（市场卡片就靠它）', 'README.md');
-check(fs.existsSync(path.join(ROOT, 'CHANGELOG.md')), '有 CHANGELOG.md', 'CHANGELOG.md');
-
-const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
-const urls = [...readme.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)].map((x) => x[1]);
-console.log(`  README 截图：${urls.length} 张（可选）`);
-const brokenImages = urls.filter((src) => !/^https?:/.test(src) && !fs.existsSync(path.join(ROOT, src)));
-check(brokenImages.length === 0, 'README 里的图片都在（相对路径按本包目录算）', brokenImages.join(', ') || '都在');
-
-/*
- * 市场截图为可选项。提供截图时，清单放在包根的 screenshots.json 中。
- * 清单须含 1–8 张；相对路径须位于本包目录内；也接受 GitHub 托管的 HTTPS 地址。
- */
-const shotFile = path.join(ROOT, 'screenshots.json');
-let shots = null;
-if (fs.existsSync(shotFile)) {
-  try {
-    const raw = JSON.parse(fs.readFileSync(shotFile, 'utf8'));
-    shots = Array.isArray(raw) ? raw : raw && raw.screenshots;
-  } catch (err) {
-    shots = null;
+function publishDoor(args = process.argv.slice(2), dependencies = {}) {
+  const options = argsOf(args);
+  if (Object.keys(options).some(key => !['yes', 'candidate', 'report'].includes(key))) throw new Error('发布不接受升版本或重新打包参数');
+  if (options.yes !== undefined && options.yes !== true) throw new Error('--yes 不接受参数');
+  if (typeof options.candidate !== 'string') throw new Error('需要 --candidate 指定已验收的 tgz');
+  const candidate = path.resolve(options.candidate);
+  const spawn = dependencies.spawn || spawnSync;
+  const verify = dependencies.verify || require('../../../tools/bridge/packages.cjs').verifyCandidate;
+  const approve = dependencies.approve || require('../../../tools/compat/release-check.cjs').readReleaseApproval;
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  if (pkg.private === true || !pkg.license || pkg.license === 'UNLICENSED' || !pkg.repository?.url || /TODO/.test(pkg.repository.url) || !pkg.dsh?.bundle?.patch) throw new Error('发布元数据不完整');
+  const checked = spawn(process.execPath, [path.resolve(ROOT, '../../tools/check-public-paths.cjs')], { cwd: ROOT, stdio: 'inherit', windowsHide: true });
+  if (checked.status !== 0) throw new Error('公开内容检查未通过');
+  const artifact = verify(candidate, 'tgz');
+  if (options.yes) {
+    if (typeof options.report !== 'string') throw new Error('正式发布需要 --report 指定完整通过的当前验收报告');
+    approve(candidate, path.resolve(options.report), 'tgz');
+    if (verify(candidate, 'tgz').sha256 !== artifact.sha256) throw new Error('候选安装包在发布检查期间发生变化');
+    approve(candidate, path.resolve(options.report), 'tgz');
+    const argv = ['publish', candidate, '--access', 'public', '--registry', NPM_REGISTRY, '--ignore-scripts'];
+    const result = spawn('npm', process.platform === 'win32' ? argv.map(quoteArg) : argv, { cwd: ROOT, stdio: 'inherit', shell: process.platform === 'win32', windowsHide: true });
+    if (result.status !== 0) throw new Error('npm 上传失败');
+  } else {
+    if (options.report) approve(candidate, path.resolve(options.report), 'tgz');
+    console.log(`候选包检查通过：${candidate}\nSHA-256 ${artifact.sha256}\n正式发布需同时提供 --yes --candidate <tgz> --report <release-report.json>`);
   }
-  check(Array.isArray(shots) && shots.length >= 1 && shots.length <= 8, 'screenshots.json 合法（1–8 张）', Array.isArray(shots) ? `${shots.length} 张` : '解析失败');
-} else {
-  console.log('  未提供 screenshots.json（截图为可选项）');
+  return artifact;
 }
-if (Array.isArray(shots)) {
-  const bad = shots.filter(
-    (src) => typeof src !== 'string' || (!/^https?:/.test(src) && (/^[\\/]/.test(src) || src.includes('..') || !fs.existsSync(path.join(ROOT, src)))),
-  );
-  check(bad.length === 0, '截图路径都在本包里、且没跳出目录', bad.join(', ') || '都在');
+if (require.main === module) {
+  try { publishDoor(); } catch (error) { console.error(error.message); process.exitCode = 1; }
 }
-
-// 打包生成的 tarball 实际含有的文件 —— 应当只包含 lib / cordis.patch.yml / README / CHANGELOG / LICENSE。
-console.log('\n  ── 包内文件（npm pack --dry-run）─────────────────────────');
-const pack = spawnSync('npm', ['pack', '--dry-run'], { cwd: ROOT, stdio: 'inherit', shell: true, windowsHide: true });
-if (pack.status !== 0) process.exit(1);
-
-const entry = [
-  `url: https://github.com/${owner}/${repo}/tree/main/${dir || 'packages/dsh-door'}`,
-  `name: ${owner}/${repo}${dir ? '#dsh-door' : ''}`,
-  'category: dev',
-  'description:',
-  "  en: 'Connect VS Code and other local clients to DSH, sharing its models, tools, memory and sessions. Browse history, change permission modes and call capabilities registered by DSH plugins.'",
-  '  zh: 连接本机 DSH 与 VS Code 等外部程序，共用模型、工具、记忆和会话。支持历史查看、权限切换及已注册插件的能力调用。',
-].join('\n');
-
-console.log('\n  ── 上架精选列表要提的那个文件 ───────────────────────────');
-console.log(`  文件名：data/plugins/${owner}__${repo}${dir ? `--${dir.replace(/\//g, '-')}` : ''}.yml`);
-console.log('  内容：\n');
-console.log(
-  entry
-    .split('\n')
-    .map((line) => (line ? `    ${line}` : line))
-    .join('\n'),
-);
-console.log('\n  提到这里：https://github.com/awesome-dsh-plugin/awesome-dsh-plugin');
-console.log('  （一个文件就是全部投稿；README 由他们的脚本生成，别手工改。）');
-
-if (!go) {
-  console.log('\n  彩排结束。真发到 npm：先 npm login --registry=https://registry.npmjs.org（或配好 NODE_AUTH_TOKEN），再 node tools/publish.cjs --yes');
-  process.exit(problems.length ? 1 : 0);
-}
-if (problems.length) {
-  console.log(`\n  ❌ 还有 ${problems.length} 项没准备好（见上），先解决再发。`);
-  process.exit(1);
-}
-console.log('\n  ── 真发布到 npm 官方注册表 ──────────────────────────────');
-const pub = spawnSync('npm', ['publish', '--access', 'public', '--registry', NPM_REGISTRY], {
-  cwd: ROOT,
-  stdio: 'inherit',
-  shell: true,
-  windowsHide: true,
-});
-if (pub.status !== 0) process.exit(1);
-console.log(`\n  ✅ 已发布：https://www.npmjs.com/package/${pkg.name}`);
-console.log('     接着把上面那份 yml 提到 awesome-dsh-plugin，市场通常一天内收录。');
+module.exports = { publishDoor, NPM_REGISTRY };

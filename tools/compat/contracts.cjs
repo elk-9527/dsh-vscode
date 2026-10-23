@@ -3,9 +3,11 @@
 const assert = require('node:assert/strict');
 const os = require('node:os');
 const { argsOf, safeObject, versions, semver, json, ROOT, contentSha256 } = require('./lib.cjs');
-const { validateReport, REQUIRED } = require('./release-check.cjs');
+const { validateReport: validateCurrentReport, validateHistoricalReport, REQUIRED } = require('./release-check.cjs');
+const validateReport = (report, current, state) => validateCurrentReport(report, current, state, { platform: 'win32' });
 const path = require('node:path');
 const fs = require('node:fs');
+const { createFixture } = require('../test-workspace.cjs');
 const { dshCommandCandidates, explainKernelFailure } = require('../../packages/vscode-extension/src/door/locate');
 const { mergeExclusions } = require('./install-local.cjs');
 const { publicEvidence } = require('./public-evidence.cjs');
@@ -16,7 +18,7 @@ const attemptReport = { checks: [{ name: 'editor-failure', status: 'failed', evi
 require('./local.cjs').completeAttempt(attemptReport, 'editor');
 assert.deepEqual(attemptReport.previousFailures, [{ name: 'editor-failure', status: 'failed', evidence: 'first attempt' }]);
 assert.deepEqual(attemptReport.checks, [{ name: 'self-failure', status: 'failed', evidence: 'unresolved' }]);
-const contentFixture = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-content-'));
+const contentFixture = createFixture('compat-content');
 try {
   const first = path.join(contentFixture, 'first'), second = path.join(contentFixture, 'second');
   const compare = (a, b) => { fs.writeFileSync(first, a); fs.writeFileSync(second, b); return contentSha256(first) === contentSha256(second); };
@@ -30,7 +32,7 @@ try {
 
 assert.equal(explainKernelFailure({ stderr: 'Plugin dsh-acp-door@0.1.1 is incompatible with dsh 0.2.0-rc.2: peerDependencies' }).kind, 'plugin-incompatible');
 if (process.platform === 'win32') {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-command-'));
+  const temporary = createFixture('compat-command');
   try {
     const executable = path.join(temporary, 'DeepSeek Harness.exe');
     const cli = path.join(temporary, 'resources/runtime/cli/bin/dsh.cmd');
@@ -57,8 +59,8 @@ const publicResult = publicEvidence({ status: 'passed', source: { commit: 'a'.re
   artifacts: [{ kind: 'vsix', sha256: 'c'.repeat(64), file: 'PRIVATE_FILE' }] });
 assert(!JSON.stringify(publicResult).includes('PRIVATE_'));
 assert.equal(publicResult.stages[0].status, 'passed'); assert.equal(publicResult.runtime.version, '0.2.0-rc.2');
-const state = { fingerprint: 'current-code' };
-const report = { status: 'passed', packages: current, source: state, runtime: { version: '0.2.0-rc.1', acpVersion: '0.2.0-rc.1' }, stages: REQUIRED.map((name) => ({ name, status: 'passed' })) };
+const state = { fingerprint: 'a'.repeat(64), toolFingerprint: 'b'.repeat(64), lockFingerprint: 'c'.repeat(64) };
+const report = { schemaVersion: 2, platform: 'win32', status: 'passed', packages: current, source: state, sourceStart: state, sourceEnd: state, runtime: { version: '0.2.0-rc.1', acpVersion: '0.2.0-rc.1', distribution: 'npm' }, artifacts: [{kind: 'tgz', sha256: 'd'.repeat(64)}], stages: REQUIRED.map((name) => ({ name, status: 'passed' })) };
 assert.deepEqual(validateReport(report, current, state), []);
 assert(validateReport({ ...report, stages: report.stages.filter((item) => item.name !== 'tools') }, current, state).some((issue) => issue.includes('tools')));
 assert(validateReport({ ...report, stages: report.stages.map((item) => item.name === 'tools' ? { ...item, status: 'skipped' } : item) }, current, state).some((issue) => issue.includes('tools')));
@@ -81,7 +83,7 @@ const editorMatrix = json(path.join(ROOT, 'compat/editors.json'));
   assert.deepEqual(requiredChecks('1.90.2', false), legacy);
   assert(semver.satisfies('1.90.2', json(path.join(ROOT, 'packages/vscode-extension/package.json')).engines.vscode), 'VS Code 1.90.2 必须能够安装当前面板');
   const evidence = { status: 'passed', editor: '1.90.2', defaultLaunch: true, source: state, packages: current, vsixSha256: 'a'.repeat(64), checks: legacy.map(name => ({ name, status: 'passed' })) };
-  const { validateEditorEvidence } = require('./release-check.cjs');
+  const { validateHistoricalEditor: validateEditorEvidence } = require('./release-check.cjs');
   assert.deepEqual(validateEditorEvidence(evidence, evidence.vsixSha256, current, state), []);
   const nativeEvidence = { ...evidence, capabilities: { nativeChat: true }, checks: CHECKS.map(name => ({ name, status: 'passed' })) };
   assert.deepEqual(validateEditorEvidence(nativeEvidence, evidence.vsixSha256, current, state), []);
@@ -91,7 +93,7 @@ const editorMatrix = json(path.join(ROOT, 'compat/editors.json'));
   assert(validateEditorEvidence({ ...evidence, checks: evidence.checks.filter(check => check.name !== 'sidebar receives unsaved file reference') }, evidence.vsixSha256, current, state).length);
 }
 if (editorMatrix.supported?.length) {
-  const { validateEditorEvidence } = require('./release-check.cjs');
+  const { validateHistoricalEditor: validateEditorEvidence } = require('./release-check.cjs');
   const evidence = json(path.join(ROOT, editorMatrix.supported[0].evidence));
   const state = { fingerprint: evidence.source.fingerprint };
   const testedPackages = { ...current, ...evidence.packages };
@@ -108,5 +110,7 @@ for (const entry of matrix.versions) {
   assert(semver.valid(entry.dsh));
   assert(['pending', 'passed', 'failed'].includes(entry.status));
   if (entry.status === 'passed') assert(entry.evidence.length);
+  if (entry.status === 'passed') for (const file of entry.evidence) assert.deepEqual(validateHistoricalReport(json(path.join(ROOT, file))), [], file);
 }
+require('./test-evidence.cjs');
 console.log('PASS 兼容声明、预发布范围、脱敏、报告漂移、必测跳过与矩阵契约');

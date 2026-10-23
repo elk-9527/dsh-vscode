@@ -16,7 +16,9 @@ async function waitFor(fn, timeout = 60000) { const end = Date.now() + timeout; 
 } throw new Error('等待超时'); }
 async function run() {
   const folder = runDir('bridge-live');
-  const report = { time: new Date().toISOString(), source: sourceState(), status: 'failed', stages: [], artifacts: [] };
+  const start = sourceState();
+  const report = { schemaVersion: 2, time: new Date().toISOString(), source: start, sourceStart: start, platform: process.platform,
+    packages: require('../compat/lib.cjs').versions(), status: 'failed', stages: [], artifacts: [] };
   const previous = process.env.DSH_HOME;
   const proxy = Object.fromEntries(['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'].map(k => [k, process.env[k]]));
   let kernel, model, client, bridge, session;
@@ -31,12 +33,15 @@ async function run() {
   try {
     const reuseVsix = process.argv.includes('--packed-vsix');
     assert(!reuseVsix || process.argv.includes('--editor'), '--packed-vsix requires --editor');
-    const vsix = path.join(ROOT, `packages/vscode-extension/build/dsh-acp-panel-${require('../compat/lib.cjs').versions().panel}.vsix`);
-    const suppliedVsixSha256 = reuseVsix ? sha256(vsix) : undefined;
+    const versionArgument = process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[2] : undefined;
+    const options = require('../compat/lib.cjs').argsOf(process.argv.slice(versionArgument ? 3 : 2));
+    const supplied = require('./packages.cjs').candidates(options, { editor: Boolean(options.editor) });
+    const vsix = supplied.vsix?.file;
+    const suppliedVsixSha256 = supplied.vsix?.sha256;
     await stage('loopback-environment', () => require('../compat/loopback.cjs').verifyLoopback());
     for (const k of Object.keys(proxy)) delete process.env[k];
     process.env.DSH_HOME = path.join(folder, 'home'); fs.mkdirSync(process.env.DSH_HOME, { recursive: true });
-    const runtime = resolveRuntime({ dsh: process.argv.slice(2).find(value => !value.startsWith('--')) || '0.2.0-rc.2' }); report.runtime = runtime;
+    const runtime = resolveRuntime({ dsh: versionArgument || '0.2.0-rc.2' }); report.runtime = runtime;
     const cwd = path.join(folder, 'workspace'); fs.mkdirSync(cwd);
     fs.writeFileSync(path.join(cwd, 'sample.js'), 'export function sum(a, b) { return a - b; }\n');
     fs.writeFileSync(path.join(cwd, 'context-git.txt'), 'context-base\n');
@@ -45,11 +50,11 @@ async function run() {
     const skillDir = path.join(process.env.DSH_HOME, 'skills/bridge-fixture'); fs.mkdirSync(skillDir, { recursive: true });
     fs.writeFileSync(path.join(skillDir, 'SKILL.md'), '---\nname: bridge-fixture\ndescription: Bridge read fixture\n---\n\nBRIDGE_SKILL_CONTENT\n');
     await stage('packages', async () => {
-      const packed = JSON.parse(locate.runDshSync({ command: 'npm', args: ['pack', path.join(ROOT, 'packages/dsh-door'), '--pack-destination', folder, '--json'] }));
       const pilots = JSON.parse(fs.readFileSync(path.join(ROOT, 'build/ide-bridge/pilots/manifest.json')));
       const example = JSON.parse(locate.runDshSync({ command: 'npm', args: ['pack', path.join(ROOT, 'packages/dsh-bridge-sdk/examples/echo'), '--ignore-scripts', '--pack-destination', folder, '--json'] }));
-      const files = [path.join(folder, packed[0].filename),require('./packages.cjs').packSdk(folder), ...pilots.map(p => path.join(ROOT, p.file)), path.join(folder, example[0].filename)];
-      report.artifacts = files.map(file => ({ file: path.relative(ROOT, file).replace(/\\/g, '/'), sha256: sha256(file) }));
+      const files = [supplied.tgz.file, supplied.sdk.file, ...pilots.map(p => path.join(ROOT, p.file)), path.join(folder, example[0].filename)];
+      report.artifacts = [require('./packages.cjs').artifactRecord(supplied.tgz), require('./packages.cjs').artifactRecord(supplied.sdk),
+        ...files.slice(2).map(file => ({ kind: 'fixture', file: path.relative(ROOT, file).replace(/\\/g, '/'), sha256: sha256(file) }))];
       locate.runDshSync({ command: runtime.command, args: ['--profile', 'bridge', '--from-default-profile', 'web', '--dump-config'] });
       require('./packages.cjs').pinSdk(path.join(process.env.DSH_HOME, 'profiles/bridge'), files[1]);
       locate.runDshSync({ command: runtime.command, args: ['plugin', '--profile', 'bridge', 'add', ...files.map(file => `file:${file.replace(/\\/g, '/')}`)], timeoutMs: 180000 });
@@ -144,17 +149,16 @@ async function run() {
       const restored = await bridge.request('operation/get', { operationId: id }); assert.equal(restored.status, 'completed'); return true;
     });
     if (process.argv.includes('--editor')) {
-      if (!reuseVsix) locate.runDshSync({ command: process.execPath, args: [path.join(ROOT, 'packages/vscode-extension/tools/build-vsix.js')] });
-      if (reuseVsix) assert.equal(sha256(vsix), suppliedVsixSha256, 'Supplied VSIX changed before native validation');
+      assert.equal(sha256(vsix), suppliedVsixSha256, 'Supplied VSIX changed before native validation');
       model.setReviewDelay(5000);
       bridge.dispose(); session.dispose(); client.close();
       await new Promise(resolve => setTimeout(resolve, 200));
-      await stage('packed-vsix-native-editor', () => require('./editor-check.cjs').checkEditor({ folder, cwd, port }));
+      await stage('packed-vsix-native-editor', () => require('./editor-check.cjs').checkEditor({ folder, cwd, port, vsix }));
       await stage('packed-context-model-transport', () => {
         assert(model.requests.some(request => { const body = JSON.stringify(request); return body.includes('CONTEXT_DIAGNOSTIC_MARKER') && body.includes('Git 变更补丁快照'); }), '模型服务未收到 Git 与问题诊断正文');
         return { gitDiffAndDiagnostics: true };
       });
-      if (reuseVsix) assert.equal(sha256(vsix), suppliedVsixSha256, 'Supplied VSIX changed during native validation');
+      assert.equal(sha256(vsix), suppliedVsixSha256, 'Supplied VSIX changed during native validation');
       report.artifacts.push({ kind: 'vsix', file: path.relative(ROOT, vsix).replace(/\\/g, '/'), sha256: sha256(vsix) });
     }
     await stage('owned-idle-exit', async () => {
@@ -168,9 +172,11 @@ async function run() {
   } catch (error) { report.error = redact(error.message); console.error(report.error); process.exitCode = 1; }
   finally {
     if (model) fs.writeFileSync(path.join(folder, 'model-requests.json'), JSON.stringify(model.requests, null, 2));
-    session?.dispose(); bridge?.dispose(); client?.close(); kernel?.dispose(); await model?.close();
+    session?.dispose(); bridge?.dispose(); client?.close(); await kernel?.dispose(); await model?.close();
     if (previous === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previous;
     for (const [k, v] of Object.entries(proxy)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    require('./packages.cjs').finishEvidence(report);
+    if (report.status !== 'passed') process.exitCode = 1;
     fs.writeFileSync(path.join(folder, 'bridge-report.json'), JSON.stringify(report, null, 2) + '\n'); console.log(path.join(folder, 'bridge-report.json'));
   }
 }

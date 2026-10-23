@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Node16",
+    "moduleResolution": "node16",
+    "allowJs": true,
+    "checkJs": true,
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "lib": ["ES2022", "DOM"]
+  },
+  "files": [
+    "packages/vscode-extension/src/runtime-support.js",
+    "packages/vscode-extension/src/door/transport-budget.js",
+    "packages/vscode-extension/src/door/endpoint.js",
+    "packages/vscode-extension/src/panel/settings.js",
+    "packages/vscode-extension/src/panel/protocol.js",
+    "packages/vscode-extension/src/panel/queue.js",
+    "packages/vscode-extension/src/panel/queue-persistence.js",
+    "packages/vscode-extension/test/protocol-types.ts"
+  ]
+}

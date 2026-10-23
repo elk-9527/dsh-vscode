@@ -254,11 +254,12 @@ class ReportStore {
       if (!report || typeof report !== 'object' || Array.isArray(report) || Buffer.byteLength(JSON.stringify(report)) > MAX_REPORT) fail('报告内容无效或超限。');
       try {
         const existing = await this.read(key);
-        if (existing.reportDigest !== digest(report) || existing.operation.fingerprint !== op.fingerprint) fail('相同运行已有不同结果，未覆盖原报告。');
+        if (existing.reportDigest !== digest(report) || existing.operation.fingerprint !== op.fingerprint || existing.operation.indexFingerprint !== op.indexFingerprint || existing.operation.headState !== op.headState) fail('相同运行已有不同结果，未覆盖原报告。');
         return { key, caseKey: existing.caseKey, savedAt: existing.savedAt };
       } catch (error) { if (error.code !== 'ENOENT') throw error; }
       const input = op.input && { mode: op.input.mode, ...(op.input.ref ? { ref: op.input.ref } : {}) };
       const operation = { id: op.originalOperationId || op.id, cwd: op.cwd, status: op.status, fingerprint: op.fingerprint,
+        indexFingerprint: op.indexFingerprint, headState: op.headState,
         fingerprintVersion: 'git-disk-v1', instanceId: op.instanceId, clientId: op.clientId, input,
         requestedRef: op.requestedRef, startedAt: op.startedAt, finishedAt: op.finishedAt, retryOf: op.retryOf };
       if (op.caseKey && op.caseKey !== key) await this.read(op.caseKey);
@@ -266,10 +267,10 @@ class ReportStore {
         savedAt: new Date().toISOString(), operation, source: { panel: source.panel, door: source.door, runtime: source.runtime, provider: source.provider },
         completeness: Array.isArray(report.findings) && op.status === 'completed' ? 'structured' : 'incomplete',
         reportDigest: digest(report), report: JSON.parse(JSON.stringify(report)),
-        scopeNote: '磁盘 Git 范围；不包含未保存的编辑器修改。实际审查模型未由提供方确认。' };
+        scopeNote: typeof op.scopeNote === 'string' ? op.scopeNote.slice(0, 4096) : '磁盘 Git 范围；不包含未保存的编辑器修改。实际审查模型未由提供方确认。' };
       this.validate(value, key);
       try { await this.commit(file, value, key); }
-      catch (error) { if (error.code !== 'EEXIST') throw error; const other = await this.read(key); if (other.reportDigest !== value.reportDigest || other.operation.fingerprint !== value.operation.fingerprint) fail('并发报告内容不一致。'); }
+      catch (error) { if (error.code !== 'EEXIST') throw error; const other = await this.read(key); if (other.reportDigest !== value.reportDigest || other.operation.fingerprint !== value.operation.fingerprint || other.operation.indexFingerprint !== value.operation.indexFingerprint || other.operation.headState !== value.operation.headState) fail('并发报告内容不一致。'); }
       const saved = await this.read(key); return { key, caseKey: saved.caseKey, savedAt: saved.savedAt };
     });
   }

@@ -1,5 +1,13 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "chatBaseline": "1.91.1",
+  "currentRelease": {
+    "status": "pending",
+    "panel": "0.18.0",
+    "door": "0.6.0",
+    "sdk": "0.1.1",
+    "evidence": []
+  },
   "platform": "win32",
   "minimum": "1.90.2",
   "status": "passed",

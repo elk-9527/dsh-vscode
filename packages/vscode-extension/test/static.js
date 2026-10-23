@@ -198,13 +198,13 @@ check(
 );
 check(
   'CI 的 Node.js 版本满足已锁定 pnpm 11 的要求',
-  workspaceManifest.packageManager === 'pnpm@11.19.0' && ciNodeVersion >= 22,
+  /^pnpm@11\.\d+\.\d+$/.test(workspaceManifest.packageManager) && ciNodeVersion >= 24,
   `packageManager=${workspaceManifest.packageManager}；CI Node=${ciNodeVersion || '未找到'}`,
 );
 check(
   '该插件发布显式指向 npm 官方注册表',
   /NPM_REGISTRY\s*=\s*'https:\/\/registry\.npmjs\.org'/.test(doorPublishTool) &&
-    /\['publish', '--access', 'public', '--registry', NPM_REGISTRY\]/.test(doorPublishTool),
+    /\['publish', candidate, '--access', 'public', '--registry', NPM_REGISTRY/.test(doorPublishTool),
   '发布脚本未固定官方 registry，可能受环境配置影响',
 );
 check(

@@ -10,6 +10,7 @@
  */
 
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 const { buildPromptBlocks, selectionText, contentText, fenceFor } = require(path.join(
   __dirname,
   '..',
@@ -60,12 +61,14 @@ section('2. 当前文件走 resource_link（让 DSH 自己读，不塞正文）'
     detail: '当前文件',
   };
   const blocks = buildPromptBlocks('这个文件是干嘛的', [file]);
-  check('两块：链接 + 用户的话', blocks.length === 2, JSON.stringify(blocks));
+  check('三块：链接、读取说明、用户的话', blocks.length === 3, JSON.stringify(blocks));
   check('第一块是 resource_link', blocks[0].type === 'resource_link');
   check('name 用相对路径', blocks[0].name === 'src/panel/view.js');
   check('uri 原样带过去', blocks[0].uri === file.uri);
   check('没有把文件内容写进去（resource_link 里没有 text 字段）', blocks[0].text === undefined);
-  check('用户的话在最后', blocks[1].type === 'text' && blocks[1].text === '这个文件是干嘛的');
+  check('链接说明要求读取正文，不能沿用其他附件', blocks[1].type === 'text' && blocks[1].text.includes('没有正文') && blocks[1].text.includes('文件读取工具') && blocks[1].text.includes('之前的选区'));
+  check('当前链接的名称和原地址逐项列出', JSON.parse(blocks[1].text.split('\n')[1])[0].name === file.name && JSON.parse(blocks[1].text.split('\n')[1])[0].uri === file.uri);
+  check('用户的话在最后', blocks.at(-1).type === 'text' && blocks.at(-1).text === '这个文件是干嘛的');
   check('绝不出现内核明确拒绝的 resource 类型', !JSON.stringify(blocks).includes('"resource"'));
 }
 
@@ -81,13 +84,13 @@ section('3. 选中的代码：正文直接给，另外附一条链接');
     detail: '选中 2 行',
   };
   const blocks = buildPromptBlocks('这行是干嘛的', [sel]);
-  check('三块：正文 + 链接 + 用户的话', blocks.length === 3, JSON.stringify(blocks));
+  check('四块：正文、链接、读取说明、用户的话', blocks.length === 4, JSON.stringify(blocks));
   check('第一块是 text（选中的代码）', blocks[0].type === 'text');
   check('写了位置', blocks[0].text.includes('src/app.js'));
   check('带语言标记的围栏', blocks[0].text.includes('```javascript'));
   check('代码原样在里面', blocks[0].text.includes('const answer = 42;'));
   check('第二块是带上同一文件的链接', blocks[1].type === 'resource_link' && blocks[1].uri === 'file:///d%3A/app.js');
-  check('还是以用户的话结尾', blocks[2].text === '这行是干嘛的');
+  check('还是以用户的话结尾', blocks.at(-1).text === '这行是干嘛的');
 }
 
 // ── 4. 代码本身包含反引号时，围栏须加长 ──────────────────
@@ -137,10 +140,10 @@ section('6. 只有上下文、一个字都没打');
 {
   const sel = { kind: 'selection', name: 'a.js', uri: 'file:///a.js', text: 'x', language: 'js' };
   const blocks = buildPromptBlocks('', [sel]);
-  check('同样有内容块（不会发出空 prompt）', blocks.length === 3, JSON.stringify(blocks));
-  check('补了一句自然语言，不是空字符串', blocks[2].text.trim().length > 0, JSON.stringify(blocks[2].text));
+  check('同样有内容块（不会发出空 prompt）', blocks.length === 4, JSON.stringify(blocks));
+  check('补了一句自然语言，不是空字符串', blocks.at(-1).text.trim().length > 0, JSON.stringify(blocks.at(-1).text));
   const file = { kind: 'file', name: 'a.js', uri: 'file:///a.js' };
-  check('只有文件链接时也一样', buildPromptBlocks('   ', [file]).length === 2);
+  check('只有文件链接时也一样', buildPromptBlocks('   ', [file]).length === 3);
 }
 
 // ── 7. 多个附件保持顺序 ─────────────────────────────────
@@ -155,6 +158,9 @@ section('7. 带了多个附件：顺序要稳定');
   const links = blocks.filter((b) => b.type === 'resource_link').map((b) => b.name);
   check('三条链接都在', links.length === 3, JSON.stringify(links));
   check('顺序跟传入一致', links.join(',') === 'a.js,b.js,c.md', links.join(','));
+  const descriptions = blocks.filter(block => block.type === 'text' && block.text.startsWith('本轮显式提供的文件链接'));
+  check('多个链接只补充一次读取说明', descriptions.length === 1);
+  check('统一说明中的链接清单与原链接逐项对应', JSON.parse(descriptions[0].text.split('\n')[1]).map(item => item.name).join(',') === links.join(','));
   check('用户的话永远在最后一块', blocks[blocks.length - 1].type === 'text' && blocks[blocks.length - 1].text === '一起看看');
 }
 
@@ -252,6 +258,32 @@ section('12. 附加正文仅按明确来源范围描述');
   check('content 选区保留正文且不声称完整文件', selection.includes(body) && !selection.includes('完整文件正文快照'));
   const unnamed = contentText({ kind: 'content', text: '证据' });
   check('缺失来源使用未知来源，不虚构文件', unnamed.startsWith('以下是附加正文快照（（未知来源））：'));
+}
+
+section('13. 旧式文件链接提供本轮元数据，不读取或混用正文');
+{
+  const localPath = path.resolve('build', 'reference # 文.txt');
+  const uri = pathToFileURL(localPath).href;
+  const name = '引号"与换行\n文件';
+  const attachments = [
+    { kind: 'file', name, uri },
+    { kind: 'file', name: 'remote', uri: 'https://example.invalid/file.txt' },
+    { kind: 'file', name: 'network', uri: 'file://remote.invalid/share/file.txt' },
+    { kind: 'file', name: 'invalid', uri: 'not a uri' },
+    { kind: 'file', name: 'encoded-separator', uri: 'file:///a%2Fb.txt' },
+  ];
+  const blocks = buildPromptBlocks('读取本轮文件', attachments);
+  const hint = blocks.at(-2), references = JSON.parse(hint.text.split('\n')[1]);
+  check('本机路径按当前平台解码空格、井号和 Unicode', references[0].localPath === localPath);
+  check('原 URI 和名称保持原值', references[0].uri === uri && references[0].name === name);
+  check('名称中的换行通过 JSON 转义，不改变元数据结构', hint.text.split('\n')[1].includes('\\n') && references.length === attachments.length);
+  check('每个原链接仍按输入顺序保留', blocks.slice(0, attachments.length).every((block, index) => block.type === 'resource_link' && block.uri === attachments[index].uri));
+  check('远程、网络、无效及编码分隔符链接不虚构本机路径', references.slice(1).every(item => !Object.hasOwn(item, 'localPath')));
+  check('链接元数据没有读取或加入文件正文', references.every(item => !Object.hasOwn(item, 'text') && !Object.hasOwn(item, 'content')));
+  check('用户提问仍最后发送且保持原文', blocks.at(-1).text === '读取本轮文件');
+  const snapshot = { kind: 'content', scope: 'file', sourcePath: localPath, uri, text: '捕获的正文', snapshotAt: '2026-10-12T00:00:00Z' };
+  const captured = buildPromptBlocks('使用快照', [snapshot]);
+  check('有正文快照的文件不增加链接元数据或延后读取要求', captured.length === 2 && captured[0].text.includes(snapshot.text));
 }
 
 console.log('\n════════════════════════════════════════════════════════');

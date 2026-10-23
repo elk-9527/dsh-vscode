@@ -33,11 +33,16 @@ async function run() {
   assert(Number.isInteger(actorTimeoutMs) && actorTimeoutMs >= 60000 && actorTimeoutMs <= 1800000, '场景超时需为 60000 到 1800000 毫秒');
   const home = path.join(folder, 'home'), profile = path.join(home, 'profiles/scenario');
   const userData = path.join(folder, 'editor-data'), extensions = path.join(folder, 'editor-extensions'), sharedData = path.join(folder, 'editor-shared-data');
-  const report = { time: new Date().toISOString(), source: sourceState(), status: 'failed', model: 'real', checks: [], limitations: ['选择框由脚本选择实际选项；不包含鼠标点击和像素级验收', '日常窗口交互和最低编辑器完整验收分别保留'] };
+  const start = sourceState();
+  const report = { schemaVersion: 2, time: new Date().toISOString(), source: start, sourceStart: start, platform: process.platform,
+    packages: require('../compat/lib.cjs').versions(), artifacts: [], status: 'failed', model: 'real', checks: [], limitations: ['选择框由脚本选择实际选项；不包含鼠标点击和像素级验收', '日常窗口交互和最低编辑器完整验收分别保留'] };
   report.scope = featuresOnly ? 'feature-updates' : 'full-scenarios';
   let editor, port, sourceConfigHashes;
   const recordPath = path.join(folder, 'scenario-report.json');
   try {
+    const options = require('../compat/lib.cjs').argsOf();
+    const supplied = require('./packages.cjs').candidates(options, { editor: candidate });
+    report.artifacts = Object.values(supplied).map(require('./packages.cjs').artifactRecord);
     if (!candidate) execFileSync(process.execPath, ['packages/vscode-extension/tools/check-installed.cjs'], { cwd: ROOT, stdio: 'pipe', windowsHide: true });
     const runtime = resolveRuntime({ dsh: process.env.DSH_PANEL_TEST_DSH_VERSION, command: process.env.DSH_PANEL_DSH });
     const sourceProfile = path.join(originalHome, 'profiles/bridge-real');
@@ -48,15 +53,14 @@ async function run() {
       const file = path.join(sourceProfile, name); if (fs.existsSync(file)) fs.copyFileSync(file, path.join(profile, name));
     }
     // 在隔离配置集中由正式插件管理器安装，避免复制依赖后沿用原虚拟仓库位置。
-    const sdkFile = require('./packages.cjs').packSdk(folder);
-    const doorPacked = JSON.parse(locate.runDshSync({ command: 'npm', args: ['pack', path.join(ROOT, 'packages/dsh-door'), '--pack-destination', folder, '--json'] }));
+    const sdkFile = supplied.sdk.file;
     const pilotFiles = JSON.parse(fs.readFileSync(path.join(ROOT, 'build/ide-bridge/pilots/manifest.json'), 'utf8')).map(item => path.join(ROOT, item.file));
     const skillPilot = JSON.parse(fs.readFileSync(path.join(ROOT, 'build/ide-bridge/pilots/manifest.json'), 'utf8')).find(item => item.key === 'skills');
     const pilotFile = path.join(ROOT, skillPilot.file); assert.equal(sha256(pilotFile), skillPilot.packageSha256);
     const previousHome = process.env.DSH_HOME;
     require('./packages.cjs').pinSdk(profile, sdkFile);
     process.env.DSH_HOME = home;
-    try { locate.runDshSync({ command: runtime.command, args: ['plugin', '--profile', 'scenario', 'add', ...[sdkFile, path.join(folder, doorPacked[0].filename), ...pilotFiles].map(file => `file:${file.replace(/\\/g, '/')}`)], timeoutMs: 180000 }); }
+    try { locate.runDshSync({ command: runtime.command, args: ['plugin', '--profile', 'scenario', 'add', ...[sdkFile, supplied.tgz.file, ...pilotFiles].map(file => `file:${file.replace(/\\/g, '/')}`)], timeoutMs: 180000 }); }
     finally { if (previousHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previousHome; }
     const credentials = path.join(originalHome, '.credentials.yaml'); if (fs.existsSync(credentials)) fs.copyFileSync(credentials, path.join(home, '.credentials.yaml'));
     const patch = path.join(folder, 'model.patch.yml'); fs.copyFileSync(sourcePatch, patch);
@@ -89,12 +93,12 @@ async function run() {
     const extensionName = `${manifest.publisher}.${manifest.name}-${manifest.version}`;
     let source;
     if (candidate) {
-      const vsix = path.join(ROOT, `packages/vscode-extension/build/${manifest.name}-${manifest.version}.vsix`);
+      const vsix = supplied.vsix.file;
       const extracted = path.join(folder, 'candidate-vsix');
       const quote = value => `'${value.replace(/'/g, "''")}'`;
       execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory(${quote(vsix)}, ${quote(extracted)})`], { windowsHide: true });
       source = path.join(extracted, 'extension'); report.vsixSha256 = sha256(vsix);
-      for (const file of shipFiles(path.join(ROOT, 'packages/vscode-extension'))) assert.equal(sha256(path.join(source, file)), sha256(path.join(ROOT, 'packages/vscode-extension', file)));
+      require('../../packages/vscode-extension/tools/package-links.cjs').verifyPackageFiles(path.join(ROOT, 'packages/vscode-extension'), source);
     } else {
       const name = fs.readdirSync(path.join(os.homedir(), '.vscode/extensions')).find(x => x.toLowerCase() === extensionName.toLowerCase()); assert(name);
       source = path.join(os.homedir(), '.vscode/extensions', name);
@@ -196,6 +200,8 @@ async function run() {
       .map(x => path.relative(originalHome, x.file).replace(/\\/g, '/')) || [];
     report.dailyDshConfigUnchanged = !!sourceConfigHashes && report.dailyDshConfigChanges.length === 0;
     if (!report.accountStorageIsolation.dailySecretsUnchanged || !report.dailyDshConfigUnchanged) { report.status = 'partial'; process.exitCode = 1; }
+    require('./packages.cjs').finishEvidence(report);
+    if (report.status !== 'passed') process.exitCode = 1;
     fs.writeFileSync(recordPath, JSON.stringify(report, null, 2));
     console.log(JSON.stringify({ status: report.status, checks: report.checks.length, report: path.relative(ROOT, recordPath).replace(/\\/g, '/'), error: report.error }));
   }

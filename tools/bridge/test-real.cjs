@@ -11,10 +11,19 @@ const { repositorySnapshot } = require('../../packages/vscode-extension/src/brid
 
 async function run() {
   const folder = runDir('bridge-real'), cwd = path.join(folder,'workspace'); fs.mkdirSync(cwd);
-  const report = { time:new Date().toISOString(), source:sourceState(), packages:versions(), status:'failed', checks:[] };
+  const start = sourceState();
+  const report = { schemaVersion:2, time:new Date().toISOString(), source:start, sourceStart:start, platform:process.platform, packages:versions(), status:'failed', checks:[], artifacts:[] };
   const check = (name,evidence) => { report.checks.push({name,status:'passed',evidence}); console.log(`PASS ${name}`); };
   let kernel,client,bridge,session,port;
   try {
+    const options = require('../compat/lib.cjs').argsOf();
+    const supplied = require('./packages.cjs').candidates(options);
+    report.artifacts = [supplied.tgz, supplied.sdk].map(require('./packages.cjs').artifactRecord);
+    assert(process.env.DSH_HOME, '真实验收需要显式指定 build/ 下的专用 DSH_HOME');
+    const testHome = path.resolve(process.env.DSH_HOME), buildRoot = path.join(ROOT, 'build');
+    assert(testHome.startsWith(buildRoot + path.sep) && testHome !== buildRoot, '真实验收 DSH_HOME 必须位于本项目 build/ 专用子目录');
+    fs.mkdirSync(testHome, { recursive: true });
+    assert(fs.realpathSync(testHome).startsWith(fs.realpathSync(buildRoot) + path.sep), '真实验收 DSH_HOME 不能通过链接指向日常配置');
     const header = '/** Add two finite numeric inputs. */\n';
     // 新导出和测试在基线之后加入，成功修复仍保留待审查差异。
     fs.writeFileSync(path.join(cwd,'sample.js'),'export {};\n');
@@ -32,8 +41,7 @@ async function run() {
       for (const name of ['package.json','pnpm-lock.yaml','pnpm-workspace.yaml','cordis.yml','cordis.patch.yml']) if(fs.existsSync(path.join(directory,name))) fs.copyFileSync(path.join(directory,name),path.join(backup,name));
     } else locate.runDshSync({command:runtime.command,args:['--profile',profile,'--from-default-profile','web','--dump-config']});
     const pilots = JSON.parse(fs.readFileSync(path.join(ROOT,'build/ide-bridge/pilots/manifest.json')));
-    const packedDoor = JSON.parse(locate.runDshSync({command:'npm',args:['pack',path.join(ROOT,'packages/dsh-door'),'--ignore-scripts','--pack-destination',folder,'--json']}));
-    const candidates = [path.join(folder,packedDoor[0].filename),require('./packages.cjs').packSdk(folder),...pilots.map(p=>path.join(ROOT,p.file))].map(file=>{
+    const candidates = [supplied.tgz.file,supplied.sdk.file,...pilots.map(p=>path.join(ROOT,p.file))].map(file=>{
       const persistent=path.join(ROOT,'build/install',`${path.basename(file,'.tgz')}-${sha256(file).slice(0,16)}.tgz`);
       fs.mkdirSync(path.dirname(persistent),{recursive:true}); if(!fs.existsSync(persistent)) fs.copyFileSync(file,persistent); return persistent;
     });
@@ -58,7 +66,7 @@ async function run() {
     const provider = require('./test-profile.cjs').prepareTestProvider({profile, command:runtime.command, folder,
       packageName:process.env.DSH_PANEL_TEST_PROVIDER_PACKAGE || status.model.provider});
     if (provider.synced) {
-      client.close(); kernel.dispose();
+      client.close(); await kernel.dispose();
       await waitFor(async()=>!await locate.probePort('127.0.0.1',port),10000);
       status = await startKernel();
     }
@@ -92,15 +100,10 @@ async function run() {
     report.status='passed';
   } catch(error) { report.error=redact(error.message); console.error(report.error); process.exitCode=1; }
   finally {
-    report.sourceEnd=sourceState();
-    if(report.sourceEnd.fingerprint!==report.source.fingerprint) {
-      report.status='failed'; report.sourceChanged=true; process.exitCode=1;
-      report.error ||= 'Product sources changed during real validation; rerun on a stable checkout.';
-      console.error(report.error);
-    }
-    bridge?.dispose(); session?.dispose(); client?.close(); kernel?.dispose();
+    bridge?.dispose(); session?.dispose(); client?.close(); await kernel?.dispose();
     if(port) { try { await waitFor(async()=>!await locate.probePort('127.0.0.1',port),10000); check('test-kernel-cleanup',{portClosed:true}); }
       catch(error) { report.status='failed'; report.cleanupError=redact(error.message); process.exitCode=1; } }
+    require('./packages.cjs').finishEvidence(report);
     fs.writeFileSync(path.join(folder,'real-report.json'),JSON.stringify(safeObject(report),null,2)+'\n'); console.log(path.join(folder,'real-report.json'));
     process.exitCode = report.status === 'passed' ? 0 : 1;
   }

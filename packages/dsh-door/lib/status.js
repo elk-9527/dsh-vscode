@@ -1,5 +1,6 @@
-/** 该版本同时作为客户端兼容诊断信息；测试会核对它与 package.json 一致。 */
-export const DOOR_VERSION = '0.5.2';
+import { createRequire } from 'node:module';
+/** 安装清单是诊断版本的唯一来源，避免发布时出现两处版本漂移。 */
+export const DOOR_VERSION = createRequire(import.meta.url)('../package.json').version;
 
 /** 该插件自定义的只读状态方法。 */
 export const DOOR_STATUS_METHOD = 'dsh-door/status';

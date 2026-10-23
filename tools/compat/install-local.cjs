@@ -22,9 +22,8 @@ function mergeExclusions(values) {
 
 function install(options) {
   if (!options.yes) throw new Error('需要 --yes 显式执行本机安装');
-  const tgz = path.resolve(options.tgz || path.join(ROOT, `build/dsh-acp-door-${versions().door}.tgz`));
-  const vsix = path.resolve(options.vsix || path.join(ROOT, `packages/vscode-extension/build/dsh-acp-panel-${versions().panel}.vsix`));
-  for (const file of [tgz, vsix]) if (!fs.existsSync(file)) throw new Error(`安装包不存在：${file}`);
+  const candidates = require('../bridge/packages.cjs').candidates(options, { editor: true });
+  const tgz = candidates.tgz.file, vsix = candidates.vsix.file;
   const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
   // 同号候选包可能重新构建。使用内容摘要区分 file: 来源，避免包管理器复用旧内容。
   const installTgz = path.join(ROOT, 'build/install', `dsh-acp-door-${versions().door}-${sha256(tgz).slice(0, 16)}.tgz`);
@@ -41,7 +40,7 @@ function install(options) {
   }) : [];
   let sdkArchive;
   if (pilots.length) {
-    const source = require('../bridge/packages.cjs').packSdk(path.join(ROOT, 'build'));
+    const source = candidates.sdk.file;
     sdkArchive = path.join(ROOT, 'build/install', `${path.basename(source, '.tgz')}-${sha256(source).slice(0, 16)}.tgz`);
     if (!fs.existsSync(sdkArchive)) fs.copyFileSync(source, sdkArchive);
     if (sha256(source) !== sha256(sdkArchive)) throw new Error('SDK 安装包摘要不匹配');
@@ -49,10 +48,10 @@ function install(options) {
   const runtime = resolveRuntime({ dsh: options.dsh, command: options.command });
   const backup = path.join(ROOT, '.local', 'backups', `compat-${new Date().toISOString().replace(/[:.]/g, '-')}`);
   fs.mkdirSync(backup, { recursive: true });
-  const record = { time: new Date().toISOString(), source: sourceState(), packages: versions(), backup: path.relative(ROOT, backup), originals: [], operations: [],
-    artifacts: [{ kind: 'tgz', file: path.relative(ROOT, tgz).replace(/\\/g, '/'), sha256: sha256(tgz) }, { kind: 'vsix', file: path.relative(ROOT, vsix).replace(/\\/g, '/'), sha256: sha256(vsix) }] };
+  const start = sourceState();
+  const record = { schemaVersion: 2, time: new Date().toISOString(), source: start, sourceStart: start, platform: process.platform,
+    packages: versions(), backup: path.relative(ROOT, backup), originals: [], operations: [], artifacts: Object.values(candidates).map(require('../bridge/packages.cjs').artifactRecord) };
   record.artifacts.push(...pilots.map(item => ({ kind: 'pilot', name: item.name, version: item.candidate, file: item.file, sha256: item.packageSha256 })));
-  if (sdkArchive) record.artifacts.push({ kind: 'tgz', name: 'dsh-ide-bridge-sdk', version: versions().sdk, file: path.relative(ROOT, sdkArchive), sha256: sha256(sdkArchive) });
   for (const profile of ['desktop', 'vscode-panel']) {
     const directory = path.join(home, 'profiles', profile);
     for (const name of ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'cordis.yml', 'cordis.patch.yml']) {
@@ -151,7 +150,7 @@ function install(options) {
     record.operations.push({ extension: 'Elk-ydy.dsh-acp-panel', version: versions().panel, status: 'passed' });
     record.status = 'passed';
   } catch (error) { record.status = 'failed'; record.error = error.message; throw error; }
-  finally { fs.writeFileSync(path.join(backup, 'record.json'), `${JSON.stringify(safeObject(record), null, 2)}\n`); console.log(`备份与安装记录：${backup}`); }
+  finally { require('../bridge/packages.cjs').finishEvidence(record); fs.writeFileSync(path.join(backup, 'record.json'), `${JSON.stringify(safeObject(record), null, 2)}\n`); console.log(`备份与安装记录：${backup}`); }
   return record;
 }
 if (require.main === module) { try { install(argsOf()); } catch (error) { console.error(require('./lib.cjs').redact(error.message)); process.exitCode = 1; } }

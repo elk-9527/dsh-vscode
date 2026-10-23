@@ -211,7 +211,7 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
     </div>
   </div>
 
-  <div id="permission" class="permission" hidden>
+  <div id="permission" class="permission" role="dialog" aria-modal="true" aria-labelledby="permission-title" aria-describedby="permission-body" hidden>
     <div class="permission-title" id="permission-title">DSH 需要授权</div>
     <div class="permission-body" id="permission-body"></div>
     <div class="permission-actions" id="permission-actions"></div>

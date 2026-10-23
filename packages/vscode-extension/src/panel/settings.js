@@ -8,7 +8,7 @@
  * 本地 DSH 的运行方式。清单中的 `scope: machine` 是第一层约束，本文再明确忽略
  * VS Code 返回的工作区值，作为运行时兜底。
  *
- * @param {{get?: (key: string) => unknown, inspect?: (key: string) => object}} configuration
+ * @param {{get?: (key: string) => unknown, inspect?: (key: string) => {globalValue?: unknown, defaultValue?: unknown}|undefined}} configuration
  * @param {string} key 设置键名（不含 `dshPanel.` 前缀）。
  * @param {unknown} fallback 未设置时使用的默认值。
  * @returns {unknown}

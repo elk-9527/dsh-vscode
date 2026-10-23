@@ -7,12 +7,12 @@
 本仓库由两个组成部分构成，两者都需要安装。
 
 
-升级版为面板 `0.17.0`、接入点 `0.5.2`：“工具”视图提供代码审查和技能浏览，更多菜单提供文件技能管理；运行记录支持恢复、重试、清理及将报告显式带入对话。可选原生 `@dsh` Chat 与完整会话 API 集成在同一个主扩展中，继续保持一个活动栏入口。
+升级版为候选面板 `0.18.0`、接入点 `0.6.0`：“工具”视图提供代码审查和技能浏览，更多菜单提供文件技能管理；运行记录支持恢复、重试、清理及将报告显式带入对话。可选原生 `@dsh` Chat 与完整会话 API 集成在同一个主扩展中，继续保持一个活动栏入口。
 面板输入框支持文件、选区、技能、Git 变更、问题诊断和内置命令；运行中可排队下一条消息，失败或停止后暂停队列。每轮回答附有改动与测试结果卡，当前窗口保留最近十轮差异，可查看旧轮差异、撤销最新轮的文件改动，并核对工作区测试结果是否已过期。
 原生 Chat 支持显式文件和选区引用，包括未保存的编辑器内容；历史列表支持搜索、翻页、项目筛选和 Markdown 导出。审查发现可生成只读修复建议，经差异预览确认后逐项应用，并保存后重新审查。
 完整审查报告保存到本地，离线和重开窗口后可阅读。实际应用的修复、修复前测试、每次重测和后续审查保留关联记录；测试直接依据选中的审查工作区，无需聊天轮次。
 两个试点插件需要安装带 Bridge 注册补丁的适配包，发行附件保留原作者来源；市场中的原版插件继续保留原有入口。见下文安装方法。
-提供方 SDK `0.1.0` 包含类型、注册与校验助手、模拟宿主和独立示例，见 [SDK 文档](packages/dsh-bridge-sdk/README.md)。
+提供方 SDK `0.1.1` 包含类型、注册与校验助手、模拟宿主和独立示例，见 [SDK 文档](packages/dsh-bridge-sdk/README.md)。
 
 当前维护版本覆盖 DSH `0.1.5-rc.2`、`0.2.0-rc.1`、`0.2.0-rc.2` 与预览版 `0.2.1-alpha.1`、`0.2.1-rc.2`；验收状态见
 [`compat/versions.json`](compat/versions.json)。DSH 0.2 使用 v4 会话格式和
@@ -33,6 +33,8 @@
 - `spike/`：ACP 协议探测工具。
 - `build/`：生成的安装包和临时验证产物，不纳入 Git。
 - `.local/`：本地工作资料和备份，不纳入 Git。
+
+扩展打包、预览和界面验收分别写入仓库根目录的 `build/vscode-extension/`、`build/preview/` 和 `build/uitest/`。完整测试入口将子进程的临时目录限制在 `build/test-runs/`，结束时回收；浏览器配置和打包暂存目录也在退出时删除。`build/install/` 中被安装配置引用的归档须保留。
 
 ## 为什么需要两个组成部分
 
@@ -63,6 +65,17 @@ DSH 的会话、记忆与默认模型设置来自同一份 `$DSH_HOME`；各配�
 注册表插件按实际版本补齐；由当前 DSH 运行时提供的官方 bundle 也会直接启用。后台内核还会通过
 `--patch` 只读叠加 `desktop/cordis.patch.yml`，所以模型路由、插件开关和参数不会因 Desktop 关闭而丢失，
 且不会复制或覆盖任一配置文件。`file:`、Git、URL 等无法安全复现的来源不会自动复制，原因会写入日志。
+
+## 运行环境
+
+| 环境 | 支持状态 |
+| --- | --- |
+| 本地 Windows 桌面版编辑器 | 产品支持；每个候选仍需单独完成发行验收 |
+| 本地 Linux / macOS | 保留本机实现及快速 CI；完整内核与编辑器发行验收待完成 |
+| Remote SSH、WSL、开发容器 | 暂不支持；启动时说明内核位置与文件读取尚未适配 |
+| 浏览器与虚拟工作区 | 暂不支持，需要本机文件目录及桌面扩展宿主 |
+
+回环地址始终指扩展实际运行机器；当前不通过端口转发连接远程内核。历史通过记录不代表当前候选已满足发布要求，当前状态见兼容矩阵的 `currentRelease`。
 
 ## 首次安装（每台电脑分别完成）
 
@@ -119,10 +132,10 @@ DSH Desktop 0.2 无需另外把 `dsh` 加入 `PATH`：扩展会自动查找 Desk
 
 仅安装接入点可以使用普通聊天、模型、权限及历史功能。原生代码审查和技能管理还需要主动注册 Bridge 能力的提供方。发布版提供基于 `@michengai/dsh-code-review@0.1.9`、`@linxin666/dsh-client-ui-skill-explorer@0.4.4` 的适配归档，保留上游许可证和原有桌面入口；适配源码及精确来源校验见 `tools/bridge/build-pilots.cjs`。
 
-从同一发布标签的附件下载 `michengai-dsh-code-review-0.1.9-ide.5.tgz` 与 `linxin666-dsh-client-ui-skill-explorer-0.4.4-ide.5.tgz`，在需要使用的配置集中安装：
+当前源码对应未完成发行验收的候选包。开发验收时，先用下文的构建命令生成接入点、SDK 和 VSIX，再运行 `node tools/bridge/build-pilots.cjs` 生成 `build/ide-bridge/pilots/` 下的 `michengai-dsh-code-review-0.1.9-ide.7.tgz` 与 `linxin666-dsh-client-ui-skill-explorer-0.4.4-ide.6.tgz`。使用同一轮候选归档，在专用验收配置集中安装：
 
 ```sh
-dsh plugin --profile <配置集> add dsh-acp-door@0.5.2 dsh-ide-bridge-sdk@0.1.0 file:<审查适配包路径>.tgz file:<技能适配包路径>.tgz
+dsh plugin --profile <验收配置集> add file:<接入点候选路径>.tgz file:<SDK候选路径>.tgz file:<审查适配包路径>.tgz file:<技能适配包路径>.tgz
 ```
 
 上面的命令用于可由命令行管理的配置集，例如 `vscode-panel`。Desktop 的插件请通过桌面端插件界面安装或更新，再重启对应内核。适配归档使用明确的版本和上游来源，不把它当作原作者发布的注册表版本。更新后使用 **DSH：诊断连接与配置** 核对实际加载的能力。
@@ -145,24 +158,24 @@ dsh plugin --profile <配置集> add dsh-acp-door@0.5.2 dsh-ide-bridge-sdk@0.1.0
 pnpm install --frozen-lockfile
 
 # 扩展：单元与静态测试 + 界面回放测试
-cd packages/vscode-extension
-node test/run-all.js --all        # 全部测试
-node tools/uitest.js              # 界面回放测试（无头 Chrome）
-node tools/build-vsix.js          # 生成本地安装包
-node tools/publish.js             # 市场发布前自检（自检 + 打包 + 文件清单比对）
+node packages/vscode-extension/test/run-all.js --all  # 全部测试
+node packages/vscode-extension/tools/uitest.js        # 界面回放测试（无头 Chrome）
+node tools/bridge/packages.cjs --out build/candidates # 构建并校验 VSIX、接入点和 SDK 候选
+node packages/vscode-extension/tools/publish.js --candidate <候选.vsix> # 检查已有候选，不上传
 
 # 插件：纯函数套件，以及端到端试验
-cd packages/dsh-door
-node test/frames.js               # 帧判定
-node test/permission.js           # 权限预设方法
-node test/port.js                 # 端口判定
-node test/sessions.js             # 会话读取
-node tools/publish.cjs            # npm 发布前自检，并生成上架所需的 yml
+node packages/dsh-door/test/frames.js       # 帧判定
+node packages/dsh-door/test/permission.js   # 权限预设方法
+node packages/dsh-door/test/port.js         # 端口判定
+node packages/dsh-door/test/sessions.js     # 会话读取
+node packages/dsh-door/tools/publish.cjs --candidate <候选接入点.tgz> # 检查已有候选，不上传
 ```
+
+以上命令从仓库根目录执行，候选路径取自 `build/candidates/manifest.json`；已有同名候选时需选用新的输出目录。正式上传还需维护者授权及完整验收报告，见[发布清单](docs/发布清单.md)。
 
 其中插件的四个套件也由扩展的 `test/run-all.js` 一并执行（见该文件中的套件清单）。
 
-`node test/run-all.js` 是不依赖 DSH 的快速套件；`--all` 才会启动真实内核、写入专用测试档并执行
+`node packages/vscode-extension/test/run-all.js` 是不依赖 DSH 的快速套件；`--all` 才会启动真实内核、写入专用测试档并执行
 真实回合。提交 CI 运行快速、契约、界面与打包检查；每日及手动任务对官方候选版本执行隔离真实内核验收。
 发布前在本机执行 `--all --strict`，再完成维护流程中的 Desktop、真实模型和最终安装包验收。
 
@@ -176,9 +189,9 @@ node tools/publish.cjs            # npm 发布前自检，并生成上架所需�
 ```sh
 pnpm compat:doctor -- --json
 pnpm compat:contracts
-pnpm compat:test -- --dsh 0.2.0-rc.2
-pnpm compat:test -- --dsh 0.2.0-rc.2 --install
-pnpm compat:release-check -- --report <内核报告> --local-report <本机验收记录>
+pnpm compat:test -- --dsh 0.2.0-rc.2 --tgz <候选接入点.tgz>
+pnpm compat:test -- --dsh 0.2.0-rc.2 --install --tgz <候选接入点.tgz>
+pnpm compat:release-check -- --evidence <验收证据清单.json>
 ```
 
 每日与手动兼容 CI 检查官方稳定版及预发布版，使用隔离数据和本机测试模型服务。

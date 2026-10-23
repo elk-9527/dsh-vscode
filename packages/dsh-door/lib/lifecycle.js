@@ -4,7 +4,7 @@
  * 插件卸载/DSH 重载时不能只拆除 ACP 子插件：若 socket 仍保持连接，客户端会继续
  * 认为接入点可用，却再也收不到回复。逐项捕获错误则保证一个异常连接不会阻断其余连接。
  *
- * @param {Set<{socket?: {destroyed?: boolean, destroy?: () => void}, teardown?: () => void}>} live
+ * @param {Set<{socket?: {destroyed?: boolean, destroy?: () => void}, teardown?: () => void | Promise<void>}>} live
  * @param {(phase: 'teardown'|'socket', error: unknown) => void} [onError]
  * @returns {number} 从集合中移除的连接数。
  */
@@ -15,7 +15,12 @@ export function disposeLiveConnections(live, onError = () => {}) {
     if (typeof live.delete === 'function' && !live.delete(entry)) continue;
     count += 1;
     try {
-      entry?.teardown?.();
+      const pending = entry?.teardown?.();
+      if (pending && typeof pending.then === 'function') {
+        // Agent teardown may wait for an active provider to really settle.
+        // Keep socket cleanup synchronous while observing the eventual result.
+        void Promise.resolve(pending).catch(error => onError('teardown', error));
+      }
     } catch (error) {
       onError('teardown', error);
     }

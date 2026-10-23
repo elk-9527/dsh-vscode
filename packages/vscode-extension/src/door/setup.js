@@ -6,7 +6,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { runDshSync } = require('./locate');
+const { randomUUID } = require('node:crypto');
+const { runDshAsync } = require('./locate');
 const { resolveSessionsRoot } = require('../dsh/sessions');
 
 const SAFE_PROFILE = /^[A-Za-z0-9._-]+$/;
@@ -138,16 +139,11 @@ function enableRuntimeBundles(profile, state, names, options = {}) {
   const additions = names.filter((name) => !profileConfig.bundles.includes(name));
   if (additions.length === 0) return state;
   profileConfig.bundles.push(...additions);
+  const temporary = `${manifest}.${randomUUID()}.tmp`;
   try {
-    fs.writeFileSync(manifest, `${JSON.stringify(pkg, null, 2)}\n`, 'utf8');
-  } catch (error) {
-    try {
-      fs.writeFileSync(manifest, original, 'utf8');
-    } catch {
-      // 保留原始写入错误；恢复失败时该错误仍最能说明操作为何没有完成。
-    }
-    throw error;
-  }
+    fs.writeFileSync(temporary, `${JSON.stringify(pkg, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+    fs.renameSync(temporary, manifest);
+  } finally { try { fs.unlinkSync(temporary); } catch { /* Only this operation's temporary file. */ } }
   return inspectPanelProfile(profile, options);
 }
 
@@ -204,14 +200,31 @@ function planPanelPluginSync({
  * 将桌面端已经启用的注册表插件按实际版本补到面板自启配置集。
  * 不删除目标配置集的独有插件，也不写 desktop。
  */
-function syncPanelProfilePlugins({
+function throwIfCancelled(signal) {
+  if (signal?.aborted) throw Object.assign(new Error('配置准备已取消'), { code: 'ECANCELLED' });
+}
+
+function profileFailure(error, { profile, stage, homedir, env, plan, created = false }) {
+  const state = inspectPanelProfile(profile, { homedir, env });
+  const synced = (plan?.install || []).filter(item => state.bundles.includes(item.name)
+    && (installedVersion(state, item.name) || state.dependencies[item.name]) === item.version).map(item => item.name);
+  const pending = (plan?.install || []).filter(item => !synced.includes(item.name)).map(item => item.name);
+  for (const name of plan?.runtimeBundles || []) (state.bundles.includes(name) ? synced : pending).push(name);
+  error.setupState = { profile, stage, created, exists: state.exists, hasDoor: state.hasDoor, synced, pending };
+  error.message += `\n当前状态：${state.exists ? '配置集已存在' : '配置集尚未创建'}；连接组件${state.hasDoor ? '已启用' : '尚未启用'}${synced.length ? `；已同步 ${synced.join('、')}` : ''}${pending.length ? `；未完成 ${pending.join('、')}` : ''}。已完成的更改已保留，可重新运行准备命令继续。`;
+  return error;
+}
+
+async function syncPanelProfilePlugins({
   command,
   profile = 'vscode-panel',
   sourceProfile = 'desktop',
-  run = runDshSync,
+  run = runDshAsync,
   homedir = os.homedir(),
   env = process.env,
+  signal, onOutput, onProgress,
 } = {}) {
+  throwIfCancelled(signal);
   if (!SAFE_PROFILE.test(String(profile || '')) || !SAFE_PROFILE.test(String(sourceProfile || ''))) {
     throw new Error('插件同步使用的配置集名称不合法。');
   }
@@ -233,8 +246,10 @@ function syncPanelProfilePlugins({
     throw new Error('没有可用的 DSH 命令。');
   }
 
+  try {
   if (plan.install.length > 0) {
-    run({
+    onProgress?.('同步桌面端插件…');
+    await run({
       command,
       args: [
         'plugin',
@@ -244,9 +259,10 @@ function syncPanelProfilePlugins({
         ...plan.install.map((item) => item.argument),
       ],
       timeoutMs: 180000,
+      signal, onOutput, env,
     });
   }
-
+  throwIfCancelled(signal);
   let finalState = inspectPanelProfile(profile, { homedir, env });
   const missing = plan.install.filter((item) => {
     const version = installedVersion(finalState, item.name)
@@ -269,19 +285,22 @@ function syncPanelProfilePlugins({
     synced: [...plan.install.map((item) => item.name), ...plan.runtimeBundles],
     unchanged: false,
   };
+  } catch (error) { throw profileFailure(error, { profile, stage: 'sync-plugins', homedir, env, plan }); }
 }
 
 /**
  * Create the web profile when missing, then install or update dsh-acp-door.
  * The caller invokes this only from the explicit “prepare/repair” command.
  */
-function preparePanelProfile({
+async function preparePanelProfile({
   command,
   profile = 'vscode-panel',
-  run = runDshSync,
+  run = runDshAsync,
   homedir = os.homedir(),
   env = process.env,
+  signal, onOutput, onProgress,
 } = {}) {
+  throwIfCancelled(signal);
   if (!SAFE_PROFILE.test(String(profile || ''))) {
     throw new Error(`配置集名称不合法：${profile}`);
   }
@@ -289,37 +308,46 @@ function preparePanelProfile({
 
   let state = inspectPanelProfile(profile, { homedir, env });
   let created = false;
+  let stage = 'create-profile';
+  try {
   if (!state.exists) {
-    run({
+    onProgress?.('创建面板配置集…');
+    await run({
       command,
       args: ['--profile', profile, '--from-default-profile', 'web', '--dump-config'],
       timeoutMs: 120000,
+      signal, onOutput, env,
     });
     created = true;
     state = inspectPanelProfile(profile, { homedir, env });
     if (!state.exists) throw new Error(`DSH 没有创建配置集 ${profile}。`);
   }
+  throwIfCancelled(signal);
   if (!state.hasWebApp) {
     throw new Error(`配置集 ${profile} 不是可由面板自启的 web 配置集；为避免覆盖现有配置，已停止。`);
   }
 
   const action = state.hasDoor ? 'update' : 'add';
-  run({
+  stage = 'install-door'; onProgress?.(`${action === 'add' ? '安装' : '更新'}连接组件…`);
+  await run({
     command,
     args: ['plugin', '--profile', profile, action, 'dsh-acp-door'],
     timeoutMs: 180000,
+    signal, onOutput, env,
   });
-
+  throwIfCancelled(signal);
   const finalState = inspectPanelProfile(profile, { homedir, env });
   if (!finalState.hasDoor) {
     throw new Error(`命令已完成，但 ${profile} 的插件清单里仍没有 dsh-acp-door。`);
   }
-  const pluginSync = syncPanelProfilePlugins({
+  stage = 'sync-plugins';
+  const pluginSync = await syncPanelProfilePlugins({
     command,
     profile,
     run,
     homedir,
     env,
+    signal, onOutput, onProgress,
   });
   return {
     profile,
@@ -329,6 +357,10 @@ function preparePanelProfile({
     syncedPlugins: pluginSync.synced,
     skippedPlugins: pluginSync.skipped,
   };
+  } catch (error) {
+    if (error.setupState) { error.setupState.created = created; throw error; }
+    throw profileFailure(error, { profile, stage, homedir, env, created });
+  }
 }
 
 module.exports = {

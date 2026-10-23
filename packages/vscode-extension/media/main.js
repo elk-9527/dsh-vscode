@@ -144,9 +144,69 @@
     queue: { items: [], paused: false },
   };
 
-  /** entry → 'body' | 'think'，暂存待渲染的内容。 */
+  /** entry → bit mask（正文 1，思考 2），同一帧可以同时更新两部分。 */
   const pendingRenders = new Map();
   let flushScheduled = false;
+  let renderFrame, renderTimer;
+  const layers = [];
+  const inerted = new Map();
+  function activeLayer() { return layers[layers.length - 1]; }
+  function layerTargets(node) {
+    return [...node.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], summary, [tabindex]:not([tabindex="-1"])')]
+      .filter(target => target.getClientRects().length && getComputedStyle(target).visibility !== 'hidden' && !target.closest('[inert]'));
+  }
+  function focusLayer(layer) {
+    const target = layer.initial?.isConnected && !layer.initial.disabled && layer.initial.getClientRects().length ? layer.initial : layerTargets(layer.node)[0];
+    if (target) target.focus();
+    else { layer.node.tabIndex = -1; layer.node.focus(); }
+  }
+  function syncLayers() {
+    for (const [node, previous] of inerted) node.inert = previous;
+    inerted.clear();
+    const top = activeLayer();
+    if (!top) return;
+    // 沿祖先链隔离兄弟节点，避免把浮层自身放进 inert 容器。
+    for (let node = top.node; node && node !== document.body; node = node.parentElement) {
+      for (const sibling of node.parentElement.children) {
+        if (sibling === node || sibling.tagName === 'SCRIPT' || sibling.tagName === 'LINK') continue;
+        inerted.set(sibling, sibling.inert); sibling.inert = true;
+      }
+    }
+  }
+  function openLayer(node, initial, dismiss, returnFocus = document.activeElement) {
+    let layer = layers.find(item => item.node === node);
+    if (!layer) { layer = { node, returnFocus }; layers.push(layer); }
+    layer.initial = initial; layer.dismiss = dismiss;
+    node.hidden = false; syncLayers();
+    if (activeLayer() === layer) focusLayer(layer);
+  }
+  function closeLayer(node, restoreFocus = true) {
+    const index = layers.findIndex(item => item.node === node);
+    const layer = layers[index], wasTop = layer === activeLayer();
+    if (index >= 0) layers.splice(index, 1);
+    node.hidden = true; syncLayers();
+    if (!restoreFocus || !layer || !wasTop) return;
+    const target = layer.returnFocus;
+    if (target?.isConnected && !target.disabled && !target.closest('[hidden], [inert]')) target.focus();
+    else if (activeLayer()) focusLayer(activeLayer());
+    else if (!state.historyReadonly) el.input.focus();
+  }
+  document.addEventListener('focusin', () => {
+    const top = activeLayer();
+    if (top && !top.node.contains(document.activeElement)) focusLayer(top);
+  });
+  document.addEventListener('keydown', event => {
+    const top = activeLayer();
+    if (!top || event.isComposing || composing || event.keyCode === 229) return;
+    if (event.key === 'Tab') {
+      const targets = layerTargets(top.node), index = targets.indexOf(document.activeElement);
+      if (index < 0 || event.shiftKey && index === 0 || !event.shiftKey && index === targets.length - 1) {
+        event.preventDefault(); (event.shiftKey ? targets.at(-1) : targets[0])?.focus();
+      }
+    } else if (event.key === 'Escape') {
+      event.preventDefault(); event.stopImmediatePropagation(); top.dismiss?.();
+    }
+  }, true);
   let draftCwd = '', draftTrusted = true, draftEdited = false, draftSequence = 0, pendingSend;
   const settingRequests = new Map();
   let pendingRecovery;
@@ -254,7 +314,7 @@
     el.input.readOnly = readonly;
     el.input.placeholder = readonly ? '继续此对话或返回当前对话后发送' : queueMode ? '输入下一条消息，Enter 加入队列' : '描述你要完成的任务…';
     el.send.hidden = false;
-    el.send.disabled = Boolean(readonly || sendSettingsPending || pendingRecovery || pendingSend || pendingChoice || (state.queue.items || []).length + (state.queue.active ? 1 : 0) >= 5);
+    el.send.disabled = Boolean(readonly || sendSettingsPending || pendingRecovery || pendingSend || pendingQueueEdit || pendingChoice || (state.queue.items || []).length + (state.queue.active ? 1 : 0) >= 5);
     el.send.classList.toggle('queue-send', Boolean(queueMode));
     el.send.replaceChildren(queueMode ? document.createTextNode('排队') : sendGlyph.cloneNode(true));
     el.send.title = queueMode ? state.queue.paused ? '加入已暂停队列：需点击继续才会发送' : '排队下一条：当前任务结束后发送' : '发送';
@@ -277,30 +337,36 @@
 
   function renderQueue() {
     const queue = state.queue, items = Array.isArray(queue.items) ? queue.items : [];
-    el.queue.hidden = items.length === 0;
+    el.queue.hidden = items.length === 0 && !queue.recoveryBlocked;
     el.queueSummary.textContent = queue.paused ? `队列已暂停 · ${items.length} 条${queue.reason ? ' · ' + queue.reason : ''}` : `待发送 ${items.length} 条 · 按顺序发送`;
     el.queueContinue.hidden = !queue.paused;
     el.queueContinue.textContent = items.some(item => item.failed) ? '重试并继续' : '继续队列';
-    el.queueContinue.disabled = Boolean(state.busy || queue.active || state.historyReadonly || pendingRecovery || Array.from(settingRequests.values()).some(request => request.setting !== 'permission'));
+    el.queueContinue.disabled = Boolean(state.busy || queue.active || queue.recoveryBlocked || items.some(item => item.uncertain) || state.historyReadonly || pendingRecovery || pendingQueueEdit || Array.from(settingRequests.values()).some(request => request.setting !== 'permission'));
     el.queueList.textContent = '';
+    if (queue.recoveryBlocked) {
+      const discard = document.createElement('button'); discard.type = 'button'; discard.textContent = '放弃旧恢复记录';
+      discard.disabled = state.historyReadonly;
+      discard.addEventListener('click', () => post({ type: 'queueAction', action: 'discardRecovery' }));
+      el.queueList.appendChild(discard);
+    }
     items.forEach((item, index) => {
       const row = document.createElement('div'); row.className = 'queue-item';
       const label = document.createElement('span'); label.className = 'queue-text';
-      label.textContent = `${index + 1}. ${item.failed ? '未完成 · ' : ''}${item.text?.trim() || '仅附件'}${item.attachmentCount ? ` · ${item.attachmentCount} 个附件` : ''}`;
+      label.textContent = `${index + 1}. ${item.uncertain ? '执行结果待确认 · ' : item.failed ? '未完成 · ' : item.restored ? '已恢复 · ' : ''}${item.text?.trim() || '仅附件'}${item.attachmentCount ? ` · ${item.attachmentCount} 个附件` : ''}`;
       label.title = item.text || '仅附件'; row.appendChild(label);
       for (const [action, text] of [['edit', '取回编辑'], ['remove', '移除']]) {
         const button = document.createElement('button'); button.type = 'button'; button.textContent = text;
         button.dataset.action = action; button.dataset.id = item.id;
         button.disabled = state.historyReadonly || action === 'edit' && Boolean(recoveryDrafts.length || pendingQueueEdit || pendingChoice);
         button.addEventListener('click', () => {
-          if (action === 'edit') { if (recoveryDrafts.length || pendingQueueEdit || pendingChoice) return; cancelContext(); closePreview(); closeCompletion(); pendingQueueEdit = { id: item.id, cwd: item.cwd || draftCwd }; renderQueue(); }
+          if (action === 'edit') { if (recoveryDrafts.length || pendingQueueEdit || pendingChoice) return; cancelContext(); closePreview(); closeCompletion(); pendingQueueEdit = { id: item.id, cwd: item.cwd || draftCwd }; syncComposer(); }
           post({ type: 'queueAction', action, id: item.id });
         }); row.appendChild(button);
       }
       el.queueList.appendChild(row);
     });
   }
-  el.queueContinue.addEventListener('click', () => post({ type: 'queueAction', action: 'continue' }));
+  el.queueContinue.addEventListener('click', () => { if (!state.queue.recoveryBlocked && !(state.queue.items || []).some(item => item.uncertain)) post({ type: 'queueAction', action: 'continue' }); });
   el.historyBack.addEventListener('click', () => post({ type: 'historyBack' }));
   el.historyResume.addEventListener('click', () => { if (state.historyId) post({ type: 'historyResume', id: state.historyId }); });
   el.presetNew.addEventListener('click', () => post({ type: 'newSession' }));
@@ -319,6 +385,9 @@
     } catch (error) {
       // 界面出错不得中断消息循环，否则后续处理将全部静默失败。
       showHint(`界面出错：${error && error.message ? error.message : error}`, true);
+    } finally {
+      const top = activeLayer();
+      if (top && (!top.node.contains(document.activeElement) || document.activeElement.disabled)) focusLayer(top);
     }
   });
 
@@ -380,7 +449,24 @@
         if (workflowState) renderWorkflow(workflowState);
         break;
       case 'queueEdit': {
+        if (message.token && pendingQueueEdit?.token && message.token !== pendingQueueEdit.token) break;
+        if (message.phase === 'prepared' && pendingQueueEdit?.token === message.token) break;
+        if (message.phase === 'completed') {
+          if (pendingQueueEdit?.token !== message.token) break;
+          pendingQueueEdit = undefined;
+          showHint(message.error || '已取回待发送消息，编辑后再发送。', Boolean(message.error));
+          syncComposer(); break;
+        }
         const cwd = message.cwd || pendingQueueEdit?.cwd || draftCwd;
+        if (message.phase === 'prepared' && pendingQueueEdit && message.id !== pendingQueueEdit.id) break;
+        if (message.phase === 'prepared') {
+          pendingQueueEdit = { id: message.id, cwd, token: message.token };
+          keepDraft({ text: message.text || '', attachments: message.attachments || [] }, cwd);
+          const draft = cwd === draftCwd ? currentDraft() : draftsByCwd.get(cwd)?.draft;
+          showHint('正在保存取回的消息…');
+          post({ type: 'queueAction', action: 'confirmEdit', id: message.id, token: message.token, draft });
+          syncComposer(); break;
+        }
         pendingQueueEdit = undefined;
         if (message.error) showHint(message.error, true);
         else { showHint('已取回待发送消息，编辑后再发送。'); keepDraft({ text: message.text || '', attachments: message.attachments || [] }, cwd); }
@@ -552,12 +638,12 @@
     closePreview(); closeContext(false); closeCompletion();
     testLogTarget = { turnId: turnId || '', test, trigger, cwd: draftCwd, sessionId: state.sessionId };
     el.testLogBody.value = ''; el.testLogNote.textContent = `任务：${test.label} · 执行 ${test.id}`;
-    el.testLog.hidden = false; el.testLogBody.focus();
+    openLayer(el.testLog, el.testLogBody, closeTestLog, trigger);
   }
   function closeTestLog() {
     if (!el.testLog || el.testLog.hidden) { testLogTarget = undefined; return; }
-    const trigger = testLogTarget?.trigger; testLogTarget = undefined; el.testLog.hidden = true; el.testLogBody.value = '';
-    (trigger?.isConnected ? trigger : el.input).focus();
+    testLogTarget = undefined; el.testLogBody.value = '';
+    closeLayer(el.testLog);
   }
   el.testLogClose.addEventListener('click', closeTestLog);
   el.testLogAccept.addEventListener('click', () => {
@@ -734,7 +820,7 @@
     el.reasoningSelect.disabled = busy;
     el.input.disabled = false;
     syncComposer();
-    if (!busy && !state.historyReadonly) el.input.focus();
+    if (!busy && !state.historyReadonly && !activeLayer() && (document.activeElement === document.body || document.activeElement === el.stop)) el.input.focus();
     // 回合开始与结束驱动顶栏的时间戳与耗时显示。
     if (busy) startTurnClock();
     else stopTurnClock();
@@ -828,10 +914,6 @@
   }
   function toggleHistory(open) {
     const show = open === undefined ? el.historyPanel.hidden : open;
-    // 隐藏前先记录焦点是否位于浮层内：元素一旦 hidden，焦点会自动落到 body，
-    // 届时再查询将始终为 false。
-    const focusWasInside = el.historyPanel.contains(document.activeElement);
-    el.historyPanel.hidden = !show;
     el.historyBtn.setAttribute('aria-expanded', show ? 'true' : 'false');
     if (show) {
       el.historyList.textContent = '';
@@ -840,11 +922,11 @@
       loading.textContent = '正在读取历史会话…';
       el.historyList.appendChild(loading);
       el.historyMeta.textContent = '';
-      el.historyClose.focus();
+      openLayer(el.historyPanel, el.historyClose, () => toggleHistory(false));
       requestHistory();
       return;
     }
-    if (focusWasInside) el.historyBtn.focus();
+    closeLayer(el.historyPanel);
   }
 
   /** 会话时间显示：当年的仅显示「月-日 时:分」，非当年的附带年份。 */
@@ -896,10 +978,14 @@
     } else {
       el.historyMeta.textContent = sessions.length ? `共 ${sessions.length} 段` : '';
     }
+    const limitations = [];
+    if (message.limitation) limitations.push(message.limitation);
+    if (message.via === 'cache' && Number.isFinite(message.cachedAt)) limitations.push(`只读摘要缓存 · ${new Date(message.cachedAt).toLocaleString()} · 当前筛选与分页`);
+    if (limitations.length) el.historyMeta.textContent = [el.historyMeta.textContent, ...limitations].filter(Boolean).join(' · ');
     if (sessions.length === 0) {
       const box = document.createElement('div');
       box.className = 'history-empty';
-      box.textContent = '暂无历史会话。';
+      box.textContent = message.emptyReason === 'unsupported-format' || message.unsupported > 0 ? '本地降级无法读取新版会话；连接内核后可查看历史。' : '暂无历史会话。';
       el.historyList.appendChild(box);
       return;
     }
@@ -976,10 +1062,11 @@
    */
   function renderReplay(message) {
     toggleHistory(false);
+    clearPendingRenders();
     state.messages.clear();
     turnCards.clear();
     el.messages.textContent = '';
-    el.permission.hidden = true;
+    hidePermission(true);
     el.empty.hidden = true;
     // 不复用 scrollToBottom：该函数会将 pinned 设为 true 并滚动到底部。
     state.pinned = false;
@@ -1005,7 +1092,7 @@
         entry.text = item.text || '';
         if (item.thinking) {
           entry.thinking.hidden = false;
-          entry.thinkBody.textContent = item.thinking;
+          entry.thinkText = item.thinking;
         }
         finishAssistant(lastAssistantId);
         continue;
@@ -1047,13 +1134,14 @@
   // ── 转录区 ──────────────────────────────────────────
 
   function resetTranscript() {
+    clearPendingRenders();
     state.messages.clear();
     turnCards.clear();
     renderAttachments();
     el.messages.textContent = '';
     el.messages.appendChild(el.empty);
     el.empty.hidden = false;
-    el.permission.hidden = true;
+    hidePermission(true);
     el.meter.hidden = true;
     el.usageInline.textContent = '';
     // 新建对话即新的开始，上一回合的「开始时刻 · 耗时」不再具有意义。
@@ -1242,17 +1330,19 @@
     el.previewBody.textContent = typeof item.text === 'string' ? item.text : '';
     el.previewBody.hidden = typeof item.text !== 'string';
     el.previewNote.textContent = item.previewNote || (scope === 'git-diff' ? '只读 Git 补丁快照，不含未保存编辑和未跟踪文件；再次添加可更新，发送时附加此正文。' : scope === 'diagnostics' ? '只读诊断快照；没有运行测试或审查，诊断可能尚未更新。再次添加可更新，发送时附加此正文。' : typeof item.text === 'string' ? '只读快照；发送时附加此正文。原文件之后的修改不会改变它，再次添加可更新。' : '旧附件未保存正文，无法预览或发送。请移除后重新添加。');
-    el.preview.hidden = false; el.previewClose.focus();
+    openLayer(el.preview, el.previewClose, closePreview, previewReturnFocus);
   }
   function closePreview() {
     if (el.preview.hidden) return;
-    el.preview.hidden = true; el.previewBody.textContent = '';
-    const target = previewReturnFocus; previewReturnFocus = undefined; previewItemId = undefined;
-    (target?.isConnected ? target : el.input).focus();
+    el.previewBody.textContent = '';
+    previewReturnFocus = undefined; previewItemId = undefined;
+    closeLayer(el.preview);
   }
   el.previewClose.addEventListener('click', closePreview);
 
   function addAssistant(id) {
+    const existing = state.messages.get(id);
+    if (existing) return existing;
     const wrap = document.createElement('div');
     wrap.className = 'msg msg-assistant';
     wrap.dataset.id = id;
@@ -1278,7 +1368,9 @@
     wrap.appendChild(body);
     appendNode(wrap);
 
-    state.messages.set(id, { node: wrap, body, thinking, thinkBody, tools, text: '', thinkText: '' });
+    const entry = { node: wrap, body, thinking, thinkBody, tools, text: '', thinkText: '' };
+    state.messages.set(id, entry);
+    return entry;
   }
 
   function textMessage(id) {
@@ -1311,24 +1403,30 @@
    * 因此由定时器作为后备。
    */
   function scheduleRender(entry, which) {
-    pendingRenders.set(entry, which);
+    if (entry.finished) return;
+    pendingRenders.set(entry, (pendingRenders.get(entry) || 0) | (which === 'body' ? 1 : 2));
     if (flushScheduled) return;
     flushScheduled = true;
-    requestAnimationFrame(flushRenders);
-    setTimeout(flushRenders, 120);
+    renderFrame = requestAnimationFrame(flushRenders);
+    renderTimer = setTimeout(flushRenders, 120);
   }
 
+  function cancelRenderFlush() {
+    if (renderFrame !== undefined) cancelAnimationFrame(renderFrame);
+    clearTimeout(renderTimer);
+    renderFrame = renderTimer = undefined; flushScheduled = false;
+  }
+  function clearPendingRenders() { cancelRenderFlush(); pendingRenders.clear(); }
   function flushRenders() {
+    cancelRenderFlush();
     if (pendingRenders.size === 0) {
-      flushScheduled = false;
       return;
     }
-    flushScheduled = false;
-    for (const [entry, which] of pendingRenders) {
+    for (const [entry, parts] of pendingRenders) {
       // 已结束的条目不再补充渲染，否则会重新绘制光标。
       if (entry.finished) continue;
-      if (which === 'body') entry.body.innerHTML = renderMarkdown(entry.text) + caret();
-      else if (which === 'think') entry.thinkBody.textContent = entry.thinkText;
+      if (parts & 1) entry.body.innerHTML = renderMarkdown(entry.text) + caret();
+      if (parts & 2) entry.thinkBody.textContent = entry.thinkText;
     }
     pendingRenders.clear();
     scrollIfPinned();
@@ -1340,9 +1438,12 @@
 
   function finishAssistant(id, status) {
     const entry = state.messages.get(id);
-    if (!entry) return;
+    if (!entry || entry.finished) return;
     entry.finished = true;
+    pendingRenders.delete(entry);
+    if (!pendingRenders.size) cancelRenderFlush();
     entry.body.innerHTML = renderMarkdown(entry.text);
+    entry.thinkBody.textContent = entry.thinkText;
     if (status === 'cancelled') {
       entry.node.appendChild(note('（已中断）'));
     } else if (status === 'error') {
@@ -1441,9 +1542,17 @@
 
   // ── 工具卡片 ────────────────────────────────────────
 
+  const toolDetails = new WeakMap();
+  let toolSequence = 0;
+  function renderToolDetails(card) {
+    const details = toolDetails.get(card);
+    if (!details?.dirty) return;
+    card.querySelector('.tool-body').innerHTML = renderToolBody(details.tool);
+    details.dirty = false;
+  }
   function upsertTool(messageId, tool) {
     if (!tool || !tool.toolCallId) return;
-    const entry = messageId ? state.messages.get(messageId) : null;
+    const entry = messageId ? textMessage(messageId) : null;
     const host = entry ? entry.tools : el.messages;
 
     let card = host.querySelector
@@ -1453,7 +1562,8 @@
       card = document.createElement('div');
       card.className = 'tool';
       card.dataset.tool = tool.toolCallId;
-      const head = document.createElement('div');
+      const head = document.createElement('button');
+      head.type = 'button';
       head.className = 'tool-head';
       head.setAttribute('aria-expanded', 'false');
       const name = document.createElement('span');
@@ -1467,13 +1577,18 @@
       head.appendChild(status);
       const body = document.createElement('div');
       body.className = 'tool-body';
+      body.id = `tool-body-${++toolSequence}`;
+      head.setAttribute('aria-controls', body.id);
       // 折叠动画外包裹一层 grid（见 main.css 中 .tool-fold 的说明）。
       const fold = document.createElement('div');
       fold.className = 'tool-fold';
+      fold.setAttribute('aria-hidden', 'true');
       fold.appendChild(body);
       head.addEventListener('click', () => {
         const open = card.classList.toggle('open');
         head.setAttribute('aria-expanded', open ? 'true' : 'false');
+        fold.setAttribute('aria-hidden', open ? 'false' : 'true');
+        if (open) renderToolDetails(card);
       });
       card.appendChild(head);
       card.appendChild(fold);
@@ -1483,14 +1598,15 @@
     const name = card.querySelector('.tool-name');
     const title = card.querySelector('.tool-title');
     const statusEl = card.querySelector('.tool-status');
-    const bodyEl = card.querySelector('.tool-body');
 
     name.textContent = toolName(tool);
     title.textContent = describeTool(tool);
     const statusInfo = statusOf(tool.status);
     statusEl.textContent = statusInfo.text;
     statusEl.className = `tool-status ${statusInfo.cls}`;
-    bodyEl.innerHTML = renderToolBody(tool);
+    // 保留原始输出，首次展开才构建详情 DOM。已展开的流式工具仍即时更新。
+    toolDetails.set(card, { tool, dirty: true });
+    if (card.classList.contains('open')) renderToolDetails(card);
     scrollIfPinned();
   }
 
@@ -1973,13 +2089,29 @@
 
   // ── 权限询问 ────────────────────────────────────────
 
-  function hidePermission() {
-    el.permission.hidden = true;
+  const permissionQueue = [];
+  function hidePermission(deny = false) {
+    const requests = permissionQueue.splice(0);
+    if (deny) for (const request of requests) post({ type: 'permission', requestId: request.requestId, optionId: null });
+    closeLayer(el.permission);
     el.permissionActions.textContent = '';
     el.permissionBody.textContent = '';
   }
 
   function showPermission(message) {
+    if (permissionQueue.some(request => request.requestId === message.requestId)) return;
+    permissionQueue.push(message);
+    if (permissionQueue.length === 1) renderPermission();
+  }
+  function answerPermission(optionId) {
+    const request = permissionQueue.shift();
+    if (!request) return;
+    post({ type: 'permission', requestId: request.requestId, optionId });
+    if (permissionQueue.length) renderPermission();
+    else hidePermission();
+  }
+  function renderPermission() {
+    const message = permissionQueue[0];
     const params = message.params || {};
     const tool = params.toolCall || {};
     el.permissionTitle.textContent = tool.title || 'DSH 需要许可';
@@ -1991,8 +2123,7 @@
       button.type = 'button';
       button.textContent = option.name || option.optionId;
       button.addEventListener('click', () => {
-        hidePermission();
-        post({ type: 'permission', requestId: message.requestId, optionId: option.optionId });
+        if (permissionQueue[0] === message) answerPermission(option.optionId);
       });
       el.permissionActions.appendChild(button);
     }
@@ -2001,12 +2132,13 @@
       button.type = 'button';
       button.textContent = '拒绝';
       button.addEventListener('click', () => {
-        hidePermission();
-        post({ type: 'permission', requestId: message.requestId, optionId: null });
+        if (permissionQueue[0] === message) answerPermission(null);
       });
       el.permissionActions.appendChild(button);
     }
-    el.permission.hidden = false;
+    const buttons = [...el.permissionActions.querySelectorAll('button')];
+    const rejectIndex = options.findIndex(option => /^reject/.test(option.kind || ''));
+    openLayer(el.permission, buttons[rejectIndex < 0 ? 0 : rejectIndex], () => answerPermission(null));
   }
 
   // ── 输入 ────────────────────────────────────────────
@@ -2016,17 +2148,17 @@
   function closeContext(restoreFocus = true) {
     clearTimeout(contextTimer); contextRequest = undefined;
     const wasOpen = !el.contextPanel.hidden;
-    el.contextPanel.hidden = true; el.contextOpen.setAttribute('aria-expanded', 'false');
+    el.contextOpen.setAttribute('aria-expanded', 'false');
     el.contextSearch.removeAttribute('aria-activedescendant');
     if (wasOpen) post({ type: 'composerCancel' });
-    if (wasOpen && restoreFocus) (contextReturnFocus?.isConnected ? contextReturnFocus : el.contextOpen).focus();
+    closeLayer(el.contextPanel, restoreFocus);
   }
   function cancelContext() { closeContext(false); }
   function openContext(trigger) {
     if (pendingChoice || state.historyReadonly || !draftTrusted) return;
     closeCompletion(); closePreview(); contextReturnFocus = trigger;
-    el.contextPanel.hidden = false; el.contextOpen.setAttribute('aria-expanded', 'true');
-    el.contextSearch.focus(); queryContext();
+    el.contextOpen.setAttribute('aria-expanded', 'true');
+    openLayer(el.contextPanel, el.contextSearch, closeContext, trigger || el.contextOpen); queryContext();
   }
   function queryContext() {
     if (el.contextPanel.hidden || pendingChoice) return;
@@ -2211,13 +2343,6 @@
 
   // Esc 优先关闭浮层或候选；没有浮层时停止当前任务并保留草稿。
   document.addEventListener('keydown', (event) => {
-    const modal = !el.testLog.hidden ? el.testLog : !el.preview.hidden ? el.preview : !el.contextPanel.hidden ? el.contextPanel : undefined;
-    if (modal && event.key === 'Tab') {
-      const targets = [...modal.querySelectorAll('button:not(:disabled), input, textarea, [tabindex="0"]')].filter(node => !node.hidden && node.getClientRects().length);
-      const first = targets[0], last = targets[targets.length - 1];
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
-    }
     if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || composing || event.keyCode === 229) return;
     if (!el.testLog.hidden) { event.preventDefault(); event.stopPropagation(); closeTestLog(); return; }
     if (!el.preview.hidden) { event.preventDefault(); event.stopPropagation(); closePreview(); return; }
