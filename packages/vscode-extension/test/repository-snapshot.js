@@ -4,11 +4,10 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { repositorySnapshot, sameRepositorySnapshot, validateReviewInput } = require('../src/bridge/results');
+const { createFixture } = require('../../../tools/test-workspace.cjs');
 
 (async () => {
-  const parent = path.resolve(__dirname, '../../../build/test-snapshots');
-  await fs.mkdir(parent, { recursive: true });
-  const root = await fs.mkdtemp(path.join(parent, 'repo-'));
+  const root = createFixture('snapshot-repo'), parent = path.dirname(root);
   const git = (...args) => execFileSync('git', args, { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   git('init', '-q');
   const empty = await repositorySnapshot(root);
@@ -31,7 +30,7 @@ const { repositorySnapshot, sameRepositorySnapshot, validateReviewInput } = requ
   assert.match(await validateReviewInput(root, { mode: 'commit', ref: 'HEAD' }), /^[a-f0-9]{40,64}$/);
   const stop = new AbortController(); stop.abort();
   await assert.rejects(repositorySnapshot(root, { signal: stop.signal }), error => error.name === 'AbortError');
-  const outside = await fs.mkdtemp(path.join(parent, 'non-git-'));
+  const outside = createFixture('snapshot-non-git');
   const previous = process.env.GIT_CEILING_DIRECTORIES;
   process.env.GIT_CEILING_DIRECTORIES = parent;
   try { await assert.rejects(repositorySnapshot(outside), error => error.code === 'NOT_GIT_REPOSITORY'); }
