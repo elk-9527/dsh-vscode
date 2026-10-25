@@ -7,7 +7,23 @@ const { ROOT, locate, redact, sha256 } = require('../compat/lib.cjs');
 const { isolatedEditorOptions, ownsEditorProcess, editorProcessRoots } = require('../../packages/vscode-extension/tools/editor-isolation.cjs');
 const { probeEditorContext, requireEditorContext, installedEditor } = require('./editor-context.cjs');
 
-async function checkEditor({ folder, cwd, port, vsix }) {
+/** Report outputs and the owned runtime home have separate paths. */
+function editorHomeCheck({ folder, runtimeHome }) {
+  const reportFolder = path.resolve(folder), underBuild = path.relative(path.join(ROOT, 'build'), reportFolder);
+  assert(underBuild && underBuild !== '..' && !underBuild.startsWith('..' + path.sep) && !path.isAbsolute(underBuild), '验收目录必须位于本项目 build 内');
+  assert(typeof runtimeHome === 'string' && path.isAbsolute(runtimeHome), '需要显式提供隔离运行时 home');
+  assert.equal(runtimeHome, path.resolve(runtimeHome), '运行时 home 必须是规范绝对路径');
+  const relative = path.relative(reportFolder, runtimeHome).split(path.sep);
+  assert(relative.length === 1 && relative[0] === 'home'
+    || relative.length === 2 && /^work-[A-Za-z0-9]+$/.test(relative[0]) && relative[1] === 'home', '运行时 home 不属于本次验收目录');
+  require('../run-resources.cjs').plainParents(runtimeHome);
+  assert(fs.statSync(runtimeHome).isDirectory(), '运行时 home 必须存在');
+  assert.equal(process.env.DSH_HOME, runtimeHome, 'DSH_HOME 与本次运行时 home 不一致');
+  return `check('isolated endpoint home',process.env.DSH_HOME===${JSON.stringify(runtimeHome)});`;
+}
+
+async function checkEditor({ folder, cwd, port, vsix, runtimeHome }) {
+  const homeCheck = editorHomeCheck({ folder, runtimeHome });
   assert.equal(typeof vsix, 'string', '需要显式提供候选 VSIX');
   assert(fs.statSync(vsix).isFile(), '候选 VSIX 不存在');
   const candidateSha256 = sha256(vsix);
@@ -87,7 +103,7 @@ async function run() {
     const catalog = await api.listCapabilities(); check('runtime providers', catalog.capabilities.length >= 7);
     const status = await api.getConnectionStatus(); check('one shared connection', status.connectionCount === 1);
     check('no code completion capability', !observed.nativeViews.connections.status.capabilities.codeCompletion && !observed.nativeViews.connections.status.capabilities.completionWorkspaceContext);
-    check('isolated endpoint home',process.env.DSH_HOME===${JSON.stringify(path.join(folder, 'home'))});
+    ${homeCheck}
     const endpointFile=require('node:path').join(process.env.DSH_HOME,'run','dsh-acp-door',${JSON.stringify(String(port) + '.json')});
     const endpointCheck={exists:fs.existsSync(endpointFile),node:process.version};
     try {
@@ -313,7 +329,7 @@ async function run() {
 };
 `);
   assert(fs.existsSync(code), '找不到 VS Code');
-  const isolation = isolatedEditorOptions({ userData, extensions, sharedData, env: { ...process.env, DSH_PANEL_AUTOFOCUS: '0' } });
+  const isolation = isolatedEditorOptions({ userData, extensions, sharedData, env: { ...process.env, DSH_HOME: runtimeHome, DSH_PANEL_AUTOFOCUS: '0' } });
   const diagnosticLaunchFlags = process.env.DSH_PANEL_EDITOR_NO_SANDBOX === '1' ? ['--no-sandbox'] : process.env.DSH_PANEL_EDITOR_DISABLE_GPU === '1' ? ['--disable-gpu'] : [];
   const launch = () => {
     const child = spawn(code, [...isolation.args, '--new-window', '--verbose', '--disable-workspace-trust', ...diagnosticLaunchFlags, cwd, path.join(cwd, 'sample.js')],
@@ -355,4 +371,4 @@ async function run() {
     } else if (child.exitCode === null) child.kill();
   }
 }
-module.exports = { checkEditor };
+module.exports = { checkEditor, editorHomeCheck };

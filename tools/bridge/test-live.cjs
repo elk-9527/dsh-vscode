@@ -45,7 +45,8 @@ async function run() {
     const suppliedVsixSha256 = supplied.vsix?.sha256;
     await stage('loopback-environment', () => require('../compat/loopback.cjs').verifyLoopback());
     for (const k of Object.keys(proxy)) delete process.env[k];
-    process.env.DSH_HOME = path.join(work, 'home'); fs.mkdirSync(process.env.DSH_HOME, { recursive: true });
+    const runtimeHome = path.join(work, 'home');
+    process.env.DSH_HOME = runtimeHome; fs.mkdirSync(runtimeHome, { recursive: true });
     const runtime = resolveRuntime({ dsh: versionArgument || '0.2.0-rc.2' }); report.runtime = runtime;
     const cwd = path.join(work, 'workspace'); fs.mkdirSync(cwd);
     fs.writeFileSync(path.join(cwd, 'sample.js'), 'export function sum(a, b) { return a - b; }\n');
@@ -161,7 +162,7 @@ async function run() {
       model.setReviewDelay(5000);
       bridge.dispose(); session.dispose(); client.close();
       await new Promise(resolve => setTimeout(resolve, 200));
-      await stage('packed-vsix-native-editor', () => require('./editor-check.cjs').checkEditor({ folder, cwd, port, vsix }));
+      await stage('packed-vsix-native-editor', () => require('./editor-check.cjs').checkEditor({ folder, cwd, port, vsix, runtimeHome }));
       await stage('packed-context-model-transport', () => {
         assert(model.requests.some(request => { const body = JSON.stringify(request); return body.includes('CONTEXT_DIAGNOSTIC_MARKER') && body.includes('Git 变更补丁快照'); }), '模型服务未收到 Git 与问题诊断正文');
         return { gitDiffAndDiagnostics: true };
