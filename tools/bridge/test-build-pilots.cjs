@@ -45,7 +45,13 @@ try {
     }
     compare(upstream);
     assert(entries.some(entry => entry.path === 'package/lib/index.js'));
-    assert.equal(JSON.parse(fs.readFileSync(path.join(packaged, 'package.json'))).version, pilot.candidate);
+    const pkg = JSON.parse(fs.readFileSync(path.join(packaged, 'package.json')));
+    assert.equal(pkg.version, pilot.candidate);
+    assert(fs.readFileSync(path.join(packaged, 'lib/index.js'), 'utf8').includes(`version: '${pkg.version}'`), 'Bridge provider must advertise the installed candidate version');
+    for (const [name, range] of Object.entries(pkg.peerDependencies || {})) if (name.startsWith('@deepseek-ai/dsh')) {
+      assert(require('semver').satisfies('0.2.1-rc.3', range), name + ' must accept the exact rc.3 runtime');
+      assert(!require('semver').satisfies('0.2.1-rc.4', range), name + ' must not accept an unknown prerelease');
+    }
   }
   assert(unicodeFiles >= 11, 'Regression must include the upstream Chinese documentation paths');
   console.log(`PASS cold registry build of ${manifest.length} pilot packages with an empty profile/cache; ${unicodeFiles} Unicode files preserved`);

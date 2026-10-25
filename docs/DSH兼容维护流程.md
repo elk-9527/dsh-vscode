@@ -10,7 +10,7 @@ PR 自动运行固定代表内核 `0.1.5-rc.2`、`0.2.0-rc.2`、`0.2.1-alpha.1`�
 
 ## 维护目标与边界
 
-维护对象为 VS Code 扩展 `dsh-acp-panel` 与 ACP 接入点插件（`dsh-acp-door`）。每次 DSH 更新按本文执行；先记录环境与失败，再修改兼容层。版本范围变更本身不构成兼容证明。维护范围为 DSH `0.1.5-rc.2`、`0.2.0-rc.1`、`0.2.0-rc.2` 及预览版 `0.2.1-alpha.1`、`0.2.1-rc.2`。精确发行物和源码指纹的验收状态以兼容矩阵为准。
+维护对象为 VS Code 扩展 `dsh-acp-panel` 与 ACP 接入点插件（`dsh-acp-door`）。每次 DSH 更新按本文执行；先记录环境与失败，再修改兼容层。版本范围变更本身不构成兼容证明。维护范围为 DSH `0.1.5-rc.2`、`0.2.0-rc.1`、`0.2.0-rc.2` 及预览版 `0.2.1-alpha.1`、`0.2.1-rc.2`。`0.2.1-rc.3` 列为候选必测版本。精确发行物和源码指纹的验收状态以兼容矩阵为准。
 
 仅维护本机 Windows 接入、自启、会话、模型、权限、历史与配置继承。Bridge 试点另执行注册、鉴权、技能和原生审查验收。市场发布由维护者显式执行。
 
@@ -31,6 +31,8 @@ PR 自动运行固定代表内核 `0.1.5-rc.2`、`0.2.0-rc.2`、`0.2.1-alpha.1`�
 
 - `compat:doctor` 只读检查 DSH 安装、Desktop 内置版本、CLI 候选、两个配置集的安装状态、peer 声明与 ACP 状态；默认文本，`--json` 输出结构化脱敏结果。不得写配置、安装插件或启动内核。
 - `compat:test -- --dsh <版本> --tgz <候选接入点>` 使用隔离的 `DSH_HOME`、临时工作目录和空闲回环端口。默认使用本机匹配版本；`--install` 在隔离目录取得指定 npm 发行版。`--command <命令>` 可指定启动入口。真实测试安装明确传入的候选接入点，不自行重新打包。
+- ACP rc.2/rc.3 的直接文本生成是必测阶段，不能以可选缺失跳过；检查该阶段全部 HTTP 请求的空工具集合、零工具事件、直接取消/失败恢复与模型切换。
+- Bridge 验收可用 `--pilot-manifest <路径>` 选择 `build-pilots.cjs --out <新目录>` 生成的隔离试点清单；旧适配版本、重复/缺少包和归档摘要变化会在安装前拒绝。原有默认清单路径继续可用。
 - `compat:test -- --discover` 查询官方稳定版及预发布版，输出精确版本的 CI 矩阵。获取失败记录为 `acquisition-failed`，接口或功能失败记录为 `failed`，环境缺失记录为 `unavailable`。
 - `compat:test -- --dsh <版本> --record` 在全部必测通过后显式登记矩阵，公开的版本、摘要与检查状态写入 `compat/evidence/public-*.json`；也可用 `--record-report <已完成报告>` 登记同一源码指纹的报告。完整运行资料保留在本地，新候选先建立 `pending` 条目，CI 不自动登记支持。
 - `compat:local` 验收已安装候选包：`--mode attach` 记录桌面接入；桌面完全退出后 `--mode self --desktop-closed` 对比配置并执行真实模型文件工具；`--mode editor --path attach|self` 从最终 VSIX 解包并在隔离编辑器验证对应路径；`--mode installed` 比对装机文件。各次运行使用同一个 `--out build/compat/local-report.json` 汇总证据。

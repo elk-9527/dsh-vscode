@@ -8,12 +8,29 @@ const { runDshSync } = require('../../packages/vscode-extension/src/door/locate'
 const { extractPackageArchive } = require('./package-archive.cjs');
 const ROOT = path.resolve(__dirname, '../..');
 const PILOTS = [
-  { name: '@michengai/dsh-code-review', version: '0.1.9', candidate: '0.1.9-ide.7',
+  { name: '@michengai/dsh-code-review', version: '0.1.9', candidate: '0.1.9-ide.8',
     sha256: 'd77a24a0f54c69728112fbd6817c643c1489f006045cefb6d328bab1d9bdc606',
     runtimeSha256: '7df2296398e2508af6dd87525bf0c3af2ae56c9f7ed182334228532a1326b54d', key: 'review' },
-  { name: '@linxin666/dsh-client-ui-skill-explorer', version: '0.4.4', candidate: '0.4.4-ide.6',
+  { name: '@linxin666/dsh-client-ui-skill-explorer', version: '0.4.4', candidate: '0.4.4-ide.7',
     sha256: 'd09440cf5557d3e3bf09a35fbea05f3fbfae073e25b3658344bd63d95a666862', key: 'skills' },
 ];
+/** Bind an isolated pilot build by current adapter version and exact archive bytes. */
+function loadPilots(file = path.join(ROOT, 'build/ide-bridge/pilots/manifest.json')) {
+  if (typeof file !== 'string') throw new Error('需要显式的 pilot manifest 路径');
+  const records = JSON.parse(fs.readFileSync(path.resolve(file), 'utf8'));
+  if (!Array.isArray(records) || records.length !== PILOTS.length) throw new Error('Pilot manifest 包数量不匹配');
+  for (const expected of PILOTS) {
+    const matches = records.filter(item => item.name === expected.name);
+    const record = matches[0];
+    if (matches.length !== 1 || ['version', 'candidate', 'key', 'sha256', 'runtimeSha256'].some(key => record[key] !== expected[key])) throw new Error('Pilot manifest 与当前适配输入不同；请在新目录重新构建');
+    if (typeof record.file !== 'string' || !/^[a-f0-9]{64}$/.test(record.packageSha256 || '')) throw new Error('Pilot 归档路径或摘要无效');
+    const archive = path.resolve(ROOT, record.file), relative = path.relative(path.join(ROOT, 'build'), archive);
+    if (!relative || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) throw new Error('Pilot 归档必须位于本项目 build');
+    require('../run-resources.cjs').plainParents(archive);
+    if (!fs.statSync(archive).isFile() || createHash('sha256').update(fs.readFileSync(archive)).digest('hex') !== record.packageSha256) throw new Error('Pilot 归档摘要已变化');
+  }
+  return records;
+}
 /** 从已校验的上游发行包生成候选包，不改动已安装插件目录。 */
 function build({ home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh'),
   output = path.join(ROOT, 'build/ide-bridge/pilots'), fresh = false } = {}) {
@@ -54,7 +71,7 @@ function build({ home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh'),
       execFileSync(process.execPath, ['--check', path.join(target, 'lib', name)], { windowsHide: true, timeout: 10000, stdio: 'pipe' });
     }
     manifest.version = pilot.candidate;
-    for (const version of ['0.2.1-alpha.1', '0.2.1-rc.2']) {
+    for (const version of ['0.2.1-alpha.1', '0.2.1-rc.2', '0.2.1-rc.3']) {
       for (const [name, range] of Object.entries(manifest.peerDependencies || {})) if (name.startsWith('@deepseek-ai/dsh') && !range.includes(version)) manifest.peerDependencies[name] = range + ' || ' + version;
       if (manifest.dsh?.engines?.dsh && !manifest.dsh.engines.dsh.includes(version)) manifest.dsh.engines.dsh += ' || ' + version;
     }
@@ -82,4 +99,4 @@ if (require.main === module) {
   }
   build({ fresh: options.fresh === true, output: options.out });
 }
-module.exports = { PILOTS, build };
+module.exports = { PILOTS, build, loadPilots };

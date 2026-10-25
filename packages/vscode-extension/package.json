@@ -2,7 +2,7 @@
   "name": "dsh-acp-panel",
   "displayName": "DSH ACP Panel",
   "description": "在 VS Code 使用 DeepSeek Harness：对话、工具、代码审查、技能浏览和插件运行记录。",
-  "version": "0.18.1",
+  "version": "0.18.2",
   "publisher": "Elk-ydy",
   "license": "MIT",
   "icon": "media/icon.png",

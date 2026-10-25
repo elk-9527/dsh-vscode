@@ -54,8 +54,9 @@ async function run() {
     }
     // 在隔离配置集中由正式插件管理器安装，避免复制依赖后沿用原虚拟仓库位置。
     const sdkFile = supplied.sdk.file;
-    const pilotFiles = JSON.parse(fs.readFileSync(path.join(ROOT, 'build/ide-bridge/pilots/manifest.json'), 'utf8')).map(item => path.join(ROOT, item.file));
-    const skillPilot = JSON.parse(fs.readFileSync(path.join(ROOT, 'build/ide-bridge/pilots/manifest.json'), 'utf8')).find(item => item.key === 'skills');
+    const pilots = require('./build-pilots.cjs').loadPilots(options['pilot-manifest']);
+    const pilotFiles = pilots.map(item => path.join(ROOT, item.file));
+    const skillPilot = pilots.find(item => item.key === 'skills');
     const pilotFile = path.join(ROOT, skillPilot.file); assert.equal(sha256(pilotFile), skillPilot.packageSha256);
     const previousHome = process.env.DSH_HOME;
     require('./packages.cjs').pinSdk(profile, sdkFile);

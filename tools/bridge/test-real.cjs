@@ -40,7 +40,8 @@ async function run() {
       const backup = path.join(folder,'profile-before'); fs.mkdirSync(backup);
       for (const name of ['package.json','pnpm-lock.yaml','pnpm-workspace.yaml','cordis.yml','cordis.patch.yml']) if(fs.existsSync(path.join(directory,name))) fs.copyFileSync(path.join(directory,name),path.join(backup,name));
     } else locate.runDshSync({command:runtime.command,args:['--profile',profile,'--from-default-profile','web','--dump-config']});
-    const pilots = JSON.parse(fs.readFileSync(path.join(ROOT,'build/ide-bridge/pilots/manifest.json')));
+    const pilotManifest = options['pilot-manifest'] || path.join(ROOT, 'build/ide-bridge/pilots/manifest.json');
+    const pilots = require('./build-pilots.cjs').loadPilots(pilotManifest), pilotDirectory = path.dirname(path.resolve(pilotManifest));
     const candidates = [supplied.tgz.file,supplied.sdk.file,...pilots.map(p=>path.join(ROOT,p.file))].map(file=>{
       const persistent=path.join(ROOT,'build/install',`${path.basename(file,'.tgz')}-${sha256(file).slice(0,16)}.tgz`);
       fs.mkdirSync(path.dirname(persistent),{recursive:true}); if(!fs.existsSync(persistent)) fs.copyFileSync(file,persistent); return persistent;
@@ -48,7 +49,7 @@ async function run() {
     require('./packages.cjs').pinSdk(directory, candidates[1]);
     locate.runDshSync({command:runtime.command,args:['plugin','--profile',profile,'add',...candidates.map(file=>`file:${file.replace(/\\/g,'/')}`)],timeoutMs:180000});
     assert.deepEqual(require('../../packages/vscode-extension/test/helpers/door').inspectDoor(profile).drift,[],'Installed Door differs from current source.');
-    for(const pilot of pilots) assert.equal(sha256(path.join(directory,'node_modules',pilot.name,'lib/index.js')),sha256(path.join(ROOT,'build/ide-bridge/pilots',`${pilot.key}-${pilot.candidate}`,'lib/index.js')));
+    for(const pilot of pilots) assert.equal(sha256(path.join(directory,'node_modules',pilot.name,'lib/index.js')),sha256(path.join(pilotDirectory,`${pilot.key}-${pilot.candidate}`,'lib/index.js')));
     const manifestFile = path.join(directory,'package.json'), manifest = JSON.parse(fs.readFileSync(manifestFile));
     const source = JSON.parse(fs.readFileSync(path.join(directory,'../desktop/package.json')));
     manifest.dsh.profile.bundles = [...new Set([...manifest.dsh.profile.bundles,...source.dsh.profile.bundles.filter(name=>/^@deepseek-ai\/dsh-experimental-/.test(name))])];

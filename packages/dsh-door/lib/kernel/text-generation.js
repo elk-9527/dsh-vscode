@@ -2,9 +2,35 @@ import { randomUUID } from 'node:crypto';
 
 export const TEXT_GENERATE = 'dsh-door/text/generate';
 const fail = (message, code = -32042) => { throw Object.assign(new Error(message), { code }); };
-/** The direct LLM service has no agent loop or tool dispatcher. Verified for this runtime generation. */
+/** These runtime generations expose the same direct stream contract, without an agent tool dispatcher. */
 export function textGenerationSupported(llm, version) {
-  return version === '0.2.1-rc.2' && typeof llm?.stream === 'function';
+  return ['0.2.1-rc.2', '0.2.1-rc.3'].includes(version) && typeof llm?.stream === 'function';
+}
+/** Follow only successful ACP projections: Agent.options retains the initial route after a model switch. */
+export function rememberTextModelRequest(frame, state) {
+  if (!state.textGeneration || frame?.id === undefined || !['session/new', 'session/resume', 'session/set_config_option'].includes(frame.method)) return;
+  state.textModelRequests ||= new Map();
+  if (state.textModelRequests.size >= 1024) throw new Error('模型配置请求超过连接预算');
+  state.textModelRequests.set(frame.id, frame.params?.sessionId);
+}
+export function rememberTextModelResponse(frame, state) {
+  if (!state.textGeneration || !frame) return;
+  let sessionId, options;
+  if (frame.method === 'session/update' && frame.params?.update?.sessionUpdate === 'config_option_update') {
+    sessionId = frame.params.sessionId; options = frame.params.update.configOptions;
+  } else if (frame.method === undefined && state.textModelRequests?.has(frame.id)) {
+    sessionId = state.textModelRequests.get(frame.id); state.textModelRequests.delete(frame.id);
+    if (frame.error !== undefined) return;
+    sessionId = frame.result?.sessionId ?? sessionId; options = frame.result?.configOptions;
+  } else return;
+  if (!state.sessions?.has(sessionId) || !state.agentsBySession?.has(sessionId)) return;
+  state.textModels ||= new Map();
+  state.textModels.delete(sessionId);
+  try {
+    const selected = options?.find(option => option.id === 'model' && option.type === 'select')?.currentValue;
+    const pair = JSON.parse(selected);
+    if (Array.isArray(pair) && pair.length === 2 && pair.every(value => typeof value === 'string' && value.length > 0)) state.textModels.set(sessionId, { provider: pair[0], model: pair[1] });
+  } catch { /* An unrecognized projection must not reuse a stale or initial route. */ }
 }
 export async function generateTextOnly(llm, { prompt, provider, model, signal }) {
   if (typeof prompt !== 'string' || !prompt || Buffer.byteLength(prompt) > 256 * 1024) fail('修复请求为空或超过大小限制。', -32602);
@@ -43,9 +69,9 @@ export function handleTextGeneration(frame, state) {
     if (state.textRuns.size >= 2 || state.textRuns.has(frame.id)) fail('修复生成请求已达到并发上限。', -32045);
     const controller = new AbortController(); state.textRuns.set(frame.id, controller);
     const timer = setTimeout(() => controller.abort(new Error('修复生成超时，请重试。')), 90000);
-    const route = { provider: agent.options?.provider || state.modelRoute?.selection?.provider, model: agent.options?.model || state.modelRoute?.selection?.model };
+    const route = state.textModels?.get(id);
     state.textPending ||= new Set();
-    const pending = generateTextOnly(state.textLlm, { prompt: frame.params?.prompt, provider: route.provider, model: route.model, signal: controller.signal })
+    const pending = generateTextOnly(state.textLlm, { prompt: frame.params?.prompt, provider: route?.provider, model: route?.model, signal: controller.signal })
       .then(result => state.respond({ jsonrpc: '2.0', id: frame.id, result }), error => replyError(controller.signal.aborted ? Object.assign(new Error(controller.signal.reason?.message || '修复生成已取消。'), { code: -32800 }) : error))
       .finally(() => { clearTimeout(timer); state.textRuns.delete(frame.id); state.textPending.delete(pending); }).catch(() => {});
     state.textPending.add(pending);

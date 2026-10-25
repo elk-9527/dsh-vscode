@@ -3,8 +3,8 @@
   "chatBaseline": "1.91.1",
   "currentRelease": {
     "status": "pending",
-    "panel": "0.18.1",
-    "door": "0.6.1",
+    "panel": "0.18.2",
+    "door": "0.6.2",
     "sdk": "0.1.1",
     "evidence": []
   },

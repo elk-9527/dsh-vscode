@@ -142,6 +142,7 @@ function validateReport(report, current, state, expected = {}) {
   if (Array.isArray(report?.stages) && report.stages.some(stage => stage?.status !== 'passed' && !(stage?.required === false && stage.status === 'not-applicable'))) issues.push('内核报告仍有失败、跳过或必测环境缺失');
   if (!semver.satisfies(report?.runtime?.version || '', current?.peer || '')) issues.push('运行时不在当前兼容声明中');
   if (!semver.satisfies(report?.runtime?.acpVersion || '', current?.peer || '')) issues.push('实际 ACP 缺失或不在依赖声明中');
+  if (['0.2.1-rc.2', '0.2.1-rc.3'].includes(report?.runtime?.acpVersion)) issues.push(...required(report?.stages, ['text-generation'], '直接无工具生成必测'));
   for (const key of ['dsh', 'distribution']) if (expected[key] && report?.runtime?.[key === 'dsh' ? 'version' : key] !== expected[key]) issues.push(`运行时 ${key} 与矩阵不匹配`);
   const artifacts = Array.isArray(report?.artifacts) ? report.artifacts.filter(item => item.kind === 'tgz') : [];
   if (artifacts.length !== 1 || !digest(artifacts[0].sha256) || expected.tgzSha256 && artifacts[0].sha256 !== expected.tgzSha256) issues.push('内核未验收同一份最终 tgz');
@@ -213,6 +214,8 @@ function evaluateRelease({ current, state, platform, kernelReports, combinations
     if (artifacts.filter(item => item.kind === kind).length !== 1 || !digest(artifact(kind))) candidateIssues.push(`候选 ${kind} 缺失、重复或摘要无效`);
     const matches = (Array.isArray(candidateManifest?.artifacts) ? candidateManifest.artifacts : []).filter(item => item?.kind === kind);
     if (candidateManifest && (matches.length !== 1 || matches[0].sha256 !== artifact(kind))) candidateIssues.push(`候选清单 ${kind} 与实际文件不同`);
+    const actual = artifacts.find(item => item.kind === kind);
+    if (matches.length === 1 && actual?.file !== matches[0].file && actual?.producerFile !== matches[0].file) candidateIssues.push(`候选 ${kind} 本机路径缺少原始生产者绑定`);
   }
   stage('candidates', candidateIssues, reasons(candidateManifest));
   const kernelIssues = [], kernelReasons = [];
@@ -379,7 +382,24 @@ function releaseCheck(options, context = {}) {
   const candidateManifest = candidateFile ? read(candidateFile, '候选清单') : undefined;
   const artifactList = candidateManifest?.artifacts || localReport?.artifacts || [];
   if (!Array.isArray(artifactList)) inputIssues.push('候选 artifacts 必须是数组');
-  const artifacts = (Array.isArray(artifactList) ? artifactList : []).map(item => ({ ...item, sha256: typeof item?.file === 'string' && fs.existsSync(path.resolve(ROOT, item.file)) ? sha256(path.resolve(ROOT, item.file)) : undefined }));
+  const mapping = bundle?.candidateFiles, mapped = mapping !== undefined;
+  const kinds = ['tgz', 'vsix', 'sdk'];
+  const validMapping = mapped && mapping && typeof mapping === 'object' && !Array.isArray(mapping)
+    && Object.keys(mapping).length === kinds.length && kinds.every(kind => typeof mapping[kind] === 'string' && mapping[kind].length > 0);
+  if (mapped && (!validMapping || !candidateManifest || artifactList.length !== kinds.length)) inputIssues.push('candidateFiles 必须完整映射原始清单的 tgz/vsix/sdk 三个文件');
+  const artifacts = (Array.isArray(artifactList) ? artifactList : []).map(item => {
+    let file = mapped ? validMapping ? bundlePath(mapping[item?.kind]) : undefined : item?.file;
+    if (mapped && typeof file === 'string') {
+      try {
+        const absolute = path.resolve(ROOT, file), relative = path.relative(path.join(ROOT, 'build'), absolute);
+        if (!relative || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) throw new Error('outside build');
+        require('../run-resources.cjs').plainParents(absolute);
+        if (!fs.lstatSync(absolute).isFile()) throw new Error('not a file');
+        file = fileName(absolute);
+      } catch { inputIssues.push(`候选 ${item?.kind} 显式路径必须是 build 内无链接的文件`); file = undefined; }
+    }
+    return { ...item, ...(mapped ? { file, producerFile: item?.file } : {}), sha256: fileDigest(file) };
+  });
   const identity = report => ['panel', 'door', 'sdk'].every(name => report?.packages?.[name] === current[name]);
   const kernelFiles = [...(options.report ? [options.report] : []), ...bundled('kernelReports')];
   const explicitKernels = Boolean(options.report) || Boolean(bundle && Object.hasOwn(bundle, 'kernelReports'));

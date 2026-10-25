@@ -11,12 +11,16 @@ async function fixtureProvider({ reviewReport } = {}) {
     let body;
     try { body = JSON.parse(raw); } catch { response.writeHead(400).end(); return; }
     requests.push(body);
-    response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
-    const send = (delta, finish = null) => response.write(`data: ${JSON.stringify({ id: 'chatcmpl-compat', object: 'chat.completion.chunk', created: 1, model: body.model, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`);
     // 内核在真实用户输入之后插入运行策略和技能目录，不能将这些提示误作用户请求。
     const lastUser = [...(body.messages || [])].reverse().find(message => message.role === 'user' &&
       !(typeof message.content === 'string' && /^(?:Current runtime context\.|<system-reminder>|Time sampled while preparing turn)/.test(message.content)));
     const text = typeof lastUser?.content === 'string' ? lastUser.content : JSON.stringify(lastUser?.content || '');
+    if (text.includes('COMPAT_TEXT_ERROR')) {
+      response.writeHead(400, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ error: { message: 'Compatibility fixture rejected the request', type: 'invalid_request_error' } })); return;
+    }
+    response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+    const send = (delta, finish = null) => response.write(`data: ${JSON.stringify({ id: 'chatcmpl-compat', object: 'chat.completion.chunk', created: 1, model: body.model, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`);
     const toolReply = body.messages?.at(-1)?.role === 'tool';
     send({ role: 'assistant' });
     if (text.includes('CHAT_REFERENCE_UNSAVED_MARKER')) {
@@ -33,6 +37,8 @@ async function fixtureProvider({ reviewReport } = {}) {
     } else if (text.includes('COMPAT_TEXT_TOOL_ATTEMPT')) {
       send({ tool_calls: [{ index: 0, id: 'forbidden-text-tool', type: 'function', function: { name: 'write', arguments: JSON.stringify({ file_path: text.split('COMPAT_TEXT_TOOL_ATTEMPT ')[1], content: 'must not execute' }) } }] }, 'tool_calls');
       response.end('data: [DONE]\n\n'); return;
+    } else if (text.includes('COMPAT_TEXT_TRUNCATED')) {
+      send({ content: 'INCOMPLETE' }, 'length'); response.end('data: [DONE]\n\n'); return;
     } else if (text.includes('COMPAT_CANCEL')) {
       send({ content: 'COMPAT_WAIT' });
       const timer = setTimeout(() => { send({}, 'stop'); response.end('data: [DONE]\n\n'); }, 30000);

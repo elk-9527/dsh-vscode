@@ -17,7 +17,7 @@ const unavailable = discoveryResult(matrix, undefined, undefined, [{ source: 're
 assert.deepEqual(unavailable.matrix, discovered.matrix); assert.equal(unavailable.acquisitionIssues.length, 1);
 assert.throws(() => classifyProbe({ status: 'failed' }, true), /required/);
 
-const current = versions(), requested = '0.2.1-rc.3';
+const current = versions(), requested = '0.2.1-rc.4';
 const state = { commit: 'a'.repeat(40), fingerprint: 'b'.repeat(64), toolFingerprint: 'c'.repeat(64), lockFingerprint: 'd'.repeat(64) };
 const clone = value => structuredClone(value);
 function gateMessage(label = 'requirements') {
@@ -126,7 +126,10 @@ mutate('passed with skipped behavior', report => { report.stages.find(item => it
 mutate('passed with status ACP mismatch', report => { report.stages.find(item => item.name === 'status').evidence.runtime.acpVersion = requested; }, completed());
 mutate('passed with resource abort', report => { report.resources.abort = 'Validation cancelled'; }, completed());
 for (const item of cases) assert.equal(classifyProbe(item.report), item.status, item.name);
-const supported = JSON.parse(fs.readFileSync(path.join(ROOT, 'compat/versions.json'))).versions.find(item => item.distribution === 'npm').dsh;
+const declaredMatrix = JSON.parse(fs.readFileSync(path.join(ROOT, 'compat/versions.json')));
+const supported = declaredMatrix.versions.find(item => item.distribution === 'npm' && item.dsh !== '0.2.1-rc.3').dsh;
+assert.equal(supportedMatrix(declaredMatrix).matrix.include.filter(item => item.dsh === '0.2.1-rc.3').length, 2);
+assert.deepEqual(discoveryResult(declaredMatrix, { versions: { '0.2.1-rc.3': {}, '0.2.1-rc.4': {} } }, []).probes.include.map(item => item.dsh), ['0.2.1-rc.4', '0.2.1-rc.4']);
 assert.throws(() => classifyProbe({ ...rejected(), requested: supported }), /required regression/);
 
 const fixture = require('../test-workspace.cjs').createFixture('probe-cli');
@@ -168,6 +171,7 @@ try {
   }
   const declared = cli(rejected(), supported); assert.equal(declared.child.status, 1); assert.match(declared.child.stderr, /supported regression/); assert.equal(declared.result, undefined);
   const declaredAlias = cli(rejected(), 'v' + supported); assert.equal(declaredAlias.child.status, 1); assert.match(declaredAlias.child.stderr, /supported regression/); assert.equal(declaredAlias.result, undefined);
+  const rc3 = cli(rejected(), '0.2.1-rc.3'); assert.equal(rc3.child.status, 1); assert.match(rc3.child.stderr, /supported regression/); assert.equal(rc3.result, undefined);
   const mismatched = cli(rejected(), '9.9.9'); assert.equal(mismatched.child.status, 1); assert.equal(mismatched.result.status, 'incompatible');
 
   const runtime = path.join(fixture, 'runtime/node_modules/@deepseek-ai/dsh'), acp = path.join(fixture, 'runtime/node_modules/@deepseek-ai/dsh-acp');

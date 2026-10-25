@@ -138,19 +138,49 @@ async function run(options) {
     });
     const sessionId = session.sessionId;
     const directText = (await client.doorStatus()).capabilities?.textGeneration;
-    if (directText?.path === 'llm-direct-v1' && directText.tools === false) await stage('text-generation', async () => {
-      let toolEvents = 0;
+    const directRequired = ['0.2.1-rc.2', '0.2.1-rc.3'].includes(report.runtime.acpVersion);
+    const assertTextRequests = (requests, model) => {
+      assert(requests.length > 0, '直接生成未到达模型服务');
+      for (const request of requests) {
+        assert(request.tools === undefined || Array.isArray(request.tools) && request.tools.length === 0, '直接生成请求包含工具');
+        assert.equal(request.model, model, '直接生成未使用当前会话模型');
+        assert(!request.messages.some(message => message.role === 'tool' || message.tool_calls?.length), '直接生成进入了工具回合');
+      }
+    };
+    if (directRequired || directText?.path === 'llm-direct-v1' && directText.tools === false) await stage('text-generation', async () => {
+      assert.equal(directText?.path, 'llm-direct-v1', '此 ACP 版本必须提供直接文本能力'); assert.equal(directText.tools, false);
+      let toolEvents = 0, permissionEvents = 0;
+      const before = provider.requests.length, workspaceBefore = fs.readdirSync(cwd).sort().map(name => [name, sha256(path.join(cwd, name))]);
       const receive = (_id, update) => { if (/tool_call/.test(update?.sessionUpdate || '')) toolEvents++; };
-      client.on('update', receive);
+      const permission = (id) => { permissionEvents++; client.respond(id, { outcome: { outcome: 'cancelled' } }); };
+      client.on('update', receive); client.on('permission', permission);
       try {
         const answer = await client.request('dsh-door/text/generate', { sessionId, prompt: 'COMPAT_STREAM' });
         assert.equal(answer.text, 'COMPAT_OK'); assert.equal(answer.tools, false); assert.equal(answer.path, 'llm-direct-v1');
-        assert.equal((provider.requests.at(-1).tools || []).length, 0);
         const target = path.join(work, 'forbidden-direct-write.txt');
         await assert.rejects(client.request('dsh-door/text/generate', { sessionId, prompt: 'COMPAT_TEXT_TOOL_ATTEMPT ' + target }), /工具请求/);
-        assert(!fs.existsSync(target)); assert.equal(toolEvents, 0);
-        return { path: answer.path, toolEvents, rejectedAttempt: true, fileUnchanged: true };
-      } finally { client.off('update', receive); }
+        for (const prompt of ['COMPAT_TEXT_ERROR', 'COMPAT_TEXT_TRUNCATED']) await assert.rejects(client.request('dsh-door/text/generate', { sessionId, prompt }), error => error.code === -32046);
+        const foreign = new DoorClient({ host: '127.0.0.1', port }); resources.defer('direct-foreign', () => foreign.close());
+        try {
+          await foreign.connect(); const count = provider.requests.length;
+          await assert.rejects(foreign.request('dsh-door/text/generate', { sessionId, prompt: 'COMPAT_STREAM' }), error => error.code === -32003);
+          assert.equal(provider.requests.length, count, '外来会话触发了模型请求');
+        } finally { foreign.close(); }
+        const count = provider.requests.length, controllers = [new AbortController(), new AbortController()];
+        const cancelled = controllers.map(controller => assert.rejects(client.request('dsh-door/text/generate', { sessionId, prompt: 'COMPAT_CANCEL' }, { signal: controller.signal }), error => error.code === -32800));
+        const cancellationChecks = Promise.all(cancelled); cancellationChecks.catch(() => {});
+        try {
+          await waitFor(() => provider.requests.length >= count + 2);
+          await assert.rejects(client.request('dsh-door/text/generate', { sessionId, prompt: 'COMPAT_STREAM' }), error => error.code === -32045);
+          assert.equal(provider.requests.length, count + 2, '超额直接请求到达模型服务');
+        } finally { for (const controller of controllers) controller.abort(); await cancellationChecks; }
+        assert.equal((await client.request('dsh-door/text/generate', { sessionId, prompt: 'COMPAT_STREAM' })).text, 'COMPAT_OK', '取消后直接生成未恢复');
+        assertTextRequests(provider.requests.slice(before), 'compat-model');
+        assert(!fs.existsSync(target)); assert.equal(toolEvents, 0); assert.equal(permissionEvents, 0);
+        assert.deepEqual(fs.readdirSync(cwd).sort().map(name => [name, sha256(path.join(cwd, name))]), workspaceBefore);
+        return { path: answer.path, requests: provider.requests.length - before, toolEvents, permissionEvents, cancelled: 2,
+          rejectedAttempt: true, rejectedFailure: true, rejectedTruncation: true, foreignDenied: true, fileUnchanged: true, recoveredAfterCancel: true };
+      } finally { client.off('update', receive); client.off('permission', permission); }
     });
     else report.stages.push({ name: 'text-generation', status: 'not-applicable', required: false });
     await stage('model-switch', async () => {
@@ -161,7 +191,12 @@ async function run(options) {
       assert(alternative, '测试模型目录缺少第二个模型');
       await session.setModel(alternative.value);
       assert.equal(session.configOptions.find((item) => item.id === 'model').currentValue, alternative.value);
-      return { changed: true };
+      if (directRequired) {
+        const before = provider.requests.length;
+        const answer = await client.request('dsh-door/text/generate', { sessionId, prompt: 'COMPAT_STREAM' });
+        assert.equal(answer.text, 'COMPAT_OK'); assertTextRequests(provider.requests.slice(before), 'compat-model-b');
+      }
+      return { changed: true, directRouteChecked: directRequired };
     });
     await stage('preset-switch', async () => {
       const alternative = session.doorMeta.presets.find((item) => item.id !== 'standard');

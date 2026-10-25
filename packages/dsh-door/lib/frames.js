@@ -16,6 +16,8 @@
  * @module dsh-acp-door/frames
  */
 
+import { rememberTextModelResponse } from './kernel/text-generation.js';
+
 /** `_meta` 中属于该插件的键。 */
 export const DOOR_META_KEY = 'dsh-door';
 
@@ -321,6 +323,7 @@ export async function waitForMount(pending, ms = MOUNT_WAIT_MS) {
  * @returns {Promise<string>} 要写进 socket 的行。
  */
 export async function decorateLine(line, state, diag) {
+  if (state.textGeneration) rememberTextModelResponse(parseLine(line), state);
   // 低成本预筛：没有跟踪中的建会话/恢复/关闭请求时，无需解析该行。
   if (state.replies.size === 0 && (!state.closes || state.closes.size === 0)) return line;
   const frame = parseLine(line);
@@ -335,6 +338,7 @@ export async function decorateLine(line, state, diag) {
       state.resumes.delete(sessionId);
       state.sessions?.delete(sessionId);
       state.agentsBySession?.delete(sessionId);
+      state.textModels?.delete(sessionId);
       diag(`会话 ${sessionId} 已关闭：清理本连接的临时挂载状态`);
     } else {
       diag(`关闭会话 ${sessionId} 失败：保留本连接状态`);

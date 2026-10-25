@@ -2,8 +2,8 @@
   "schemaVersion": 2,
   "currentRelease": {
     "status": "pending",
-    "panel": "0.18.1",
-    "door": "0.6.1",
+    "panel": "0.18.2",
+    "door": "0.6.2",
     "sdk": "0.1.1",
     "evidence": []
   },
@@ -13,6 +13,18 @@
     "registry": "https://registry.npmjs.org"
   },
   "versions": [
+    {
+      "dsh": "0.2.1-rc.3",
+      "distribution": "npm",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "dsh": "0.2.1-rc.3",
+      "distribution": "desktop",
+      "status": "pending",
+      "evidence": []
+    },
     {
       "dsh": "0.1.5-rc.2",
       "distribution": "npm",

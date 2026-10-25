@@ -51,7 +51,8 @@ assert(!JSON.stringify(redacted).includes('must-hide'));
 assert(!JSON.stringify(redacted).includes(os.homedir()));
 const current = versions();
 assert(semver.satisfies('0.2.1-rc.2', current.peer), 'DSH 0.2.1-rc.2 必须能够通过接入点依赖检查');
-assert(!semver.satisfies('0.2.1-rc.3', current.peer), '未验收的预发布版不应自动进入支持范围');
+assert(semver.satisfies('0.2.1-rc.3', current.peer), 'rc.3 适配候选必须能够通过精确依赖检查');
+assert(!semver.satisfies('0.2.1-rc.4', current.peer), '未知预发布版不应自动进入支持范围');
 const publicResult = publicEvidence({ status: 'passed', source: { commit: 'a'.repeat(40), fingerprint: 'b'.repeat(64), path: 'PRIVATE_PATH' },
   packages: current, runtime: { version: '0.2.0-rc.2', acpVersion: '0.2.0-rc.2', distribution: 'desktop', command: 'PRIVATE_COMMAND' },
   accountsBefore: [{ ciphertextDigest: 'PRIVATE_DIGEST' }], backup: 'PRIVATE_BACKUP', error: 'PRIVATE_ERROR',

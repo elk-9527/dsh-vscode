@@ -30,6 +30,7 @@ const suites = [
   { name: '候选归档安装逐字节核验', file: '../../tools/bridge/test-installed-candidate.cjs', always: true },
   { name: '支持矩阵与候选发现分类', file: '../../tools/compat/test-discovery.cjs', always: true },
   { name: '原生验收的运行时 home 精确归属', file: '../../tools/bridge/test-editor-home.cjs', always: true },
+  { name: '试点归档清单与当前适配身份', file: '../../tools/bridge/test-pilot-manifest.cjs', always: true },
   { name: '无工具文本生成与失败边界', file: '../dsh-door/test/text-generation.js', always: true },
   { name: '隔离验收资源与预算', file: '../../tools/run-resources.test.cjs', always: true },
   { name: '测试临时目录归属与清理', file: '../../tools/test-workspace.test.cjs', always: true },

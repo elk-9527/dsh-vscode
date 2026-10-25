@@ -56,7 +56,7 @@ async function run() {
     const skillDir = path.join(process.env.DSH_HOME, 'skills/bridge-fixture'); fs.mkdirSync(skillDir, { recursive: true });
     fs.writeFileSync(path.join(skillDir, 'SKILL.md'), '---\nname: bridge-fixture\ndescription: Bridge read fixture\n---\n\nBRIDGE_SKILL_CONTENT\n');
     await stage('packages', async () => {
-      const pilots = JSON.parse(fs.readFileSync(path.join(ROOT, 'build/ide-bridge/pilots/manifest.json')));
+      const pilots = require('./build-pilots.cjs').loadPilots(options['pilot-manifest']);
       const example = JSON.parse(locate.runDshSync({ command: 'npm', args: ['pack', path.join(ROOT, 'packages/dsh-bridge-sdk/examples/echo'), '--ignore-scripts', '--pack-destination', folder, '--json'] }));
       const files = [supplied.tgz.file, supplied.sdk.file, ...pilots.map(p => path.join(ROOT, p.file)), path.join(folder, example[0].filename)];
       report.artifacts = [require('./packages.cjs').artifactRecord(supplied.tgz), require('./packages.cjs').artifactRecord(supplied.sdk),
@@ -96,6 +96,10 @@ async function run() {
     await stage('auth-and-catalog', async () => {
       await bridge.auth(); const catalog = await bridge.catalog();
       for (const id of ['michengai.code-review.run', 'linxin.skill-explorer.list', 'linxin.skill-explorer.read', 'linxin.skill-explorer.health']) assert(catalog.capabilities.some(c => c.id === id), `能力缺失：${id}`);
+      for (const pilot of require('./build-pilots.cjs').PILOTS) {
+        const registered = catalog.capabilities.filter(capability => capability.provider.id === pilot.name);
+        assert(registered.length > 0); assert(registered.every(capability => capability.provider.version === pilot.candidate), 'Bridge 目录必须报告已安装试点版本');
+      }
       return { ids: catalog.capabilities.map(c => c.id) };
     });
     const invoke = (capabilityId, input, context = {}) => bridge.request('invoke', { requestId: require('node:crypto').randomUUID(), capabilityId, input,

@@ -9,9 +9,15 @@ const current = { panel: '1.0.0', door: '1.0.0', sdk: '1.0.0', peer: '1.0.0', vs
 const state = { fingerprint: 'a'.repeat(64), toolFingerprint: 'b'.repeat(64), lockFingerprint: 'c'.repeat(64) };
 const base = { schemaVersion: 2, platform: 'win32', status: 'passed', packages: current, source: state, sourceStart: state, sourceEnd: state };
 const artifacts = [{ kind: 'tgz', sha256: 'd'.repeat(64) }, { kind: 'vsix', sha256: 'e'.repeat(64) }, { kind: 'sdk', sha256: 'f'.repeat(64) }];
-const report = { ...base, runtime: { version: '1.0.0', acpVersion: '1.0.0', distribution: 'npm' }, artifacts: [artifacts[0]], stages: REQUIRED.map(name => ({ name, status: 'passed' })) };
+const report = { ...base, runtime: { version: '1.0.0', acpVersion: '1.0.0', distribution: 'npm' }, artifacts: [artifacts[0]], stages: [...REQUIRED, 'text-generation'].map(name => ({ name, status: 'passed' })) };
 const expected = { platform: 'win32', dsh: '1.0.0', distribution: 'npm', tgzSha256: artifacts[0].sha256 };
 assert.deepEqual(validateReport(report, current, state, expected), []);
+const rc3Current = { ...current, peer: '0.2.1-rc.3' };
+const rc3Report = { ...report, packages: rc3Current, runtime: { ...report.runtime, version: '0.2.1-rc.3', acpVersion: '0.2.1-rc.3' } };
+assert.deepEqual(validateReport(rc3Report, rc3Current, state, { ...expected, dsh: '0.2.1-rc.3' }), []);
+for (const stages of [rc3Report.stages.filter(stage => stage.name !== 'text-generation'), rc3Report.stages.map(stage => stage.name === 'text-generation' ? { ...stage, required: false, status: 'not-applicable' } : stage)]) {
+  assert(validateReport({ ...rc3Report, stages }, rc3Current, state, { ...expected, dsh: '0.2.1-rc.3' }).some(issue => issue.includes('无工具')));
+}
 for (const key of FINGERPRINTS) {
   assert(validateIdentity({ ...base, sourceStart: { ...state, [key]: '0'.repeat(64) } }, current, state, 'win32').length);
   assert(validateIdentity({ ...base, sourceEnd: { ...state, [key]: '0'.repeat(64) } }, current, state, 'win32').length);
@@ -180,6 +186,22 @@ try {
   assert.equal(result.releaseReady, true, result.issues.join('; '));
   assert.equal(result.validation.kernelReports.length, 2);
   assert.equal(result.validation.editorReports.length, 3);
+  const producer = structuredClone(fixture.candidateManifest);
+  for (const item of producer.artifacts) item.file = `build/unavailable-producer/${path.basename(item.file)}`;
+  const producerFile = write('remote-manifest.json', producer), producerBytes = fs.readFileSync(producerFile);
+  const candidateFiles = Object.fromEntries(fixture.artifacts.map(item => [item.kind, path.relative(folder, item.file)]));
+  const mappedEvidence = { ...evidence, candidateManifest: path.basename(producerFile), candidateFiles };
+  const mapped = releaseCheck({ evidence: write('mapped-evidence.json', mappedEvidence) }, context);
+  assert.equal(mapped.releaseReady, true, mapped.issues.join('; '));
+  for (const item of mapped.validation.artifacts) assert.equal(item.producerFile, producer.artifacts.find(other => other.kind === item.kind).file);
+  assert.equal(releaseCheck({ evidence: write('unmapped-evidence.json', { ...evidence, candidateManifest: path.basename(producerFile) }) }, context).releaseReady, false);
+  for (const [index, mapping] of [{ ...candidateFiles, tgz: undefined }, { ...candidateFiles, extra: candidateFiles.tgz },
+    { ...candidateFiles, tgz: candidateFiles.vsix }, { ...candidateFiles, vsix: path.relative(folder, path.join(ROOT, 'package.json')) }, ['invalid']].entries()) {
+    assert.equal(releaseCheck({ evidence: write(`bad-mapping-${index}.json`, { ...mappedEvidence, candidateFiles: mapping }) }, context).releaseReady, false);
+  }
+  const altered = structuredClone(mapped); delete altered.validation.artifacts[0].producerFile;
+  assert(evaluateRelease({ ...altered.validation, current, state, platform: 'win32' }).issues.some(issue => issue.includes('生产者绑定')));
+  assert.deepEqual(fs.readFileSync(producerFile), producerBytes, '路径映射不能改写原始生产者清单');
   const registered = releaseCheck({ candidates: path.join(folder, evidence.candidateManifest), 'local-report': path.join(folder, evidence.localReport), preflight: path.join(folder, evidence.preflight),
     'strict-regression': path.join(folder, evidence.strictRegression), 'real-workflow': path.join(folder, evidence.realWorkflow) }, {
     ...context, matrix: { ...matrix, currentRelease: { evidence: kernelFiles } }, editors: { ...editors, currentRelease: { evidence: editorFiles } }

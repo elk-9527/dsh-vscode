@@ -42,7 +42,7 @@ dsh plugin --profile <your-profile> update dsh-acp-door
 
 Restart the kernel afterwards.
 
-Compatibility: DSH `0.1.5-rc.2`, `0.2.0-rc.1`, `0.2.0-rc.2`, and previews `0.2.1-alpha.1` / `0.2.1-rc.2`. DSH `0.2.1-rc.2` requires dsh-acp-door `0.5.2` or later.
+Compatibility: DSH `0.1.5-rc.2`, `0.2.0-rc.1`, `0.2.0-rc.2`, and previews `0.2.1-alpha.1` / `0.2.1-rc.2` / `0.2.1-rc.3`. DSH `0.2.1-rc.2` requires dsh-acp-door `0.5.2` or later; `0.2.1-rc.3` requires `0.6.2` or later. Current candidate acceptance is recorded in the compatibility matrix.
 
 </details>
 
@@ -207,7 +207,7 @@ DSH 冷启动时，插件会先等待用户设置加载完成再开放端口，�
 | DSH | 历史会话 | 权限预设 |
 | --- | --- | --- |
 | `0.2.0-rc.1` / `0.2.0-rc.2` | 公开 `sessionQuery` 服务，v4 会话格式 | `catalog/current/resolve/set` |
-| `0.2.1-alpha.1` / `0.2.1-rc.2` | 公开 `sessionQuery` 服务，v4 会话格式 | `catalog/current/resolve/set` |
+| `0.2.1-alpha.1` / `0.2.1-rc.2` / `0.2.1-rc.3` | 公开 `sessionQuery` 服务，v4 会话格式 | `catalog/current/resolve/set` |
 | `0.1.5-rc.2` | 只读解析本机 v3 会话文件 | `selectFor/permissionState/current/set` |
 
 两条路径对外提供相同的 `dsh-door/…` 方法。接入点的状态回复会用 `historyKind`、
@@ -215,6 +215,8 @@ DSH 冷启动时，插件会先等待用户设置加载完成再开放端口，�
 该格式由 DSH 0.2 的 `sessionQuery` 负责读取和迁移。
 
 状态中的可选 `protocolVersion` 与 `runtime.acpVersion` 分别报告接入协议及实际加载的 ACP 包版本。
+
+ACP `0.2.1-rc.2` 与 `0.2.1-rc.3` 可通过 `dsh-door/text/generate` 使用所属会话的当前模型直接生成文本。该路径发送空工具集合，不进入 Agent 工具调度；工具响应、错误或截断终态均拒绝，支持请求取消。未知版本或缺少直接流接口时不报告此能力。
 
 旧 npm 发行物的依赖使用版本范围：`DSH 0.1.5-rc.2` 可解析到 `ACP 0.1.5-rc.3`。兼容矩阵分别记录两个版本；依赖范围包含该 ACP 版本不表示已经验收同号的 DSH 发行物。
 无法识别的已有历史服务会报告 `history: false`，不尝试以旧格式读取新数据。

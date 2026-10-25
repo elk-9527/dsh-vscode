@@ -50,7 +50,7 @@ import {
 import { resolveSessionsRoot } from './sessions.js';
 import { createLegacyHistory, createSessionQueryHistory } from './kernel/history.js';
 import { createPermissionHandler } from './kernel/permissions.js';
-import { handleTextGeneration, textGenerationSupported } from './kernel/text-generation.js';
+import { handleTextGeneration, rememberTextModelRequest, textGenerationSupported } from './kernel/text-generation.js';
 import { ACP_RUNTIME_VERSION } from './kernel/runtime.js';
 import { IdeBridge } from './bridge/runtime.js';
 import { createEndpoint } from './bridge/endpoint.js';
@@ -343,6 +343,7 @@ export function gatePrompts(source, state, diag) {
             }
           }
           rememberSessionRequest(line, state, diag);
+          rememberTextModelRequest(incoming, state);
           await holdUntilMounted(line, state, diag);
           controller.enqueue(encoder.encode(line));
         }
