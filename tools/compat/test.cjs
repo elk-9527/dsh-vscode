@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const net = require('node:net');
 const assert = require('node:assert/strict');
+const { createRequire } = require('node:module');
 const { ROOT, argsOf, versions, sourceState, resolveRuntime, runDir, writeReport, locate, sha256, discover, redact, semver } = require('./lib.cjs');
 const { fixtureProvider } = require('./fixture-provider.cjs');
 const { DoorClient } = require('../../packages/vscode-extension/src/door/client');
@@ -26,6 +27,13 @@ async function bounded(promise, timeout = 45000) {
   finally { clearTimeout(timer); }
 }
 function npmRun(args) { return locate.runDshSync({ command: 'npm', args, timeoutMs: 300000 }); }
+function npmRuntimeInfo(entry, requested) {
+  const dsh = JSON.parse(fs.readFileSync(path.join(path.dirname(entry), '../package.json')));
+  const acp = JSON.parse(fs.readFileSync(createRequire(entry).resolve('@deepseek-ai/dsh-acp/package.json')));
+  assert.equal(dsh.name, '@deepseek-ai/dsh'); assert.equal(dsh.version, requested);
+  assert.equal(acp.name, '@deepseek-ai/dsh-acp'); assert(semver.valid(acp.version), '实际 ACP 包版本无效');
+  return { acpVersion: acp.version };
+}
 async function run(options) {
   const folder = runDir(options.dsh || 'local');
   const resources = require('../run-resources.cjs').createRunResources({ folder, label: 'work', keep: Boolean(options['keep-work']) });
@@ -65,12 +73,13 @@ async function run(options) {
         fs.mkdirSync(runtimeDir);
         try { locate.runDshSync({ command: 'npm', timeoutMs: Math.min(300000, resources.remainingMs()), args: ['install', '--prefix', runtimeDir, '--registry=https://registry.npmjs.org', '--fetch-retries=0', '--fetch-timeout=20000', '--no-audit', '--no-fund', `@deepseek-ai/dsh@${options.dsh}`] }); }
         catch (error) { error.kind = 'acquisition-failed'; throw error; }
-        runtime = { command: `${locate.quoteArg(process.execPath)} ${locate.quoteArg(path.join(runtimeDir, 'node_modules/@deepseek-ai/dsh/lib/bin.js'))}`, distribution: 'npm', version: options.dsh };
+        const entry = path.join(runtimeDir, 'node_modules/@deepseek-ai/dsh/lib/bin.js');
+        runtime = { command: `${locate.quoteArg(process.execPath)} ${locate.quoteArg(entry)}`, distribution: 'npm', version: options.dsh, ...npmRuntimeInfo(entry, options.dsh) };
       } else runtime = resolveRuntime(options);
       const actual = locate.runDshSync({ command: runtime.command, args: ['--version'], timeoutMs: 10000 }).trim();
       assert(actual.includes(runtime.version));
       report.runtime = runtime;
-      return { version: runtime.version, distribution: runtime.distribution };
+      return { version: runtime.version, distribution: runtime.distribution, acpVersion: runtime.acpVersion || runtime.acp };
     });
     await stage('installation', async () => {
       locate.runDshSync({ command: runtime.command, args: ['--profile', 'compat', '--from-default-profile', 'web', '--dump-config'] });
@@ -115,6 +124,7 @@ async function run(options) {
       assert.equal(result.version, report.packages.door);
       assert(semver.satisfies(result.runtime?.acpVersion || '', report.packages.peer), '实际 ACP 包版本不在依赖声明中');
       if (runtime.acp) assert.equal(result.runtime.acpVersion, runtime.acp, 'Desktop 状态与内置 ACP 不一致');
+      if (runtime.acpVersion) assert.equal(result.runtime.acpVersion, runtime.acpVersion, '状态与运行时解析的 ACP 不一致');
       // npm 的旧发行物使用依赖范围；DSH 版本不一定等于实际解析的 ACP 版本。
       report.runtime.acpVersion = result.runtime.acpVersion;
       assert(result.model.ready); assert(result.capabilities.history); assert(result.capabilities.permissionPresets);
@@ -287,4 +297,4 @@ if (require.main === module) {
   }).catch((error) => { console.error(`acquisition-failed: ${redact(error.message)}`); process.exitCode = 1; });
   else run(options).then((report) => { process.exitCode = report.status === 'passed' ? 0 : 1; }).catch((error) => { console.error(redact(error.stack)); process.exitCode = 1; });
 }
-module.exports = { run, freePort, waitFor, bounded };
+module.exports = { run, freePort, waitFor, bounded, npmRuntimeInfo };

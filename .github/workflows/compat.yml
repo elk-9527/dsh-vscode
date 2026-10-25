@@ -157,7 +157,7 @@ jobs:
         run: |
           if (Test-Path -LiteralPath build/probes/probe-result.json) {
             $probe = Get-Content -LiteralPath build/probes/probe-result.json -Raw | ConvertFrom-Json
-            "Candidate $($probe.dsh): $($probe.status). Declared support is unchanged." >> $env:GITHUB_STEP_SUMMARY
+            $probe.summary >> $env:GITHUB_STEP_SUMMARY
           }
       - uses: actions/upload-artifact@v4
         if: always()
