@@ -276,16 +276,20 @@ async function runOnce(round) {
 
     // (1) 选中的代码：正文随消息直接发送，模型无需读取文件即可获知标记。
     const secret = '紫色河马';
+    const diskSecret = '磁盘旧值';
+    const selectedFile = path.join(SCRATCH, 'fake.ts');
+    // 模拟尚未保存的编辑器内容；读取磁盘不能替代收到选区快照。
+    fs.writeFileSync(selectedFile, `const 暗号 = '${diskSecret}';\n`, 'utf8');
     seen.answer = '';
     seen.tools.clear();
     seen.errors.length = 0;
-    await session.send('我选中的这段代码里的暗号是什么？只回答暗号本身，不要引号、不要解释。', {
+    await session.send('请直接从本条消息已经附加的选区快照正文提取暗号。快照包含尚未保存的编辑器内容，以快照为准，无需重新读取磁盘。只回答暗号本身，不要引号、不要解释。', {
       attachments: [
         {
           kind: 'selection',
           id: 'fake.ts:1-3',
           name: 'fake.ts',
-          uri: `file:///${path.join(SCRATCH, 'fake.ts').replace(/\\/g, '/')}`,
+          uri: `file:///${selectedFile.replace(/\\/g, '/')}`,
           text: `// 无关的注释\nconst 暗号 = '${secret}';\nexport default 暗号;`,
           language: 'typescript',
           detail: '选中 3 行',
@@ -295,7 +299,7 @@ async function runOnce(round) {
     check('带选区的回合正常结束', seen.errors.length === 0, seen.errors.join(' | '));
     check(
       '选中的代码真的到了模型眼前（它念出了暗号）',
-      seen.answer.includes(secret),
+      seen.answer.includes(secret) && !seen.answer.includes(diskSecret),
       `回答是：${JSON.stringify(seen.answer.slice(0, 120))}`,
     );
 
