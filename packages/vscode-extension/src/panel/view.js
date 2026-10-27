@@ -25,6 +25,9 @@ const { MessageQueue, snapshotMessage } = require('./queue');
 const { QueuePersistence } = require('./queue-persistence');
 const { HistorySummaryCache } = require('./history-cache');
 const { validWebviewMessage } = require('./protocol');
+const { resolveFileLink } = require('./links');
+const { MemeMedia } = require('./memes');
+const { PanelImages } = require('./images');
 const { DshConnectionService } = require('../connection/service');
 const { DshSession } = require('../dsh/session');
 const { describeError } = require('../dsh/errors');
@@ -69,7 +72,8 @@ class DshPanelView {
    *   `--patch`，把接入点指向其它端口，这样测试「从零启动」时不需要占用 47821
    *   （桌面端运行时该端口上已存在接入点，否则该测试只能跳过）。
    */
-  constructor({ extensionUri, log, spawnArgs = [], kernels, desktopExecutables = [], connections, workspaceState }) {
+  constructor({ extensionUri, log, spawnArgs = [], kernels, desktopExecutables = [], connections, workspaceState, imageStorageRoot, conversationSlot }) {
+    this.conversationSlot = conversationSlot;
     this.workspaceState = workspaceState;
     this.draftWrites = Promise.resolve();
     this.draftStore = new DraftPersistence({ get: key => this.workspaceState?.get(key), update: (key, value) => this.workspaceState.update(key, value) },
@@ -105,6 +109,14 @@ class DshPanelView {
     this.client = undefined;
     /** @type {object|undefined} 0.0.14+ 接入点返回的不含凭据的诊断状态。 */
     this.doorStatus = undefined;
+    this.memeMedia = new MemeMedia({ post: message => this.post(message), scope: () => ({
+      client: this.client, status: this.doorStatus, view: this.view, cwd: this.workdir(),
+      sessionId: this.session?.sessionId, trusted: vscode.workspace.isTrusted !== false,
+    }) });
+    this.panelImages = new PanelImages({ root: imageStorageRoot, post: message => this.post(message), scope: () => ({
+      client: this.client, view: this.view, cwd: this.workdir(), sessionId: this.session?.sessionId, trusted: vscode.workspace.isTrusted !== false,
+    }), pick: async () => (await vscode.window.showOpenDialog({ canSelectMany: true, canSelectFolders: false, openLabel: '添加图片',
+      filters: { '图片': ['png', 'jpg', 'jpeg', 'gif', 'webp'] } }))?.map(uri => uri.fsPath) });
     /** @type {DshSession|undefined} */
     this.session = undefined;
     /** @type {{dispose: () => void}|undefined} 本扩展启动的后台 DSH。 */
@@ -256,8 +268,11 @@ class DshPanelView {
       cspSource: webview.cspSource,
       styleUri: webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'main.css')).toString(),
       markdownUri: webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'markdown.js')).toString(),
+      memesUri: webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'memes.js')).toString(),
+      imagesUri: webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'images.js')).toString(),
       scriptUri: webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'main.js')).toString(),
       nonce,
+      conversationSlot: this.conversationSlot,
     });
     webview.onDidReceiveMessage((message) => this.onWebviewMessage(message));
     webviewView.onDidDispose(() => {
@@ -286,7 +301,7 @@ class DshPanelView {
 
   /** 向界面发送一条消息（界面未打开时直接丢弃，不报错）。 */
   post(message) {
-    const transcript = ['user', 'assistant', 'text', 'thinking', 'tool', 'done', 'notice', 'error'];
+    const transcript = ['user', 'assistant', 'text', 'thinking', 'tool', 'done', 'notice', 'error', 'image'];
     if (message.type === 'reset') this.setLiveTranscript([]);
     if (transcript.includes(message.type) && !message.historical) {
       this.recordTranscript(message);
@@ -401,6 +416,7 @@ class DshPanelView {
   // ── 界面发来的消息 ──────────────────────────────────
 
   async onWebviewMessage(message) {
+    if (this.disposed) return;
     if (!validWebviewMessage(message)) return;
     try {
       switch (message.type) {
@@ -416,8 +432,20 @@ class DshPanelView {
           else if (existing) this.postConversationSnapshot();
           this.post(this.queue.state());
           this.post({ type: 'historyState', readonly: this.historyReadonly, id: this.historyId });
+          void this.memeMedia?.handle({ type: 'memeCatalog' });
+          void this.panelImages?.refresh();
           break;
         }
+        case 'memeCatalog':
+        case 'memeRead':
+          await this.memeMedia?.handle(message);
+          break;
+        case 'imageAdd':
+        case 'imagePick':
+        case 'imagePreview':
+        case 'imageResolve':
+          await this.panelImages?.handle(message);
+          break;
         case 'send':
           await this.acceptMessage(message);
           break;
@@ -551,8 +579,11 @@ class DshPanelView {
         case 'historyExport':
           await this.exportHistory(message.id);
           break;
+        case 'historyArchive':
+          await this.archiveHistory(message);
+          break;
         case 'openLink':
-          this.openLink(message.href);
+          await this.openLink(message.href);
           break;
         default:
           this.log('warn', `收到界面发来的未知消息：${message.type}`);
@@ -571,13 +602,22 @@ class DshPanelView {
     }
   }
 
-  openLink(href) {
-    // 仅放行 http/https，其它协议（file:、command: …）不经过此处处理。
-    if (typeof href !== 'string' || !/^https?:\/\//i.test(href)) {
-      this.log('warn', `拒绝打开非 http(s) 链接：${href}`);
-      return;
-    }
-    vscode.env.openExternal(vscode.Uri.parse(href));
+  async openLink(href) {
+    if (typeof href !== 'string') return;
+    if (/^https?:\/\//i.test(href)) { await vscode.env.openExternal(vscode.Uri.parse(href)); return; }
+    if (!vscode.workspace.isTrusted) return;
+    const cwd = this.workdir();
+    if (!cwd || !vscode.workspace.getWorkspaceFolder(vscode.Uri.file(cwd))) return;
+    const target = await resolveFileLink(href, cwd);
+    if (!target || !vscode.workspace.isTrusted || this.workdir() !== cwd) return;
+    const uri = vscode.Uri.file(target.file);
+    if (!vscode.workspace.getWorkspaceFolder(uri)) return;
+    const document = await vscode.workspace.openTextDocument(uri);
+    if (!vscode.workspace.isTrusted || this.workdir() !== cwd) return;
+    await vscode.window.showTextDocument(document, {
+      preview: true,
+      ...(target.line === undefined ? {} : { selection: new vscode.Range(target.line, 0, target.line, 0) }),
+    });
   }
 
   // ── 连接 ────────────────────────────────────────────
@@ -629,6 +669,7 @@ class DshPanelView {
 
   /** 确保存在一条可用连接（可重复调用）。 */
   ensureConnection() {
+    if (this.disposed) return Promise.resolve(undefined);
     if (this.session) return Promise.resolve(this.session);
     if (this.connecting) return this.connecting;
     this.connecting = this.connectInternal().finally(() => {
@@ -672,6 +713,7 @@ class DshPanelView {
    * @returns {Promise<{ok: boolean, command?: string, detail?: string}>}
    */
   async spawnFallback(cfg) {
+    if (this.disposed) return { ok: false };
     // 顶栏只显示简短状态；"启动原因""使用哪个配置集"这类说明写入对话流。
     this.post({ type: 'status', state: 'connecting', detail: '正在启动…' });
     /*
@@ -792,6 +834,7 @@ class DshPanelView {
         // 交由 manager 启动并登记：这样"视图销毁"不会终止该进程，另一个窗口也可以复用。
         // 接入点固定在面板自身的端口上（该插件读取 DSH_ACP_DOOR_PORT，见 dsh-door/lib/port.js）。
         // 配置集中的 port 是**默认值**，不是命令；内核由哪一方启动，端口即由该方决定。
+        if (this.disposed) return { ok: false };
         entry = this.kernels.spawn({
           host: cfg.host,
           port: cfg.selfStartPort,
@@ -1008,6 +1051,7 @@ class DshPanelView {
     // 新版明确报告“没有模型”时则在建会话之前停止并给出可执行提示，避免用户直到
     // 发送第一条消息才看到晦涩的 `agent has no provider/model`。
     try {
+      this.observeHistory(client);
       const status = await client.doorStatus();
       this.doorStatus = status;
       this.connections.setStatus(status);
@@ -1052,6 +1096,7 @@ class DshPanelView {
       }
     }
 
+    if (this.disposed || !client.isConnected) return undefined;
     this.client = client;
     const session = new DshSession({ client, log: this.log });
     this.session = session;
@@ -1127,6 +1172,9 @@ class DshPanelView {
   /** 把会话与客户端的事件转发到界面。 */
   wire(session, client) {
     this.unwire(session);
+    this.memeMedia?.reset();
+    this.panelImages?.reset();
+    if (this.panelImages?.store) client.imageStore = this.panelImages.store;
     const handlers = [];
     this.sessionBindings ||= new Map();
     const onSession = (name, listener) => { session.on(name, listener); handlers.push(() => session.off(name, listener)); };
@@ -1136,10 +1184,20 @@ class DshPanelView {
       this.post({ type: 'assistant', id: payload.id });
     });
     onSession('text', (payload) => this.post({ type: 'text', id: payload.id, delta: payload.delta }));
+    onSession('image', (payload) => { void this.panelImages?.incoming(payload.id, payload.content); });
     onSession('thinking', (payload) =>
       this.post({ type: 'thinking', id: payload.id, delta: payload.delta }),
     );
-    onSession('tool', (payload) => this.post({ type: 'tool', id: payload.id, tool: payload.tool }));
+    onSession('tool', (payload) => {
+      const contents = Array.isArray(payload.tool?.content) ? payload.tool.content : [];
+      const images = contents.filter(item => (item?.type === 'content' ? item.content : item)?.type === 'image');
+      const projected = images.length ? { ...payload.tool, content: contents.map(item => images.includes(item) ? { type: 'text', text: '图片结果（见回复图片）' } : item) } : payload.tool;
+      this.post({ type: 'tool', id: payload.id, tool: projected });
+      for (const item of contents) {
+        const content = item?.type === 'content' ? item.content : item;
+        if (content?.type === 'image') void this.panelImages?.incoming(payload.id, content);
+      }
+    });
     onSession('done', (payload) => {
       if (payload.status === 'error' || payload.status === 'cancelled') this.pauseQueue('当前回合未完成，请处理后显式继续。');
       this.post({ type: 'done', id: payload.id, status: payload.status });
@@ -1147,7 +1205,7 @@ class DshPanelView {
     onSession('usage', (payload) =>
       this.post({ type: 'usage', used: payload.used, size: payload.size }),
     );
-    onSession('config', (payload) => this.post({ type: 'config', configOptions: payload.configOptions }));
+    onSession('config', (payload) => { this.post({ type: 'config', configOptions: payload.configOptions }); void this.panelImages?.refresh(); });
     onSession('presets', (payload) => this.onPresets(payload));
     onSession('busy', (payload) => {
       this.post({ type: 'busy', busy: payload.busy });
@@ -1159,6 +1217,10 @@ class DshPanelView {
       if (!payload.busy) setTimeout(() => { void this.drainQueue(); }, 0);
     });
     onSession('session', (payload) => {
+      this.memeMedia?.reset();
+      void this.memeMedia?.handle({ type: 'memeCatalog' });
+      this.panelImages?.reset();
+      void this.panelImages?.refresh();
       this.contextSessionSerial++;
       this.workflow?.publish();
       this.log('info', `当前会话 ${payload.sessionId}`);
@@ -1184,6 +1246,8 @@ class DshPanelView {
     };
     client.on('permission', onPermission); handlers.push(() => client.off('permission', onPermission));
     const onClose = (reason) => {
+      this.memeMedia?.reset();
+      this.panelImages?.reset();
       this.pauseQueue('连接已中断，请恢复原对话后显式继续。');
       this.unwire(session);
       this.clientCloseHandlers.delete(client);
@@ -1389,6 +1453,7 @@ class DshPanelView {
         if (input.attachments.length && vscode.workspace.isTrusted === false) throw new Error('请信任当前工作区后再发送附件。');
         if (input.attachments.some(item => item?.kind === 'file' && typeof item.text !== 'string')) throw new Error('旧文件附件没有正文快照，请移除后重新添加，再确认预览后发送。');
         const draft = snapshotMessage(input.text, input.attachments);
+        if (draft.attachments.some(item => item.kind === 'image')) await this.panelImages.assertInput(draft.attachments);
         if (epoch !== this.queueEpoch || this.historyReadonly || !this.view || cwd !== this.workdir() || session !== this.session || draft.attachments.length && vscode.workspace.isTrusted === false) throw new Error('对话或工作区已变化，请重新发送。');
         if (this.workflow?.activeTest || this.workflow?.undoing || recordingBlocksSend()) throw new Error('请等测试、撤销或改动整理完成后再发送消息。');
         if (this.queue.paused && !this.queue.items.length && !this.queue.active) this.queue.resume();
@@ -1558,6 +1623,7 @@ class DshPanelView {
     if (this.configPending || this.reconnectPending) throw new Error('请等设置或连接恢复完成后再发送消息。');
     if (this.workflow?.activeTest || this.workflow?.undoing) throw new Error('请等测试或撤销完成后再发送消息。');
     const items = Array.isArray(attachments) ? attachments.filter(Boolean) : [];
+    if (items.some(item => item.kind === 'image')) await this.panelImages.assertInput(items);
     if (items.length > 20 || items.reduce((size, item) => size + (typeof item.text === 'string' ? Buffer.byteLength(item.text) : 0), 0) > 256 * 1024) throw new Error('最多附加 20 项，正文总量不超过 256 KiB；请移除附件或选择较小选区。');
     if (items.length && vscode.workspace.isTrusted === false) throw new Error('请信任当前工作区后再发送附件');
     if ((!text || !text.trim()) && items.length === 0) return;
@@ -1591,7 +1657,7 @@ class DshPanelView {
     const command = COMMANDS.find(item => item.id === id);
     if (!command) throw new Error('未知命令，请重新选择。');
     const busy = this.session?.busy || this.queue.active || this.newSessionPending || this.workflow?.recording || this.workflow?.activeTest || this.workflow?.undoing;
-    if (busy && ['new', 'model', 'changes', 'test'].includes(command.name)) throw new Error('请等当前任务结束后再执行此命令。');
+    if (busy && ['model', 'changes', 'test'].includes(command.name)) throw new Error('请等当前任务结束后再执行此命令。');
     switch (command.name) {
       case 'new': return this.newSession();
       case 'review': return vscode.commands.executeCommand('dshPanel.bridge.review');
@@ -1663,18 +1729,58 @@ class DshPanelView {
   // 管理**，接入点过旧或旁路方法不可用时仍需提供本地读取路径。
   // 面板与内核位于同一台机器，历史读取无需启动或修改另一套内核配置。
 
-  /**
-   * 读取一次历史会话。
-   *
-   * @param {'list'|'get'} kind
-   * @param {string} [id] kind==='get' 时使用的会话 id。
-   * @returns {Promise<{result: object, via: 'door'|'local'}>}
-   */
+  /** 缓存按内核来源、工作目录、搜索和页码隔离。 */
+  historyCacheContext() {
+    this.historyCache ||= new HistorySummaryCache(this.workspaceState);
+    const config = this.config();
+    return { cache: this.historyCache, source: JSON.stringify([localSessions.resolveSessionsRoot(), config.host, config.port]) };
+  }
+
+  observeHistory(client) {
+    if (!client || this.historyNotificationClient === client) return;
+    this.historyNotificationClient?.off?.('notification', this.historyNotificationListener);
+    this.historyNotificationClient = client;
+    this.historyArchiveRevision = undefined;
+    this.historyNotificationListener = (method, params) => {
+      if (method !== 'dsh-door/history-changed' || this.disposed || client !== this.client || !/^[a-f0-9]{64}$/.test(params?.archiveRevision || '') || params.archiveRevision === this.historyArchiveRevision) return;
+      this.historyArchiveRevision = params.archiveRevision;
+      void this.invalidateHistory(!this.historyArchivePending).catch(error => this.log('warn', `更新历史缓存失败：${this.errText(error)}`));
+    };
+    client.on?.('notification', this.historyNotificationListener);
+  }
+
+  async invalidateHistory(notify = false) {
+    this.historySearchController?.abort();
+    const { cache, source } = this.historyCacheContext();
+    await cache.clear(source);
+    if (notify && !this.disposed && source === this.historyCacheContext().source) this.post({ type: 'historyChanged' });
+  }
+
+  async archiveHistory(message) {
+    const id = typeof message.id === 'string' ? message.id : '';
+    const requestId = message.requestId;
+    if (!/^[A-Za-z0-9._-]+$/.test(id) || typeof message.archived !== 'boolean') throw new Error('归档参数不合法。');
+    if (this.historyArchivePending) { this.post({ type: 'historyArchiveResult', id, requestId, success: false, error: '归档操作正在同步，请稍后重试。' }); return; }
+    const client = this.client;
+    this.historyArchivePending = true;
+    try {
+      if (!client?.isConnected || typeof client.archiveHistory !== 'function') throw new Error('请连接支持归档同步的 DSH 接入点。');
+      const result = await client.archiveHistory(id, message.archived);
+      await this.invalidateHistory();
+      if (this.disposed || client !== this.client) return;
+      this.historyArchiveRevision = result.archiveRevision;
+      this.post({ type: 'historyArchiveResult', id, requestId, success: true, archived: result.archived });
+    } catch (error) {
+      await this.invalidateHistory().catch(() => {});
+      if (!this.disposed && client === this.client) this.post({ type: 'historyArchiveResult', id, requestId, success: false, error: this.historyErrorText(error) });
+    } finally { this.historyArchivePending = false; }
+  }
+
+  /** 读取一次历史；完整回放始终读取实际会话，不使用摘要缓存。 */
   async readHistory(kind, id, options = {}) {
     const localRoot = localSessions.resolveSessionsRoot();
     const client = this.client;
-    this.historyCache ||= new HistorySummaryCache(this.workspaceState);
-    const config = this.config(), source = JSON.stringify([localRoot, config.host, config.port]);
+    const { cache, source } = this.historyCacheContext();
     let remoteError;
 
     // 能够向该插件查询时即通过该插件查询：这是本机 DSH 返回的正式数据来源。
@@ -1682,13 +1788,16 @@ class DshPanelView {
     // 因此不再在每次打开历史会话时发起一次注定失败的往返。
     if (this.historyVia !== 'local' && client && client.isConnected) {
       try {
-        const result = kind === 'list'
+        const received = kind === 'list'
           ? await client.listHistory(options)
           : await client.getHistory(String(id || ''));
+        const result = kind === 'list' && typeof received?.archiveStateKnown !== 'boolean'
+          ? { ...received, archiveStateKnown: false, archiveSupported: false,
+            limitation: '归档同步暂不可用，请更新接入点并重启 DSH。' } : received;
         options.signal?.throwIfAborted();
         this.historyVia = 'door';
         if (kind === 'list') {
-          try { await this.historyCache.put(source, options, result); }
+          try { await cache.put(source, options, result); }
           catch (error) { this.log('warn', `缓存历史摘要失败：${error.message}`); }
         }
         return { result, via: 'door' };
@@ -1704,7 +1813,7 @@ class DshPanelView {
       }
     }
     if (kind === 'list') {
-      const cached = this.historyCache.get(source, options);
+      const cached = cache.get(source, options);
       if (cached) return { result: cached, via: 'cache' };
     }
     if (!localSessions.hasZstdSupport()) {
@@ -1728,22 +1837,48 @@ class DshPanelView {
    * 接入点插件版本过低时，上述本机读取途径会自动补上，不要求用户修改桌面端配置集。
    */
   async sendHistoryList(request = {}) {
+    if (this.disposed) return;
     this.historySearchController?.abort();
     const controller = this.historySearchController = new AbortController();
     const requestId = Number.isInteger(request.requestId) ? request.requestId : undefined;
+    let cachedPage, publish;
     try {
-      const options = historyOptions({ ...request, cwd: request.projectOnly === true ? this.workdir() : '' });
+      const currentCwd = this.workdir();
+      const options = historyOptions({ ...request, cwd: request.projectOnly === true ? currentCwd : '' });
+      const { cache, source } = this.historyCacheContext();
+      this.observeHistory(this.client);
+      if (request.refresh === true) await cache.clear(source);
+      publish = (result, via, extra = {}) => {
+        if (controller.signal.aborted || this.disposed || currentCwd !== this.workdir() || source !== this.historyCacheContext().source) return;
+        const sessions = Array.isArray(result?.sessions) ? result.sessions : [];
+        if (via !== 'cache' && result?.archiveStateKnown) this.historyArchiveRevision = result.archiveRevision;
+        this.post({ type: 'history', via, sessions, requestId, currentCwd, skipped: result?.skipped || 0, total: result?.total, offset: result?.offset || 0, nextOffset: result?.nextOffset,
+          cachedAt: result?.cachedAt, cacheScope: result?.cacheScope, limited: result?.limited, limitation: result?.limitation, offline: result?.offline, unsupported: result?.unsupported, emptyReason: result?.emptyReason,
+          archiveSupported: result?.archiveSupported, archiveStateKnown: result?.archiveStateKnown, workspaceStateKnown: result?.workspaceStateKnown, archiveRevision: result?.archiveRevision,
+          queryUnsupported: (options.query || options.cwd || options.offset) && result?.offset === undefined, ...extra });
+      };
+      if (request.refresh !== true && this.historyVia !== 'local' && this.client?.isConnected) {
+        cachedPage = cache.get(source, options, { refreshing: true });
+        if (cachedPage && cachedPage.archiveStateKnown !== true) cachedPage = undefined;
+        if (cachedPage?.archiveStateKnown && cachedPage.archiveRevision !== this.historyArchiveRevision && typeof this.client.historyState === 'function') {
+          const state = await this.client.historyState({ signal: controller.signal });
+          controller.signal.throwIfAborted();
+          this.historyArchiveRevision = state.archiveRevision;
+          if (state.archiveRevision !== cachedPage.archiveRevision) { await cache.clear(source); cachedPage = undefined; }
+        }
+        if (cachedPage) publish(cachedPage, 'cache', { refreshing: true });
+      }
       const { result, via } = await this.readHistory('list', undefined, { ...options, signal: controller.signal });
       if (controller.signal.aborted) return;
       const sessions = Array.isArray(result && result.sessions) ? result.sessions : [];
       // 本地读取失败时（目录不可读等）原因会写入 error 字段，不应将其视为「没有历史会话」。
       if (sessions.length === 0 && result && result.error) throw new Error(result.error);
-      this.post({ type: 'history', via, sessions, requestId, skipped: result?.skipped || 0, total: result?.total, offset: result?.offset || 0, nextOffset: result?.nextOffset,
-        cachedAt: result?.cachedAt, cacheScope: result?.cacheScope, limited: result?.limited, limitation: result?.limitation, offline: result?.offline, unsupported: result?.unsupported, emptyReason: result?.emptyReason,
-        queryUnsupported: (options.query || options.cwd || options.offset) && result?.offset === undefined });
+      publish(result, via);
     } catch (error) {
-      if (controller.signal.aborted) return;
-      this.post({ type: 'history', requestId, error: this.historyErrorText(error) });
+      if (controller.signal.aborted || this.disposed) return;
+      if (cachedPage) publish({ ...cachedPage, limitation: '当前页刷新失败，继续显示上次读取的摘要；可能包含已删除的会话。' }, 'cache', { refreshError: this.historyErrorText(error) });
+      else if (publish) publish({}, undefined, { error: this.historyErrorText(error) });
+      else this.post({ type: 'history', requestId, error: this.historyErrorText(error) });
     }
   }
 
@@ -1774,7 +1909,12 @@ class DshPanelView {
         readonly,
         via,
         card: result && result.card ? result.card : {},
-        entries: Array.isArray(result && result.entries) ? result.entries : [],
+        entries: (Array.isArray(result && result.entries) ? result.entries : []).map(entry => {
+          if (!Array.isArray(entry.images) || !entry.images.length) return entry;
+          const images = entry.images.filter(image => typeof image?.id === 'string' && /^dsh-image:[a-zA-Z0-9_-]{1,128}$/.test(image.source || ''));
+          const notice = images.length < entry.images.length ? '[图片附件未载入：请连接支持图片回放的 DSH 内核后重新打开历史]' : '';
+          return { ...entry, images, ...(entry.kind === 'tool' ? { output: [entry.output, notice].filter(Boolean).join('\n') } : { text: [entry.text, notice].filter(Boolean).join('\n') }) };
+        }),
         truncated: Boolean(result && result.truncated),
       };
       if (readonly) this.lastHistoricalReplay = replay;
@@ -1831,6 +1971,7 @@ class DshPanelView {
     const replay = await replayPromise;
     if (replayEpoch !== this.historyReplayEpoch || this.historyReplayFailed || !this.historyReadonly || this.historyId !== id || this.session !== session || !this.client?.isConnected) return false;
     try {
+      if (replay?.card?.archived) throw new Error('该会话已归档，请先恢复归档再继续对话。');
       const historyPreset = typeof replay?.card?.preset === 'string' && replay.card.preset.trim() ? replay.card.preset.trim() : undefined;
       await this.restoreSession(session, String(id || ''), options.cwd || this.workdir(), options.preset || historyPreset);
       if (this.session !== session || this.client !== session.client || !this.client?.isConnected) return false;
@@ -1980,6 +2121,12 @@ class DshPanelView {
   }
 
   newSession() {
+    // Replacing the running session would close its stream and pause its queue.
+    // Open an independent tab before entering the replacement transaction.
+    if (this.openConversation && (this.session?.busy || this.queue.active || this.workflow?.activeTest ||
+        this.workflow?.recording || this.workflow?.undoing || this.connections.turns?.has(this.session?.sessionId))) {
+      return Promise.resolve().then(() => this.openConversation());
+    }
     return this.changeSession(() => this.newSessionInternal(), 'new');
   }
 
@@ -2443,6 +2590,8 @@ class DshPanelView {
   }
 
   teardown() {
+    this.memeMedia?.reset();
+    this.panelImages?.reset();
     this.pauseQueue('连接正在关闭，请确认原对话后显式继续。');
     this.cancelPendingPermissionRequests(undefined, '连接正在关闭');
     if (this.session) {
@@ -2469,6 +2618,8 @@ class DshPanelView {
   }
 
   dispose() {
+    this.historyNotificationClient?.off?.('notification', this.historyNotificationListener);
+    this.disposed = true;
     this.pendingQueueEdits.clear();
     void this.draftStore.flush().catch(error => this.log('warn', `保存草稿失败：${error.message}`));
     this.composerQuery?.abort();

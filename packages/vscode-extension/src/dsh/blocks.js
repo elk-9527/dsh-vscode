@@ -1,5 +1,6 @@
 'use strict';
 const { fileURLToPath } = require('node:url');
+const { imageContentBlock, MAX_IMAGE_COUNT, MAX_MESSAGE_IMAGE_BYTES } = require('./images');
 
 /** Assemble ACP blocks from user text and explicit context snapshots. Source
  * metadata identifies the captured body; it never requests a later file read.
@@ -79,8 +80,16 @@ function contentText(item) {
  */
 function buildPromptBlocks(text, attachments = []) {
   const blocks = [];
+  let imageCount = 0, imageBytes = 0;
   for (const item of Array.isArray(attachments) ? attachments : []) {
     if (!item || typeof item !== 'object') continue;
+    if (item.kind === 'image') {
+      const block = imageContentBlock(item);
+      imageCount++; imageBytes += Buffer.byteLength(block.data, 'base64');
+      if (imageCount > MAX_IMAGE_COUNT || imageBytes > MAX_MESSAGE_IMAGE_BYTES) throw new Error('每条消息最多附加 4 张图片，图片总量不超过 16 MiB。');
+      blocks.push(block);
+      continue;
+    }
     const hasText = typeof item.text === 'string' && item.text.trim();
     const hasUri = typeof item.uri === 'string' && item.uri;
     if (item.kind === 'skill' && hasText) {

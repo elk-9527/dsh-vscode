@@ -2,9 +2,17 @@
 
 连接本机 DSH 与 VS Code 等外部程序，共用模型、工具、记忆和会话。支持历史查看、权限切换及已注册插件的能力调用。
 
+存在 DSH `workspaceRegistry` 时，历史列表默认仅包含工作区已登记或已置顶的未归档会话，`archived: true` 只读取已归档会话，`unlisted: true` 读取尚未登记的未归档持久记录；过滤先于分页与标题读取。新建和接回的 ACP 会话会登记到相应工作区。归档、恢复调用同一注册表的 `archiveSession`、`unarchiveSession`，不直接修改归档文件，也不隐式停止运行中的任务。归档与成员范围变更以 `dsh-door/history-changed` 通知所有已连接面板，通知只含列表版本，不含会话正文。缺少该服务时明确报告归档状态未知，并禁用写入。
+
 旧版 v3 历史异步读取并在内存中缓存摘要，最多保留 16384 条或 8 MiB；不缓存完整对话正文。文件身份、大小或修改时间变化后重新读取，删除的记录从缓存移除。客户端通过 `$/cancelRequest`（`id`）或 ACP 的 `$/cancel_request`（`requestId`）取消查询，连接断开也会停止等待结果；v3 会同时停止后续读取，v4 内部读取仍由内核公开 `sessionQuery` 管理。每个连接最多同时等待 8 个历史请求。
 
 需要已安装并运行的 DeepSeek Harness，以及支持 ACP 的外部客户端。接入点仅供本机使用；安装后需重启对应的 DSH 内核。
+
+`dsh-door/images/capabilities`（`{sessionId}`）检查当前连接所属会话的模型是否声明图片输入、原生附件服务是否可用，以及初始化连接时是否启用了图片。当前验证范围为 ACP `0.2.1-rc.3`，发送仍使用标准 ACP 图片内容块。模型切换后重新查询；原连接禁用图片时需要重连。相关工具清单来自当前 Agent 可见的注册名称，不能据此保证外部搜图或图片生成服务可用。
+
+成功读取历史后，图片以不含原生附件标识的临时引用返回。客户端通过 `dsh-door/images/read`（`{token}`）读取该连接已取得的图片引用；未知或其他连接的引用被拒绝。历史图片按格式、内容摘要和大小校验，并受并发、超时和取消限制。
+
+在同一内核启用 `dsh-meme` 和 Web 服务时，客户端可通过 `dsh-door/media/catalog`、`dsh-door/media/read` 读取表情图库及图片，两个方法均指定 `provider: "dsh-meme"`，图片读取另传图库返回的 `id`。状态中的 `capabilities.media` 表示适配接口可用；插件是否已启用以图库请求结果为准。适配器只访问该内核回环地址上的固定插件路由，不读取图库数据库，不执行图库管理操作；每项内容限制为 8 MiB，并校验图片类型及文件签名。当前按 `dsh-meme 0.1.52` 的公开路由格式验证。
 
 `0.2.0` 增加同一连接上的 IDE Bridge：插件主动注册能力、本机自动鉴权、可恢复运行与取消。
 协议规范见仓库的 `docs/bridge-v1.md`。现有 ACP 会话、流式输出、历史和权限方法继续兼容。
@@ -53,6 +61,7 @@ dsh plugin --profile <档名> add dsh-acp-door
 ```
 
 安装完成后需要**重启内核**（或重启桌面端）才会生效：ACP 接入点插件（`dsh-acp-door`）在内核启动时加载。
+
 该插件装入哪个档，外部程序即可连接该档的 DSH —— 桌面端所用的档由桌面端自身管理
 （运行时命令行无法修改），因此通常装入用户自己的档。
 
@@ -67,6 +76,26 @@ dsh plugin --profile vscode-panel add dsh-acp-door
 安装后重启该配置集的内核。新会话默认使用该配置集中 DSH 当前选择的默认模型；无需把
 服务商或模型名再复制到本插件配置中。若该配置集还没有选择模型，先在 DSH 的模型设置中完成选择。
 不同电脑分别安装各自的 DSH 与本插件；接入点固定在 `127.0.0.1`，不支持远程设备连接、端口转发或隧道。
+
+### 安装 VS Code 配套扩展
+
+在提供 Connection 与界面 Slots 接口的本机 DSH 桌面端或网页版中，首次加载接入点后会检查默认 VS Code 配置集。
+尚未安装时显示“VS Code 配套扩展”提示。选择编辑器和已有配置集，点击“安装配套扩展”后，
+插件通过 VS Code 官方命令下载 `Elk-ydy.dsh-acp-panel`，并重新查询所选配置集，确认存在后才显示成功。
+已经安装时不重复安装或强制更新。安装失败可重试，也可使用提示中的扩展市场入口或手动命令。
+
+点击“稍后安装”会保存偏好，不再自动弹出。之后可从 DSH **设置 → VS Code 配套扩展**继续安装或重新检测。
+该偏好保存在当前 `DSH_HOME` 的 `plugins/dsh-acp-door/companion.json` 中，与插件版本无关。
+不会在包管理器的安装脚本中执行安装；安装动作仅由用户点击触发。
+
+编辑器检测覆盖常见安装目录、Windows 安装记录及 PATH 中的 VS Code / Insiders；Windows 便携版读取自身数据目录。
+未检测到的自定义安装可以直接在 VS Code 扩展视图搜索 **DSH ACP Panel**。
+安装过程中不创建 VS Code 配置集。远程访问的 DSH 页面不提供此功能；无界面或缺少上述接口的旧 DSH
+继续使用原有 ACP 接入点，可按以下命令单独安装扩展：
+
+```sh
+code --install-extension Elk-ydy.dsh-acp-panel
+```
 
 ## 更新
 
@@ -248,8 +277,10 @@ ACP `0.2.1-rc.2` 与 `0.2.1-rc.3` 可通过 `dsh-door/text/generate` 使用所�
 | 方法 | 该插件所需的 params | 该插件的回复 | 起始版本 |
 | --- | --- | --- | --- |
 | `dsh-door/status` | `{}` | `{ version, model: {ready, source, provider?, model?}, capabilities }` | 0.0.14 |
-| `dsh-door/sessions/list` | `{}`（可选 `cwd`；从 0.3.0 起支持 `limit`、`offset`、`query`） | `{ skipped, sessions: [...] }`；0.3.0 起含 `total`、`offset`、`nextOffset?` | 0.0.8 |
+| `dsh-door/sessions/list` | 可选 `cwd`、`limit`、`offset`、`query`；未发布版增加 `archived`、`unlisted` | `{ skipped, sessions, total, offset, nextOffset?, archiveStateKnown?, workspaceStateKnown?, archiveSupported?, archiveRevision? }` | 0.0.8（分页与搜索从 0.3.0 起） |
 | `dsh-door/sessions/get` | `{ id }` | `{ card, entries, truncated }` | 0.0.8 |
+| `dsh-door/sessions/state` | `{}` | `{ archiveStateKnown, archiveSupported, archiveRevision? }` | 未发布 |
+| `dsh-door/sessions/archive` | `{ id, archived: boolean }` | `{ id, archived, archiveStateKnown, archiveSupported, archiveRevision }` | 未发布 |
 | `dsh-door/permission/get` | `{ id }` | `{ currentValue, options: [{value, name?, description?}], defaultPreset? }` | 0.0.12 |
 | `dsh-door/permission/set` | `{ id, value }` | 同 `permission/get`（**修改之后回读**的真实状态） | 0.0.12 |
 

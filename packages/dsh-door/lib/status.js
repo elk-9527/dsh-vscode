@@ -19,11 +19,14 @@ export function doorStatusPayload({
   model,
   textGeneration,
   historyKind = 'legacy-v3-disk',
+  historyArchive = false,
   permissionKind,
   acpVersion,
   bridge,
   instanceId,
   connectionCount,
+  media,
+  images,
 } = {}) {
   const selection = model && model.selection;
   const normalizedHistory =
@@ -43,9 +46,12 @@ export function doorStatusPayload({
       presets: true,
       ...(textGeneration ? { textGeneration: { path: 'llm-direct-v1', tools: false } } : {}),
       ...(bridge ? { bridge } : {}),
+      ...(media ? { media } : {}),
+      ...(images ? { images: { protocolVersion: 1, query: true, historyRead: true } } : {}),
       history: normalizedHistory !== 'unavailable',
       historyQuery: normalizedHistory !== 'unavailable',
       historyKind: normalizedHistory,
+      ...(historyArchive ? { historyArchive: true } : {}),
       ...(normalizedHistory === 'unavailable' ? {} : { sessionFormat: normalizedHistory === 'session-query' ? 4 : 3 }),
       permissionPresets: Boolean(permissionKind),
       ...(permissionKind ? { permissionKind } : {}),

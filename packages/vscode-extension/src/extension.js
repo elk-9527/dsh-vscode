@@ -11,6 +11,7 @@
 const vscode = require('vscode');
 const { runtimeSupport } = require('./runtime-support');
 const { DshPanelView, VIEW_ID } = require('./panel/view');
+const { ConversationPanels, CONVERSATION_VIEW } = require('./panel/conversations');
 const { DshConnectionService } = require('./connection/service');
 const { BridgeViews } = require('./bridge/views');
 const { PublicApi } = require('./api/service');
@@ -67,15 +68,22 @@ async function activate(context) {
   const clientId = context.workspaceState.get(CLIENT_ID_KEY) || randomUUID();
   void context.workspaceState.update(CLIENT_ID_KEY, clientId);
   const connections = new DshConnectionService({ log, clientId });
-  const view = new DshPanelView({
+  const panelOptions = {
     extensionUri: context.extensionUri,
     workspaceState: context.workspaceState,
+    imageStorageRoot: context.storageUri || context.globalStorageUri ? vscode.Uri.joinPath(context.storageUri || context.globalStorageUri, 'images').fsPath : undefined,
     log,
-    connections,
     desktopExecutables: [rememberedDesktop, ...detectedDesktops].filter(Boolean),
-  });
+  };
+  const view = new DshPanelView({ ...panelOptions, connections });
   const nativeViews = new BridgeViews({ context, connections, panel: view, log });
   view.skillInvoke = (...args) => nativeViews.invoke(...args);
+  const conversations = new ConversationPanels({ vscode, options: panelOptions });
+  view.openConversation = () => conversations.open({ source: view });
+  context.subscriptions.push(conversations,
+    vscode.window.registerWebviewPanelSerializer(CONVERSATION_VIEW, {
+      deserializeWebviewPanel: async (panel, state) => { await conversations.open({ source: view, panel, state }); },
+    }));
   view.workflow = new TurnWorkflow({ vscode, panel: view });
   view.tests = new WorkspaceTests({ vscode, workflow: view.workflow });
   nativeViews.verification = new ReviewTests({ vscode, views: nativeViews, workflow: view.workflow });
@@ -113,6 +121,10 @@ async function activate(context) {
     }),
     vscode.commands.registerCommand('dshPanel.newSession', async () => {
       await view.newSession();
+    }),
+    vscode.commands.registerCommand('dshPanel.newConversationWindow', async () => {
+      try { await conversations.open({ source: conversations.current() || view }); }
+      catch (error) { vscode.window.showErrorMessage(`无法打开对话：${view.errText(error)}`); }
     }),
     vscode.commands.registerCommand('dshPanel.reconnect', async () => {
       await view.reconnect();

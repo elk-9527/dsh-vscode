@@ -14,9 +14,10 @@ const MAX_TURNS = 10, MAX_HISTORY_BYTES = 32 * 1024 * 1024;
 
 /** 文件快照只保存在当前窗口内；基线包含已有的本地修改。 */
 class TurnWorkflow {
-  constructor({ vscode, panel }) {
+  constructor({ vscode, panel, scheme = 'dsh-turn' }) {
     this.vscode = vscode; this.panel = panel; this.documents = new Map(); this.records = []; this.recording = false;
-    this.registration = vscode.workspace.registerTextDocumentContentProvider('dsh-turn', { provideTextDocumentContent: uri => this.documents.get(uri.toString()) || '' });
+    this.scheme = scheme;
+    this.registration = vscode.workspace.registerTextDocumentContentProvider(scheme, { provideTextDocumentContent: uri => this.documents.get(uri.toString()) || '' });
   }
   guard(cwd) {
     const folder = this.vscode.workspace.getWorkspaceFolder(this.vscode.Uri.file(cwd));
@@ -117,7 +118,7 @@ class TurnWorkflow {
   publish() { this.panel.post(this.summary()); }
   document(key, text) {
     if (this.documents.size >= 40) this.documents.delete(this.documents.keys().next().value);
-    const uri = this.vscode.Uri.parse(`dsh-turn:/${key}`); this.documents.set(uri.toString(), text); return uri;
+    const uri = this.vscode.Uri.parse(`${this.scheme}:/${key}`); this.documents.set(uri.toString(), text); return uri;
   }
   item(id) {
     const turn = this.records.find(item => item.files.some(file => file.id === id)), file = turn?.files.find(item => item.id === id);

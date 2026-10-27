@@ -3,12 +3,26 @@ const MAX_BYTES = 512 * 1024;
 const TTL = 7 * 86400000;
 const path = require('node:path');
 const { attachmentMetadata } = require('./queue');
+const { validateImageDescriptor, MAX_IMAGE_COUNT, MAX_MESSAGE_IMAGE_BYTES } = require('../dsh/images');
 function workspaceIdentity(cwd) { return process.platform === 'win32' ? (path.isAbsolute(cwd) ? path.resolve(cwd) : cwd).toLowerCase() : cwd; }
 function draftKey(cwd) { return 'dshPanel.draft.v1.' + require('node:crypto').createHash('sha256').update(workspaceIdentity(cwd)).digest('hex'); }
 function draftContent(value, trusted) {
   if (!value || typeof value.text !== 'string' || value.text.length > 128 * 1024 || /\0/.test(value.text)) return undefined;
   if (trusted && Array.isArray(value.attachments) && value.attachments.length > 20) return undefined;
-  const attachments = trusted && Array.isArray(value.attachments) ? value.attachments.filter(item => item && ['file', 'selection', 'content', 'review', 'skill'].includes(item.kind) && (item.kind === 'file' ? typeof item.uri === 'string' && item.uri.startsWith('file:') : typeof item.text === 'string' && !/\0/.test(item.text)) && typeof item.name === 'string').map(item => ({ ...attachmentMetadata(item), ...Object.fromEntries(['uri', 'text', 'mimeType'].filter(key => typeof item[key] === 'string').map(key => [key, item[key]])), ...(typeof item.text === 'string' ? { byteLength: Buffer.byteLength(item.text, 'utf8') } : {}) })) : [];
+  let imageCount = 0, imageBytes = 0;
+  const attachments = [];
+  if (trusted && Array.isArray(value.attachments)) for (const item of value.attachments) {
+    if (item?.kind === 'image') {
+      let image;
+      try { image = validateImageDescriptor(item); } catch { return undefined; }
+      imageCount++; imageBytes += image.byteLength;
+      if (imageCount > MAX_IMAGE_COUNT || imageBytes > MAX_MESSAGE_IMAGE_BYTES) return undefined;
+      attachments.push(image);
+    } else if (item && ['file', 'selection', 'content', 'review', 'skill'].includes(item.kind) &&
+      (item.kind === 'file' ? typeof item.uri === 'string' && item.uri.startsWith('file:') : typeof item.text === 'string' && !/\0/.test(item.text)) && typeof item.name === 'string') {
+      attachments.push({ ...attachmentMetadata(item), ...Object.fromEntries(['uri', 'text', 'mimeType'].filter(key => typeof item[key] === 'string').map(key => [key, item[key]])), ...(typeof item.text === 'string' ? { byteLength: Buffer.byteLength(item.text, 'utf8') } : {}) });
+    }
+  }
   if (attachments.reduce((sum, item) => sum + Buffer.byteLength(item.text || '', 'utf8'), 0) > 256 * 1024) return undefined;
   return { text: value.text, attachments };
 }

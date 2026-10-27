@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const suites = [
+  ['当前会话图片能力与原生 ACP 协议', 'images.js'],
+  ['表情包只读接口与图片边界', 'media.js'],
+  ['VS Code 配套安装', 'companion.js'],
   ['Bridge 运行与鉴权', 'bridge.js'],
   ['Bridge 实际执行生命周期', 'bridge-lifecycle.js'],
   ['传输预算与控制消息', 'transport-budgets.js'],
@@ -16,6 +19,7 @@ const suites = [
   ['模型选择与状态', 'model-status.js'],
   ['权限预设旁路', 'permission.js'],
   ['内核兼容适配器', 'kernel-adapters.js'],
+  ['归档过滤、恢复和同步', 'history-archive.js'],
   ['连接生命周期', 'lifecycle.js'],
 ];
 

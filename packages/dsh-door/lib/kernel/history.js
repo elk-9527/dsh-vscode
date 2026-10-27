@@ -14,6 +14,7 @@ import {
   summarizeSession,
 } from '../sessions.js';
 import historyQuery from '../history-query.cjs';
+import { archiveSnapshot, archiveMetadata, setHistoryArchived } from './history-archive.js';
 const { historyOptions, matchesHistory, historyPage, pageMetadata } = historyQuery;
 
 const MAX_CONCURRENCY = 4;
@@ -54,7 +55,7 @@ async function mapLimited(items, mapper, concurrency = MAX_CONCURRENCY) {
 }
 
 /** Create a history handler backed by the public DSH 0.2 sessionQuery service. */
-export function createSessionQueryHistory(service, diag = () => {}) {
+export function createSessionQueryHistory(service, diag = () => {}, { getWorkspaceRegistry = () => undefined } = {}) {
   if (
     !service ||
     typeof service.listSessions !== 'function' ||
@@ -64,13 +65,22 @@ export function createSessionQueryHistory(service, diag = () => {}) {
   }
   return {
     kind: 'session-query',
+    get archiveSupported() { return archiveSnapshot(getWorkspaceRegistry()).archiveSupported; },
+    async state() { return archiveMetadata(archiveSnapshot(getWorkspaceRegistry())); },
+    async archive(id, archived, options) { return setHistoryArchived(getWorkspaceRegistry(), id, archived, options); },
     async list(params = {}) {
       params.signal?.throwIfAborted();
       const options = historyOptions(params);
       const listed = await service.listSessions(); params.signal?.throwIfAborted();
+      const archive = archiveSnapshot(getWorkspaceRegistry());
+      if (options.archived && !archive.archiveStateKnown) throw new Error('当前内核不支持读取已归档会话，请更新接入点并连接 DSH。');
+      if (options.unlisted && !archive.workspaceStateKnown) throw new Error('当前内核不支持区分未登记的历史，请更新接入点并连接 DSH。');
+      const page = result => ({ ...result, ...archiveMetadata(archive), sessions: result.sessions.map(card => ({ ...card, ...(archive.archiveStateKnown ? { archived: archive.ids.has(card.id) } : {}) })),
+        ...(!archive.archiveStateKnown ? { limitation: '当前接入点无法同步归档状态，列表可能包含已归档会话。' } : {}) });
       const records = listed.filter(record => {
         const header = record?.header ?? record?.session ?? record;
-        return typeof header?.id === 'string' && header.id && matchesHistory(header, { ...options, query: '' });
+        return typeof header?.id === 'string' && header.id && (!archive.archiveStateKnown || archive.ids.has(header.id) === options.archived)
+          && (options.archived || !archive.visibleIds || archive.visibleIds.has(header.id) !== options.unlisted) && matchesHistory(header, { ...options, query: '' });
       });
       const selected = options.query ? records : records.slice(options.offset, options.offset + options.limit);
       // The batch API resolves persistence once and folds titles without replaying
@@ -88,7 +98,7 @@ export function createSessionQueryHistory(service, diag = () => {}) {
           else if (observation?.status === 'rejected') card.decodeError = '会话标题暂时无法读取';
           return card;
         }).filter(card => card.id);
-        return options.query ? historyPage(cards, options) : pageMetadata(cards, records.length, options);
+        return page(options.query ? historyPage(cards, options) : pageMetadata(cards, records.length, options));
       }
       const sessions = await mapLimited(selected, async (record) => {
         params.signal?.throwIfAborted();
@@ -107,13 +117,16 @@ export function createSessionQueryHistory(service, diag = () => {}) {
         }
       });
       const cards = sessions.filter(card => card.id);
-      return options.query ? historyPage(cards, options) : pageMetadata(cards, records.length, options);
+      return page(options.query ? historyPage(cards, options) : pageMetadata(cards, records.length, options));
     },
     async get(id, options = {}) {
       options.signal?.throwIfAborted();
       const wanted = assertSessionId(id);
       try {
-        const result = historyFromQueryRead(await service.readSession(wanted)); options.signal?.throwIfAborted(); return result;
+        const result = historyFromQueryRead(await service.readSession(wanted)); options.signal?.throwIfAborted();
+        const archive = archiveSnapshot(getWorkspaceRegistry());
+        if (archive.archiveStateKnown) result.card.archived = archive.ids.has(wanted);
+        return result;
       } catch (error) {
         if (error?.code === 'SESSION_QUERY_SESSION_NOT_FOUND' || /not found|no session/i.test(error?.message || '')) {
           throw new Error(`找不到会话 ${wanted}`);

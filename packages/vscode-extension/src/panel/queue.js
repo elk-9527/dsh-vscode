@@ -1,5 +1,6 @@
 'use strict';
 const { randomUUID } = require('node:crypto');
+const { validateImageDescriptor, MAX_IMAGE_COUNT, MAX_MESSAGE_IMAGE_BYTES } = require('../dsh/images');
 /** @typedef {import('./protocol-types').AttachmentSnapshot} AttachmentSnapshot */
 /** @typedef {import('./protocol-types').QueueEntry & { failed?: boolean, reason?: string, requestDigest?: string }} QueueEntry */
 
@@ -18,8 +19,14 @@ function attachmentMetadata(item) {
 function snapshotMessage(text, attachments = []) {
   if (typeof text !== 'string' || Buffer.byteLength(text) > 256 * 1024) throw new Error('消息正文需为文本，且不超过 256 KiB。');
   if (!Array.isArray(attachments) || attachments.length > 20) throw new Error('最多附加 20 项。');
-  let bytes = 0;
+  let bytes = 0, imageBytes = 0, imageCount = 0;
   const items = attachments.filter(Boolean).map(item => {
+    if (item?.kind === 'image') {
+      const image = validateImageDescriptor(item);
+      imageCount++; imageBytes += image.byteLength;
+      if (imageCount > MAX_IMAGE_COUNT || imageBytes > MAX_MESSAGE_IMAGE_BYTES) throw new Error('每条消息最多附加 4 张图片，图片总量不超过 16 MiB。');
+      return Object.freeze(image);
+    }
     if (typeof item !== 'object' || typeof item.text !== 'string' || item.text.includes('\0')) throw new Error('附件需包含可读取的文本快照。');
     bytes += Buffer.byteLength(item.text);
     if (bytes > 256 * 1024) throw new Error('附件正文总量不超过 256 KiB。');

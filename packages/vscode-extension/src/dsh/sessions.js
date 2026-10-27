@@ -357,6 +357,29 @@ function getSession(root, id, options = {}) {
  * @param {number} [options.maxChars] 单条文本的最大长度，超出时截断并注明。
  * @returns {{entries: object[], truncated: boolean}}
  */
+function transcriptImages(content) {
+  const images = [];
+  let bytes = 0, omitted = false, visited = 0;
+  const visit = (blocks, depth) => {
+    if (depth > 4) { omitted = true; return; }
+    for (const block of blocks) {
+      if (++visited > 512) { omitted = true; return; }
+      if (block?.type === 'tool-result' && Array.isArray(block.content)) { visit(block.content, depth + 1); continue; }
+      if (block?.type === 'content' && block.content && typeof block.content === 'object') { visit(Array.isArray(block.content) ? block.content : [block.content], depth + 1); continue; }
+      if (block?.type !== 'image') continue;
+      const ref = block.attachment;
+      if (!ref || !/^sha256:[a-f0-9]{64}$/.test(ref.attachmentId || '') || !['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(ref.mediaType) ||
+        !Number.isSafeInteger(ref.bytes) || ref.bytes < 1 || ref.bytes > 8 * 1024 * 1024 ||
+        !Number.isSafeInteger(ref.width) || !Number.isSafeInteger(ref.height) || ref.width < 1 || ref.height < 1 || ref.width > 8192 || ref.height > 8192 ||
+        images.length >= 4 || bytes + ref.bytes > 16 * 1024 * 1024) { omitted = true; continue; }
+      bytes += ref.bytes;
+      images.push({ attachment: Object.fromEntries(['attachmentId', 'mediaType', 'width', 'height', 'bytes'].map(key => [key, ref[key]])) });
+    }
+  };
+  visit(Array.isArray(content) ? content : [], 0);
+  return { images, notice: omitted ? '[图片未载入：历史图片信息无效或超过回放限制]' : '' };
+}
+
 function sessionTranscript(events, { maxEntries = 2000, maxChars = 50000 } = {}) {
   const clip = (text, hardLimit = maxChars) => {
     if (typeof text !== 'string' || text.length <= hardLimit) return text || '';
@@ -380,17 +403,19 @@ function sessionTranscript(events, { maxEntries = 2000, maxChars = 50000 } = {})
       case 'user/message': {
         const kind = event.data && event.data.source ? event.data.source.kind : undefined;
         if (kind !== 'user') break;
-        const text = clip(textOf(event.data && event.data.content));
-        if (!text.trim()) break;
-        if (!push({ kind: 'user', text })) return { entries, truncated };
+        const visual = transcriptImages(event.data?.content);
+        const text = [clip(textOf(event.data && event.data.content)), visual.notice].filter(Boolean).join('\n');
+        if (!text.trim() && !visual.images.length) break;
+        if (!push({ kind: 'user', text, ...(visual.images.length ? { images: visual.images } : {}) })) return { entries, truncated };
         break;
       }
       case 'assistant/message': {
         const content = (event.data && event.data.message && event.data.message.content) || [];
-        const text = clip(textOf(content));
+        const visual = transcriptImages(content);
+        const text = [clip(textOf(content)), visual.notice].filter(Boolean).join('\n');
         const thinking = reasoningOf(content);
-        if (!text.trim() && !thinking.trim()) break;
-        if (!push(thinking.trim() ? { kind: 'assistant', text, thinking } : { kind: 'assistant', text })) {
+        if (!text.trim() && !thinking.trim() && !visual.images.length) break;
+        if (!push({ kind: 'assistant', text, ...(thinking.trim() ? { thinking } : {}), ...(visual.images.length ? { images: visual.images } : {}) })) {
           return { entries, truncated };
         }
         break;
@@ -411,13 +436,12 @@ function sessionTranscript(events, { maxEntries = 2000, maxChars = 50000 } = {})
         break;
       }
       case 'tool/result': {
-        const callId = event.data && event.data.message && event.data.message.source
-          ? event.data.message.source.callId
-          : undefined;
+        const callId = event.data?.message?.toolCallId ?? event.data?.message?.source?.callId;
         const call = typeof callId === 'string' ? calls.get(callId) : undefined;
         if (!call) break; // 没有对应 call 的结果不参与渲染
         const blocks = (event.data.message && event.data.message.content) || [];
-        const output = clip(
+        const visual = transcriptImages(blocks);
+        const output = [clip(
           blocks
             .map((block) => {
               if (!block) return '';
@@ -433,9 +457,9 @@ function sessionTranscript(events, { maxEntries = 2000, maxChars = 50000 } = {})
             .filter(Boolean)
             .join('\n'),
           20000,
-        );
+        ), visual.notice].filter(Boolean).join('\n');
         calls.delete(callId);
-        if (!push({ kind: 'tool', name: call.name, args: call.args, output })) {
+        if (!push({ kind: 'tool', name: call.name, args: call.args, output, ...(visual.images.length ? { images: visual.images } : {}) })) {
           return { entries, truncated };
         }
         break;

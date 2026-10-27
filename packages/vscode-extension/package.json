@@ -2,7 +2,7 @@
   "name": "dsh-acp-panel",
   "displayName": "DSH ACP Panel",
   "description": "在 VS Code 使用 DeepSeek Harness：对话、工具、代码审查、技能浏览和插件运行记录。",
-  "version": "0.18.2",
+  "version": "0.19.0",
   "publisher": "Elk-ydy",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -44,6 +44,7 @@
     "publish": "node tools/publish.js --yes"
   },
   "activationEvents": [
+    "onWebviewPanel:dshPanel.conversation",
     "onView:dshPanel.chat",
     "onStartupFinished",
     "onChatParticipant:dshPanel.dsh"
@@ -98,6 +99,11 @@
       {
         "command": "dshPanel.newSession",
         "title": "DSH：新建对话",
+        "icon": "$(add)"
+      },
+      {
+        "command": "dshPanel.newConversationWindow",
+        "title": "DSH：在新标签页中打开对话",
         "icon": "$(add)"
       },
       {
@@ -264,7 +270,19 @@
       }
     ],
     "menus": {
+      "editor/title": [
+        {
+          "command": "dshPanel.newConversationWindow",
+          "when": "activeWebviewPanelId == dshPanel.conversation",
+          "group": "navigation@1"
+        }
+      ],
       "view/title": [
+        {
+          "command": "dshPanel.newConversationWindow",
+          "when": "view == dshPanel.chat",
+          "group": "actions@1"
+        },
         {
           "command": "dshPanel.bridge.diagnoseConfig",
           "when": "view == dshPanel.capabilities",

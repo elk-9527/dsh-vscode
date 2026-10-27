@@ -26,6 +26,15 @@ const withDsh = args.includes('--all');
 const strict = args.includes('--strict');
 
 const suites = [
+  { name: '独立对话标签页与并发隔离', file: 'test/conversations.js', always: true },
+  { name: 'ACP 图片事件与正文共存', file: 'test/image-events.js', always: true },
+  { name: '图片输入与预览状态', file: 'test/images-ui.js', always: true },
+  { name: '图片资源、能力检查与输出边界', file: 'test/image-resources.js', always: true },
+  { name: '图片快照、恢复与原生 ACP 输入', file: 'test/image-snapshots.js', always: true },
+  { name: '表情插件图库与连接边界', file: 'test/meme-media.js', always: true },
+  { name: '表情标记匹配与选择', file: 'test/memes.js', always: true },
+  { name: 'Markdown 工作区文件链接', file: 'test/file-links.js', always: true },
+  { name: 'DSH 端 VS Code 配套安装', file: '../dsh-door/test/companion.js', always: true },
   { name: '流式 Markdown 尾部缓存与完整渲染一致', file: 'test/stream-markdown.js', always: true },
   { name: '候选归档安装逐字节核验', file: '../../tools/bridge/test-installed-candidate.cjs', always: true },
   { name: '支持矩阵与候选发现分类', file: '../../tools/compat/test-discovery.cjs', always: true },
@@ -41,6 +50,9 @@ const suites = [
   { name: '待发送队列持久恢复', file: 'test/queue-recovery.js', always: true },
   { name: '候选包回归入口隔离', file: 'test/candidate-regression.js', always: true },
   { name: '断线历史范围与格式降级', file: 'test/history-offline.js', always: true },
+  { name: '历史按页加载与缓存后台刷新', file: 'test/history-loading.js', always: true },
+  { name: 'DSH 归档过滤和状态同步', file: '../dsh-door/test/history-archive.js', always: true },
+  { name: '归档跨面板通知与重连缓存校验', file: 'test/history-sync.js', always: true },
   { name: '草稿持久写入合并', file: 'test/draft-persistence.js', always: true },
   { name: '技能恢复全局时间排序', file: '../dsh-bridge-sdk/test/skill-recovery.js', always: true },
   { name: '客户端传输预算与背压', file: 'test/transport-budget.js', always: true },

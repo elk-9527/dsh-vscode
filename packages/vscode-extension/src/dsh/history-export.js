@@ -10,6 +10,7 @@ function historyMarkdown(result) {
     parts.push(`## ${role}`);
     if (entry.thinking) parts.push(`### 思考\n\n${entry.thinking}`);
     if (entry.text) parts.push(String(entry.text));
+    if (Array.isArray(entry.images) && entry.images.length) parts.push(entry.images.map(() => '[图片附件：请在 DSH 面板中查看]').join('\n\n'));
     if (entry.kind === 'tool') {
       const text = JSON.stringify(entry.tool || entry, null, 2), fence = fenceFor(text);
       parts.push(`${fence}json\n${text}\n${fence}`);

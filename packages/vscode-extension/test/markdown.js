@@ -69,6 +69,29 @@ check(
 check('CRLF 换行也能处理', renderMarkdown('第一行\r\n第二行').includes('<br>'));
 check('多段之间分开', (renderMarkdown('第一段\n\n第二段').match(/<p>/g) || []).length === 2);
 
+section('1.1 表格与文件链接');
+const table = renderMarkdown('分层说明：\n| 层 | 文件 | 职责 |\n| --- | --- | --- |\n| 业务 | [模型](public/task-model.js) | 校验、`id` 与 **统计** |\n| 界面 | [应用](public/app.js) | 渲染 |\n\n后续说明');
+check('表格紧跟段落时仍生成独立 table', table.includes('</p><div class="md-table-wrap"') && table.includes('<table>'));
+check('表头和数据单元格数量正确', (table.match(/<th /g) || []).length === 3 && (table.match(/<td /g) || []).length === 6, table);
+check('表格内文件链接、代码和强调正常渲染', table.includes('data-href="public/task-model.js"') && table.includes('<code>id</code>') && table.includes('<strong>统计</strong>'), table);
+check('空行之后的内容不吞进表格', table.endsWith('</table></div><p>后续说明</p>'), table);
+const aligned = renderMarkdown('左 | 中 | 右\n:--- | :---: | ---:\n甲 | 乙 | 丙');
+check('无外侧竖线的表格支持列对齐', aligned.includes('class="align-left"') && aligned.includes('class="align-center"') && aligned.includes('class="align-right"'), aligned);
+const escapedCells = renderMarkdown('| 内容 | 代码 |\n| --- | --- |\n| a\\|b | `x|y` |');
+check('转义竖线和行内代码不拆错列', (escapedCells.match(/<td /g) || []).length === 2 && escapedCells.includes('a|b') && escapedCells.includes('<code>x|y</code>'), escapedCells);
+check('流式只有表头时不伪造表格', !renderMarkdown('| 名称 | 文件 |\n| ---').includes('<table>'));
+check('正文中的普通竖线不会变成表格', !renderMarkdown('普通文字 | 另一个词').includes('<table>'));
+const shortRow = renderMarkdown('| A | B |\n| --- | --- |\n| 甲 |\n| 乙 | 丙 | 多余 |');
+check('短行补空格、长行按表头列数显示', (shortRow.match(/<td /g) || []).length === 4 && !shortRow.includes('多余'), shortRow);
+check('反引号包裹的链接保持原样', renderMarkdown('`[源码](src/main.js)`').includes('<code>[源码](src/main.js)</code>'));
+check('代码形式的链接标签正常渲染', renderMarkdown('[`main.js`](src/main.js)').includes('><code>main.js</code></a>'));
+check('文件名中的括号不会截断链接', renderMarkdown('[文件](src/a(b).js#L12)').includes('data-href="src/a(b).js#L12"'));
+check('强调符号不改写链接目标', renderMarkdown('[源码](src/a_b*c.js)').includes('data-href="src/a_b*c.js"'));
+const hostileTable = renderMarkdown('| X | Y |\n| --- | --- |\n| <img src=x onerror=alert(1)> | [执行](command:evil) |');
+check('表格中的 HTML 与危险链接仍不可执行', !hostileTable.includes('<img') && !hostileTable.includes('<a ') && hostileTable.includes('&lt;img'), hostileTable);
+check('协议相对链接不被当作工作区文件', !renderMarkdown('[网站](//example.com)').includes('<a '));
+check('Windows 绝对路径不会成为文件链接', !renderMarkdown('[本机](C:/secret.txt)').includes('<a '));
+
 // ── 2. 注入安全（优先级最高的一组）────────────────────────
 
 section('2. 注入安全');

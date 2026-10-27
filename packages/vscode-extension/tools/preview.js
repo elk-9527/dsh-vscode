@@ -581,6 +581,8 @@ function buildHtml(themeName) {
     cspSource: "'self'",
     styleUri: 'main.css',
     markdownUri: 'markdown.js',
+    memesUri: 'memes.js',
+    imagesUri: 'images.js',
     scriptUri: 'main.js',
     nonce,
   });
@@ -646,6 +648,8 @@ function main() {
   fs.copyFileSync(path.join(ROOT, 'media', 'main.css'), path.join(OUT, 'main.css'));
   fs.copyFileSync(path.join(ROOT, 'media', 'main.js'), path.join(OUT, 'main.js'));
   fs.copyFileSync(path.join(ROOT, 'media', 'markdown.js'), path.join(OUT, 'markdown.js'));
+  fs.copyFileSync(path.join(ROOT, 'media', 'memes.js'), path.join(OUT, 'memes.js'));
+  fs.copyFileSync(path.join(ROOT, 'media', 'images.js'), path.join(OUT, 'images.js'));
 
   const written = [];
   for (const [name, factory] of Object.entries(SCENARIOS)) {

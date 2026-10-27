@@ -49,19 +49,23 @@ import {
 } from './frames.js';
 import { resolveSessionsRoot } from './sessions.js';
 import { createLegacyHistory, createSessionQueryHistory } from './kernel/history.js';
+import { archiveSnapshot, registerHistorySession } from './kernel/history-archive.js';
 import { createPermissionHandler } from './kernel/permissions.js';
 import { handleTextGeneration, rememberTextModelRequest, textGenerationSupported } from './kernel/text-generation.js';
 import { ACP_RUNTIME_VERSION } from './kernel/runtime.js';
+import { handleImageCapabilities, rememberImageProtocolRequest, closeImageCapabilityRequests, projectHistoryImages, handleHistoryImageRead } from './kernel/images.js';
 import { IdeBridge } from './bridge/runtime.js';
 import { createEndpoint } from './bridge/endpoint.js';
 import { PREFIX as BRIDGE_PREFIX } from './bridge/protocol.js';
 import { bridgeTransport } from './bridge/transport.js';
 import { managedLifetime } from './bridge/managed-lifetime.js';
 import { withAcpApprovalPriority } from './kernel/acp-context.js';
+import { registerCompanion } from './companion/install.js';
 // 端口判定单独构成一个纯模块：否则必须载入整个插件（需 import 内核）才能测试该判定。
 import { LOOPBACK_HOST, resolveDoorHost, resolveDoorPort } from './port.js';
 import { resolveInitialModel } from './model.js';
 import { disposeLiveConnections } from './lifecycle.js';
+import { createMemeMediaHandler, handleMediaRequest, cancelMediaRequest, closeMediaRequests } from './media.js';
 import {
   DOOR_STATUS_METHOD,
   doorStatusPayload,
@@ -321,8 +325,12 @@ export function gatePrompts(source, state, diag) {
           // 该插件自身的方法（历史会话 / 权限预设）在此处就地应答、不转发内核；
           // 其余帧照旧走闸。
           const incoming = parseLine(line);
+          rememberImageProtocolRequest(incoming, state);
+          if (handleImageCapabilities(incoming, state)) continue;
+          if (handleHistoryImageRead(incoming, state)) continue;
           if (handleTextGeneration(incoming, state)) continue;
           if (historyRequests.cancelHistoryRequest(incoming, state)) continue;
+          if (cancelMediaRequest(incoming, state) || handleMediaRequest(incoming, state, diag)) continue;
           if (incoming?.id !== undefined && incoming.method?.startsWith(BRIDGE_PREFIX) && state.bridge) {
             // handle() synchronously validates identity and reserves executions;
             // only provider work and its response continue outside frame reading.
@@ -365,11 +373,14 @@ function handleDoorStatus(line, state, diag) {
     model: state.modelRoute,
     textGeneration: state.textGeneration,
     historyKind: state.sessionsHandler?.kind,
+    historyArchive: state.sessionsHandler?.archiveSupported === true,
     acpVersion: ACP_RUNTIME_VERSION,
     permissionKind: state.permissionHandler?.kind,
     bridge: state.bridge?.endpoint ? { protocolVersion: 1, catalog: true, operations: true, resume: true, auth: 'endpoint-file-v1' } : undefined,
     instanceId: state.bridge?.endpoint?.instanceId,
     connectionCount: state.connectionCount?.(),
+    media: state.mediaHandler?.capability,
+    images: true,
   });
   state.respond(doorStatusResult(frame.id, result));
   diag(
@@ -576,6 +587,7 @@ function isPresetLocked(error) {
  *   `DSH_ACP_DOOR_DIAG`）。不配置则完全不写入。
  */
 export function apply(ctx, config = {}) {
+  registerCompanion(ctx);
   const { host, rejected: rejectedHost } = resolveDoorHost(config);
   const port = resolveDoorPort(config, process.env);
   const { provider, model } = config;
@@ -624,7 +636,7 @@ export function apply(ctx, config = {}) {
   const legacySessionsHandler = createLegacyHistory(sessionsRoot);
   let sessionsHandler = legacySessionsHandler;
   ctx.inject(['sessionQuery'], (queryCtx) => {
-    const handler = createSessionQueryHistory(queryCtx.sessionQuery, diag);
+    const handler = createSessionQueryHistory(queryCtx.sessionQuery, diag, { getWorkspaceRegistry: () => queryCtx.get?.('workspaceRegistry') });
     if (!handler) {
       diag('sessionQuery 服务存在，但接口版本无法识别，历史方法明确返回不支持');
       const unavailable = {
@@ -660,8 +672,45 @@ export function apply(ctx, config = {}) {
     };
   });
 
+  let mediaHandler;
+  ctx.inject(['webServer'], (webCtx) => {
+    const handler = createMemeMediaHandler(webCtx.webServer);
+    mediaHandler = handler;
+    return () => { handler?.dispose(); if (mediaHandler === handler) mediaHandler = undefined; };
+  });
+
+  let imageAttachments;
+  ctx.inject(['attachments'], (attachmentCtx) => {
+    const service = attachmentCtx.attachments;
+    imageAttachments = service;
+    return () => { if (imageAttachments === service) imageAttachments = undefined; };
+  });
+
   /** 每个连接对应一份 ACP 桥；断开时逐个拆除。 */
   const live = new Set();
+  let lastArchiveRevision;
+  let historyChangeTimer;
+  ctx.effect(() => () => clearTimeout(historyChangeTimer));
+  ctx.on('domain/changed', change => {
+    if (change?.domain !== 'workspace') return;
+    clearTimeout(historyChangeTimer);
+    // Domain events may precede registry/entity cache replacement. Read after
+    // the commit's continuation, and coalesce mutations into one notification.
+    historyChangeTimer = setTimeout(() => {
+      try {
+        const snapshot = archiveSnapshot(ctx.get?.('workspaceRegistry'));
+        const revision = snapshot.archiveRevision;
+        if (!snapshot.archiveStateKnown || revision === lastArchiveRevision) return;
+        lastArchiveRevision = revision;
+        for (const entry of live) if (!entry.state.historyClosed) {
+          try {
+            const sent = entry.state.respond({ jsonrpc: '2.0', method: 'dsh-door/history-changed', params: { archiveRevision: revision } });
+            void Promise.resolve(sent).catch(() => entry.socket.destroy());
+          } catch { entry.socket.destroy(); }
+        }
+      } catch (error) { diag(`历史状态通知失败：${String(error)}`); }
+    }, 25);
+  });
   const bridge = new IdeBridge();
   const lifetime = managedLifetime({ bridge, live });
   ctx.provide('ideBridge', bridge);
@@ -713,11 +762,20 @@ export function apply(ctx, config = {}) {
     // 本连接共享的状态。置于此处而非模块级的原因：一个内核可能同时接入
     // 多个客户端（VS Code 面板 + 试验台 + …），任一方均不可见其他方的点名。
     const state = {
+      async onSessionOpened(id) {
+        try {
+          const header = ctx.get?.('sessions')?.get(id)?.header;
+          await registerHistorySession(ctx.get?.('workspaceRegistry'), header);
+        } catch (error) { diag(`登记已打开的会话失败：${String(error)}`); }
+      },
       /** sessionId → 预设挂载 promise（入站闸与出站方向均需使用）。 */
       pending: new Map(),
       textRuns: new Map(),
       textPending: new Set(),
       textLlm: ctx.llm,
+      imageRuntimeVersion: ACP_RUNTIME_VERSION,
+      get imageAttachments() { return imageAttachments; },
+      projectHistoryImages(result) { return projectHistoryImages(result, state); },
       textGeneration: textGenerationSupported(ctx.llm, ACP_RUNTIME_VERSION),
       historyReads: new Map(),
       /** 客户端指定的预设，按 session/new 的发出顺序排队。 */
@@ -753,6 +811,8 @@ export function apply(ctx, config = {}) {
       get permissionHandler() {
         return permissionHandler;
       },
+      get mediaHandler() { return mediaHandler; },
+      mediaReads: new Map(),
       /** 仅属于该 TCP 客户端的会话；实时事件必须按此集合隔离。 */
       sessions: new Set(),
       /** 同一会话也可能被其它本机界面打开，故进一步按本连接创建的 agent 对象隔离。 */
@@ -798,18 +858,22 @@ export function apply(ctx, config = {}) {
       typeof handle === 'function' ? handle : () => handle?.dispose?.();
     let tearingDown;
     const teardown = () => {
+      closeImageCapabilityRequests(state);
+      closeMediaRequests(state);
       for (const controller of state.textRuns.values()) controller.abort(new Error('修复生成已取消。'));
       if (!tearingDown) tearingDown = Promise.allSettled([...state.textPending]).then(() => bridge.idle(state)).then(disposeChild);
       return tearingDown;
     };
 
-    const entry = { socket, teardown };
+    const entry = { socket, teardown, state };
     live.add(entry);
     lifetime.touch();
 
     const close = () => {
       if (!live.delete(entry)) return;
       state.historyClosed = true;
+      closeImageCapabilityRequests(state);
+      closeMediaRequests(state);
       for (const controller of state.textRuns.values()) controller.abort(new Error('修复生成已取消。'));
       for (const controller of state.historyReads.values()) controller.abort();
       bridge.detach(state);
@@ -862,6 +926,7 @@ export function apply(ctx, config = {}) {
 
   ctx.on('dispose', () => {
     disposed = true;
+    mediaHandler?.dispose();
     lifetime.dispose();
     const settled = bridge.dispose();
     diag('该插件已被卸载');

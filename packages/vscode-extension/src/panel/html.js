@@ -22,11 +22,14 @@ function makeNonce() {
  * @param {string} options.cspSource webview.cspSource
  * @param {string} options.styleUri main.css 的 webview URI
  * @param {string} options.markdownUri markdown.js 的 webview URI
+ * @param {string} [options.memesUri] memes.js 的 webview URI
+ * @param {string} [options.imagesUri] images.js 的 webview URI
  * @param {string} options.scriptUri main.js 的 webview URI
  * @param {string} options.nonce
+ * @param {number} [options.conversationSlot] 独立对话的持久存储编号
  * @returns {string} HTML
  */
-function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
+function renderHtml({ cspSource, styleUri, markdownUri, memesUri, imagesUri, scriptUri, nonce, conversationSlot }) {
   const csp = [
     "default-src 'none'",
     `style-src ${cspSource}`,
@@ -44,11 +47,16 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
 <link href="${styleUri}" rel="stylesheet">
 <title>DSH Panel</title>
 </head>
-<body>
+<body${Number.isInteger(conversationSlot) && conversationSlot >= 1 && conversationSlot <= 8 ? ` data-conversation-slot="${conversationSlot}"` : ''}>
   <header class="bar">
     <div class="bar-row">
       <span id="status-dot" class="dot" aria-hidden="true"></span>
       <span id="status-text" class="status" role="status" aria-live="polite" aria-atomic="true">正在连接…</span>
+      <button id="config-toggle" class="config-toggle" type="button" aria-controls="config-row" aria-expanded="false" hidden>
+        <span id="config-summary" class="config-summary">对话设置</span>
+        <span id="config-access" class="config-access" hidden></span>
+        <svg class="config-chevron" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path fill="currentColor" d="m4 6 4 4 4-4-.8-.8L8 8.4 4.8 5.2Z"/></svg>
+      </button>
       <span class="spacer"></span>
       <span id="bar-cwd" class="bar-meta" hidden></span>
       <span id="bar-clock" class="bar-meta" hidden></span>
@@ -121,7 +129,9 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
     </div>
     <div class="history-filters">
       <input id="history-search" type="search" placeholder="搜索标题、目录或会话 ID" aria-label="搜索历史会话" maxlength="256">
+      <select id="history-archive" aria-label="会话归档状态"><option value="active">未归档</option><option value="archived">已归档</option><option value="unlisted">其他历史</option></select>
       <label><input id="history-project" type="checkbox">仅当前项目</label>
+      <button id="history-sync" type="button" title="从 DSH 重新读取当前页和归档状态">同步</button>
     </div>
     <div id="history-list" class="history-list"></div>
     <div class="history-pages">
@@ -142,6 +152,7 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
       <div id="composer-note" class="composer-note" role="status" aria-live="polite"></div>
     </div>
     <div class="attachments" id="attachments" hidden></div>
+    <p id="image-note" class="image-capability-note" role="status" hidden></p>
     <div class="composer-box">
       <textarea id="input" class="input" rows="1" aria-label="消息输入" aria-autocomplete="list" aria-haspopup="listbox" aria-controls="composer-options" aria-expanded="false" placeholder="描述你要完成的任务…" title="@ 文件 · / 技能 · # 上下文"></textarea>
       <button id="send" class="send" type="button" title="发送" aria-label="发送">
@@ -158,11 +169,21 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
     </div>
     <div class="composer-shortcuts" aria-label="添加文件、技能或上下文">
       <button id="context-open" type="button" title="添加上下文" aria-label="添加上下文" aria-haspopup="dialog" aria-expanded="false">＋ 上下文</button>
+      <button id="meme-open" type="button" title="选择 DSH 表情包" aria-haspopup="dialog" aria-expanded="false">表情</button>
+      <button id="image-open" type="button" title="选择图片" aria-label="添加图片">图片</button>
       <button type="button" data-context-add="file" title="添加当前文件">当前文件</button>
       <button type="button" data-context-add="selection" title="添加当前选区" aria-label="添加当前选区">选区</button>
       <button type="button" data-composer="/" title="执行命令或选择技能">/ 命令</button>
     </div>
   </footer>
+
+  <div id="meme-picker" class="meme-picker" role="dialog" aria-modal="true" aria-label="选择表情包" hidden>
+    <div class="context-head"><strong>表情包</strong><button id="meme-close" type="button">关闭</button></div>
+    <label for="meme-search">搜索描述、关键词或分类</label>
+    <input id="meme-search" type="search" maxlength="128" placeholder="输入关键词" aria-controls="meme-grid">
+    <p id="meme-note" class="context-help" role="status" aria-live="polite">正在读取 DSH 图库…</p>
+    <div id="meme-grid" class="meme-grid" aria-label="表情候选"></div>
+  </div>
 
   <div id="context-panel" class="context-panel" role="dialog" aria-modal="true" aria-label="添加上下文" hidden>
     <div class="context-head"><strong>添加上下文</strong><button id="context-close" type="button" aria-label="关闭添加上下文">关闭</button></div>
@@ -181,6 +202,7 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
     <div class="context-head"><strong id="preview-title">附件正文预览</strong><button id="preview-close" type="button">关闭预览</button></div>
     <dl id="preview-meta" class="preview-meta"></dl>
     <p id="preview-note" class="context-help"></p>
+    <img id="preview-image" class="preview-image" alt="图片预览" hidden>
     <pre id="preview-body" tabindex="0" aria-label="只读附件快照正文"></pre>
   </div>
   <div id="test-log-panel" class="test-log-panel" role="dialog" aria-modal="true" aria-label="补充此次测试日志" hidden>
@@ -219,6 +241,8 @@ function renderHtml({ cspSource, styleUri, markdownUri, scriptUri, nonce }) {
 
   <!-- markdown.js 必须位于 main.js 之前：main.js 启动时即会使用它 -->
   <script nonce="${nonce}" src="${markdownUri}"></script>
+  ${memesUri ? `<script nonce="${nonce}" src="${memesUri}"></script>` : ''}
+  ${imagesUri ? `<script nonce="${nonce}" src="${imagesUri}"></script>` : ''}
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

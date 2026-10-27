@@ -322,6 +322,11 @@ class DshSession extends EventEmitter {
     }
 
     if (kind === 'agent_message_chunk' || kind === 'user_message_chunk') {
+      if (kind === 'agent_message_chunk' && update.content?.type === 'image') {
+        const entry = this._lastAssistant();
+        if (entry) this.emit('image', { id: entry.id, content: update.content });
+        return;
+      }
       const delta = textOf(update.content);
       if (!delta) return;
       const entry = this._lastAssistant();

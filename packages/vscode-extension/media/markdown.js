@@ -7,7 +7,7 @@
  *
  * 安全模型：**先将整段文本转义，再执行语法替换**。因此模型输出的任何
  * HTML 标签都只会成为可见文字，不会被执行。唯一的「链接」出口
- * 也限制为 http/https。
+ * 仅放行 http/https 与工作区相对文件链接；打开文件前由扩展重新核对工作区边界。
  *
  * 用法（浏览器）：<script src="markdown.js"></script> → window.DshMarkdown
  * 用法（Node）：const { renderMarkdown } = require('./markdown.js')
@@ -39,19 +39,73 @@
       return `\u0000${tokens.length - 1}\u0000`;
     });
     work = escapeHtml(work);
-    work = work.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, label, href) => {
-      // 仅放行 http/https；javascript:、data: 之类的取值一律退化为纯文本。
-      return `<a data-href="${href}" href="#">${label}</a>`;
+    const restore = value => value.replace(/\u0000(\d+)\u0000/g, (_, index) => tokens[Number(index)] || '');
+    const imageToken = (label, href) => {
+      const fallback = /^https?:\/\//i.test(href) || !/^(?:[a-z][a-z\d+.-]*:|[/\\])/i.test(href)
+        ? `<a data-href="${href}" href="#">${label || '图片'}</a>` : label || '图片';
+      tokens.push(`<span class="chat-image-request" data-image-source="${href}" data-image-alt="${label}">${fallback}</span>`);
+      return `\u0000${tokens.length - 1}\u0000`;
+    };
+    // Pixels are resolved by the extension; model text never becomes an img URL.
+    work = work.replace(/!\[([^\]\r\n]*)\]\((?:&lt;([^\r\n]+?)&gt;|([^\s()]+(?:\([^\s()]*\)[^\s()]*)*))\)/g, (match, label, angled, plain) => {
+      const href = angled || plain;
+      const local = !/^(?:[a-z][a-z\d+.-]*:|[/\\]{2}|[#?])/i.test(href) || /^[a-z]:[/\\]/i.test(href) || /^file:\/\/\//i.test(href);
+      if ((!/^https?:\/\//i.test(href) && !local) || /[\u0000-\u001f]/.test(href)) return match;
+      return imageToken(label, href);
     });
-    work = work.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-    work = work.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
-    work = work.replace(/\u0000(\d+)\u0000/g, (_, index) => tokens[Number(index)] || '');
-    return work;
+    work = work.replace(/\[([^\]]+)\]\(([^\s()]+(?:\([^\s()]*\)[^\s()]*)*)\)/g, (match, label, href) => {
+      const relative = !/^(?:[a-z][a-z\d+.-]*:|[/\\#?])/i.test(href) && !/[\u0000-\u0020\\]/.test(href);
+      if (!/^https?:\/\//i.test(href) && !relative) return match;
+      if (/\.(?:png|jpe?g|gif|webp)(?:[?#].*)?$/i.test(href)) return imageToken(label, href);
+      // Protect links from emphasis parsing in URLs, and retain code in labels.
+      const content = restore(emphasis(label));
+      tokens.push(`<a data-href="${href}" href="#">${content}</a>`);
+      return `\u0000${tokens.length - 1}\u0000`;
+    });
+    work = work.replace(/(^|\s)(https?:\/\/[^\s<>\u0000]+?\.(?:png|jpe?g|gif|webp)(?:\?[^\s<>\u0000]*)?)(?=$|\s)/gi,
+      (_, prefix, href) => prefix + imageToken(href, href));
+    return restore(emphasis(work));
+  }
+
+  function emphasis(text) {
+    return text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+  }
+
+  /** Split cells without mistaking escaped pipes or inline code for columns. */
+  function tableCells(line) {
+    const text = line.trim(), cells = [];
+    let cell = '', codeLength = 0;
+    for (let index = 0; index < text.length; index++) {
+      const character = text[index];
+      if (character === '\\' && text[index + 1] === '|') { cell += '|'; index++; continue; }
+      if (character === '`') {
+        let length = 1;
+        while (text[index + length] === '`') length++;
+        if (!codeLength) codeLength = length;
+        else if (codeLength === length) codeLength = 0;
+        cell += '`'.repeat(length); index += length - 1; continue;
+      }
+      if (character === '|' && !codeLength) { cells.push(cell.trim()); cell = ''; }
+      else cell += character;
+    }
+    cells.push(cell.trim());
+    if (text.startsWith('|') && cells[0] === '') cells.shift();
+    if (cells.length > 1 && cells[cells.length - 1] === '') cells.pop();
+    return cells;
+  }
+
+  function tableHeader(lines, index) {
+    if (index + 1 >= lines.length || (!lines[index].includes('|') && !lines[index + 1].includes('|'))) return null;
+    const header = tableCells(lines[index]), separator = tableCells(lines[index + 1]);
+    // Bound padding work for malformed model output with thousands of columns.
+    if (!header.length || header.length > 64 || header.length !== separator.length || !separator.every(cell => /^:?-{3,}:?$/.test(cell))) return null;
+    return { header, align: separator.map(cell => cell.startsWith(':') && cell.endsWith(':') ? 'center' : cell.endsWith(':') ? 'right' : 'left') };
   }
 
   /**
    * 仅支持必要的一小组语法：代码块、行内代码、粗体、斜体、链接、
-   * 标题、有序/无序列表、引用。
+   * 标题、有序/无序列表、引用和管道表格。
    */
   function renderMarkdown(raw) {
     if (!raw) return '';
@@ -75,6 +129,20 @@
         if (i < lines.length) i += 1;
         const cls = lang ? ` class="language-${escapeHtml(lang)}"` : '';
         out.push(`<pre><code${cls}>${escapeHtml(buf.join('\n'))}</code></pre>`);
+        continue;
+      }
+
+      const table = tableHeader(lines, i);
+      if (table) {
+        const cellHtml = (cell, column, tag) => `<${tag}${tag === 'th' ? ' scope="col"' : ''} class="align-${table.align[column]}">${inline(cell)}</${tag}>`;
+        const rows = [];
+        i += 2;
+        while (i < lines.length && lines[i].trim() && lines[i].includes('|') && isParagraphLine(lines[i])) {
+          const cells = tableCells(lines[i]);
+          rows.push(`<tr>${table.header.map((_, column) => cellHtml(cells[column] || '', column, 'td')).join('')}</tr>`);
+          i++;
+        }
+        out.push(`<div class="md-table-wrap" role="region" aria-label="表格" tabindex="0"><table><thead><tr>${table.header.map((cell, column) => cellHtml(cell, column, 'th')).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>`);
         continue;
       }
 
@@ -114,7 +182,7 @@
       }
 
       const para = [];
-      while (i < lines.length && isParagraphLine(lines[i])) {
+      while (i < lines.length && isParagraphLine(lines[i]) && !tableHeader(lines, i)) {
         para.push(lines[i]);
         i += 1;
       }

@@ -16,11 +16,13 @@ class HistorySummaryCache {
     }
   }
   key(source, options) { return JSON.stringify([source, historyOptions(options)]); }
-  get(source, options) {
+  get(source, options, { refreshing = false } = {}) {
     const item = this.entries.get(this.key(source, options));
     if (!item || this.now() - item.at > CACHE_TTL) return;
     return { ...structuredClone(item.result), limited: true, cachedAt: item.at, cacheScope: historyOptions(options),
-      limitation: '当前无法获取完整历史，显示最近成功查询的只读摘要缓存；仅覆盖当时的筛选与分页范围，可能包含已删除的会话。' };
+      limitation: refreshing
+        ? '正在显示上次读取的摘要，后台刷新当前页；可能包含已删除的会话。'
+        : '当前无法获取完整历史，显示最近成功查询的只读摘要缓存；仅覆盖当时的筛选与分页范围，可能包含已删除的会话。' };
   }
   async put(source, options, result) {
     if (!Array.isArray(result?.sessions)) return;
@@ -29,10 +31,13 @@ class HistorySummaryCache {
       for (const key of ['id', 'title', 'fallbackTitle', 'cwd', 'preset', 'decodeError']) if (typeof card[key] === 'string') item[key] = card[key].slice(0, key === 'cwd' ? 4096 : 2048);
       for (const key of ['createdAt', 'lastTime', 'turns', 'userMessages', 'mtime', 'size']) if (Number.isFinite(card[key])) item[key] = card[key];
       if (card.summaryPartial === true) item.summaryPartial = true;
+      if (typeof card.archived === 'boolean') item.archived = card.archived;
       return item;
     }).filter(card => card.id);
     const value = { sessions };
     for (const key of ['total', 'offset', 'skipped', 'nextOffset']) if (Number.isFinite(result[key])) value[key] = result[key];
+    for (const key of ['archiveSupported', 'archiveStateKnown', 'workspaceStateKnown']) if (typeof result[key] === 'boolean') value[key] = result[key];
+    if (typeof result.archiveRevision === 'string') value.archiveRevision = result.archiveRevision.slice(0, 128);
     const key = this.key(source, options); this.entries.delete(key);
     this.entries.set(key, { key, at: this.now(), result: value });
     while (this.entries.size > 8 || Buffer.byteLength(JSON.stringify([...this.entries.values()])) > CACHE_BYTES - 128) {
@@ -41,6 +46,17 @@ class HistorySummaryCache {
     if (this.storage?.update) {
       const snapshot = { version: 1, entries: structuredClone([...this.entries.values()]) };
       this.writes = this.writes.catch(() => {}).then(() => this.storage.update(CACHE_KEY, snapshot)); await this.writes;
+    }
+  }
+
+  async clear(source) {
+    for (const key of this.entries.keys()) {
+      try { if (JSON.parse(key)[0] === source) this.entries.delete(key); } catch { this.entries.delete(key); }
+    }
+    if (this.storage?.update) {
+      const snapshot = { version: 1, entries: structuredClone([...this.entries.values()]) };
+      this.writes = this.writes.catch(() => {}).then(() => this.storage.update(CACHE_KEY, snapshot));
+      await this.writes;
     }
   }
 }

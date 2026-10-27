@@ -17,6 +17,7 @@
  */
 
 import { rememberTextModelResponse } from './kernel/text-generation.js';
+import { rememberImageProtocolResponse } from './kernel/images.js';
 
 /** `_meta` 中属于该插件的键。 */
 export const DOOR_META_KEY = 'dsh-door';
@@ -127,7 +128,7 @@ export function isDoorSessionsRequest(frame) {
     && frame.method.startsWith(DOOR_SESSIONS_PREFIX);
 }
 
-/** 取方法名中前缀之后的部分：'list' 或 'get'。 */
+/** 取该插件历史命名空间中的方法名。 */
 export function doorSessionsMethod(frame) {
   return isDoorSessionsRequest(frame) ? frame.method.slice(DOOR_SESSIONS_PREFIX.length) : undefined;
 }
@@ -323,6 +324,7 @@ export async function waitForMount(pending, ms = MOUNT_WAIT_MS) {
  * @returns {Promise<string>} 要写进 socket 的行。
  */
 export async function decorateLine(line, state, diag) {
+  if (state.imageInitializeId !== undefined) rememberImageProtocolResponse(parseLine(line), state);
   if (state.textGeneration) rememberTextModelResponse(parseLine(line), state);
   // 低成本预筛：没有跟踪中的建会话/恢复/关闭请求时，无需解析该行。
   if (state.replies.size === 0 && (!state.closes || state.closes.size === 0)) return line;
@@ -374,6 +376,7 @@ export async function decorateLine(line, state, diag) {
 
   const sessionId = frame.result?.sessionId ?? asked?.sessionId;
   if (typeof sessionId === 'string' && sessionId) state.sessions?.add(sessionId);
+  if (typeof sessionId === 'string' && sessionId) await state.onSessionOpened?.(sessionId);
   const mounting = typeof sessionId === 'string' ? state.pending.get(sessionId) : undefined;
   if (mounting) await withTimeout(mounting, MOUNT_WAIT_MS);
 

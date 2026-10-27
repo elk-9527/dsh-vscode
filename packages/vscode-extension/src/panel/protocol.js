@@ -3,7 +3,8 @@
 const MESSAGE_TYPES = new Set(['ready', 'send', 'queueAction', 'historyBack', 'errorAction', 'draft',
   'composerQuery', 'contextAdd', 'composerSelect', 'composerCommand', 'workflowAction', 'composerCancel',
   'stop', 'newSession', 'setModel', 'setOption', 'setPreset', 'setPermission', 'refreshPermission',
-  'permission', 'historyList', 'historyOpen', 'historyResume', 'historyExport', 'openLink']);
+  'permission', 'historyList', 'historyOpen', 'historyResume', 'historyExport', 'historyArchive', 'openLink', 'memeCatalog', 'memeRead',
+  'imageAdd', 'imagePick', 'imagePreview', 'imageResolve']);
 /** Validate the shared envelope before dispatch; each handler validates its payload.
  * @param {unknown} value
  * @returns {value is import('./protocol-types').WebviewMessage}

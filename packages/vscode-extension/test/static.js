@@ -545,7 +545,7 @@ check(
 {
   // when 中使用的上下文键必须真实存在，写错则等价于该条件恒为假。
   // 按子句解析：`a == b` 只取左侧的键，`a` 单独出现时其自身即为键。
-  const knownWhen = new Set(['editorHasSelection', 'editorTextFocus', 'editorReadonly', 'view', 'resourceScheme', 'inDiffEditor', 'isWorkspaceTrusted', 'scmProvider', 'viewItem']);
+  const knownWhen = new Set(['editorHasSelection', 'editorTextFocus', 'editorReadonly', 'view', 'resourceScheme', 'inDiffEditor', 'isWorkspaceTrusted', 'scmProvider', 'viewItem', 'activeWebviewPanelId']);
   const unknown = [];
   for (const items of Object.values(shipped.menus)) {
     for (const item of items) {
@@ -565,6 +565,7 @@ check(
   // 实际会被 VS Code 加载的文件：任何语法错误都会使整套功能静默失效。
   const { execFileSync } = require('node:child_process');
   const files = ['src/extension.js', 'src/panel/view.js', 'src/panel/html.js', 'src/door/client.js',
+    'src/panel/conversations.js',
     'src/door/live-stream.js',
     'src/door/desktop-cli-host.cjs',
     'src/door/setup.js',

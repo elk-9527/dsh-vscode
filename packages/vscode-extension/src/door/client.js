@@ -17,6 +17,7 @@ const { EventEmitter } = require('node:events');
 const { FrameReader, SocketWriter, MAX_FRAME_BYTES, MAX_SEND_BYTES } = require('./transport-budget');
 
 const { buildPromptBlocks } = require('../dsh/blocks');
+const { MAX_IMAGE_COUNT, MAX_MESSAGE_IMAGE_BYTES } = require('../dsh/images');
 const { requireLoopbackHost } = require('./endpoint');
 const { DOOR_STREAM_METHOD, DoorLiveStream } = require('./live-stream');
 
@@ -433,6 +434,14 @@ class DoorClient extends EventEmitter {
     return this.request('dsh-door/sessions/list', params, { signal });
   }
 
+  historyState(options = {}) {
+    return this.request('dsh-door/sessions/state', {}, options);
+  }
+
+  archiveHistory(id, archived) {
+    return this.request('dsh-door/sessions/archive', { id, archived });
+  }
+
   /**
    * 读取一段历史会话的名片与回放（该插件的旁路方法）。
    *
@@ -496,10 +505,31 @@ class DoorClient extends EventEmitter {
    * @param {AbortSignal} [options.signal]
    * @returns {Promise<{stopReason?: string}>}
    */
-  prompt(sessionId, text, { attachments = [], signal } = {}) {
+  async prompt(sessionId, text, { attachments = [], signal } = {}) {
+    const resolved = [];
+    const items = Array.isArray(attachments) ? attachments : [];
+    if (items.filter(item => item?.kind === 'image').length > MAX_IMAGE_COUNT) throw new DoorRequestError(-32602, '每条消息最多附加 4 张图片。');
+    let imageBytes = 0;
+    for (const item of items) {
+      if (signal?.aborted) throw new DoorRequestError(-32800, '图片发送已取消');
+      if (item?.kind === 'image' && typeof item.data !== 'string') {
+        if (!this.imageStore) throw new DoorRequestError(-32602, '图片快照缓存不可用，请重新添加图片。');
+        const image = await this.imageStore.read(item);
+        imageBytes += image.byteLength;
+        if (imageBytes > MAX_MESSAGE_IMAGE_BYTES) throw new DoorRequestError(-32602, '每条消息的图片总量不超过 16 MiB。');
+        resolved.push({ ...item, ...image });
+      } else {
+        if (item?.kind === 'image') {
+          imageBytes += Buffer.byteLength(item.data, 'base64');
+          if (imageBytes > MAX_MESSAGE_IMAGE_BYTES) throw new DoorRequestError(-32602, '每条消息的图片总量不超过 16 MiB。');
+        }
+        resolved.push(item);
+      }
+    }
+    if (signal?.aborted) throw new DoorRequestError(-32800, '图片发送已取消');
     return this.request(
       'session/prompt',
-      { sessionId, prompt: buildPromptBlocks(text, attachments) },
+      { sessionId, prompt: buildPromptBlocks(text, resolved) },
       // 模型回合本身不设固定总时长；长任务可以正常运行。用户点击停止后，
       // 取消请求仍有 CANCEL_GRACE_MS 的收尾上限，防止对端不回取消结果时永久卡住。
       { signal, timeoutMs: 0, abortTimeoutMs: CANCEL_GRACE_MS },

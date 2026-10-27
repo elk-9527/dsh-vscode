@@ -19,6 +19,8 @@
     historyBtn: document.getElementById('history-btn'),
     historyPanel: document.getElementById('history'),
     historyList: document.getElementById('history-list'),
+    historyArchive: document.getElementById('history-archive'),
+    historySync: document.getElementById('history-sync'),
     historyMeta: document.getElementById('history-meta'),
     historyClose: document.getElementById('history-close'),
     historySearch: document.getElementById('history-search'),
@@ -35,6 +37,9 @@
     queueList: document.getElementById('queue-list'),
     queueContinue: document.getElementById('queue-continue'),
     configRow: document.getElementById('config-row'),
+    configToggle: document.getElementById('config-toggle'),
+    configSummary: document.getElementById('config-summary'),
+    configAccess: document.getElementById('config-access'),
     modelSelect: document.getElementById('model-select'),
     modelField: document.getElementById('model-field'),
     reasoningField: document.getElementById('reasoning-field'),
@@ -80,6 +85,14 @@
     composerOptions: document.getElementById('composer-options'),
     composerNote: document.getElementById('composer-note'),
     contextOpen: document.getElementById('context-open'),
+    memeOpen: document.getElementById('meme-open'),
+    memePicker: document.getElementById('meme-picker'),
+    memeSearch: document.getElementById('meme-search'),
+    memeGrid: document.getElementById('meme-grid'),
+    memeNote: document.getElementById('meme-note'),
+    memeClose: document.getElementById('meme-close'),
+    imageOpen: document.getElementById('image-open'),
+    imageNote: document.getElementById('image-note'),
     contextPanel: document.getElementById('context-panel'),
     contextClose: document.getElementById('context-close'),
     contextSearch: document.getElementById('context-search'),
@@ -92,6 +105,7 @@
     previewMeta: document.getElementById('preview-meta'),
     previewNote: document.getElementById('preview-note'),
     previewBody: document.getElementById('preview-body'),
+    previewImage: document.getElementById('preview-image'),
     send: document.getElementById('send'),
     stop: document.getElementById('stop'),
     attachments: document.getElementById('attachments'),
@@ -113,6 +127,7 @@
     /** 用户是否停留在底部（决定是否自动滚动）。 */
     pinned: true,
     configOptions: [],
+    settingsExpanded: false,
     /** 该插件提供的预设清单是否有内容（决定配置行是否显示）。 */
     hasPresets: false,
     /**
@@ -143,6 +158,15 @@
     historyReadonly: false,
     queue: { items: [], paused: false },
   };
+
+  const memeApi = window.DshMemes;
+  let memeCatalog = memeApi?.createCatalog([]), memeAvailable = false, memeEpoch = 0, memeSequence = 0, memeCatalogRequest, memeCacheBytes = 0;
+  const memeImages = new Map(), memeReads = new Map(), memeQueued = new Set(), memeFailed = new Set();
+  const imageApi = window.DshImages;
+  let imageCapability = { input: false, reason: '正在确认当前模型的图片输入能力。' }, imageEpoch = 0, imageSequence = 0, imageReading = false;
+  const imageUploads = new Map(), imageRequests = new Map(), imageQueue = new Map(), imageFailures = new Set();
+  const imageReaders = new Set();
+  const imageCache = imageApi?.createPreviewCache();
 
   /** entry → bit mask（正文 1，思考 2），同一帧可以同时更新两部分。 */
   const pendingRenders = new Map();
@@ -216,6 +240,14 @@
   const sentDrafts = new Map();
   const sendGlyph = el.send.querySelector('svg').cloneNode(true);
   const savedDraft = typeof vscode.getState === 'function' ? vscode.getState() : undefined;
+  const conversationSlot = Number(document.body.dataset.conversationSlot);
+  function persistWebviewState(draft) {
+    if (typeof vscode.setState !== 'function') return;
+    const sessionId = state.sessionId || savedDraft?.conversationSessionId;
+    vscode.setState(Number.isInteger(conversationSlot) && conversationSlot >= 1 && conversationSlot <= 8
+      ? { ...draft, conversationSlot, conversationSessionId: sessionId } : draft);
+  }
+  if (conversationSlot) persistWebviewState(savedDraft || {});
   const draftSession = typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : String(Date.now()) + Math.random();
   const sameDraft = (left, right) => left && right && left.text === right.text && JSON.stringify(left.attachments || []) === JSON.stringify(right.attachments || []);
   function updateRecoveryButton() {
@@ -224,10 +256,10 @@
     el.recoverDraft.textContent = recoveryDrafts.length > 1 ? `切换保留草稿（${recoveryDrafts.length} 份）` : '恢复保留草稿';
   }
   function currentDraft() {
-    const active = { text: el.input.value, attachments: state.attachments.slice() };
+    const active = { text: el.input.value, attachments: imageMetadata(state.attachments) };
     const recoveries = [];
     for (const content of [pendingSend?.cwd === draftCwd ? pendingSend.draft : undefined, ...recoveryDrafts].filter(Boolean)) {
-      const held = draftTrusted ? content : { text: content.text, attachments: [] };
+      const held = draftTrusted ? { text: content.text, attachments: imageMetadata(content.attachments) } : { text: content.text, attachments: [] };
       if (!sameDraft(held, active) && !recoveries.some(item => sameDraft(item, held))) recoveries.push(held);
     }
     return { version: 1, cwd: draftCwd, savedAt: Date.now(), ...active, recoveries };
@@ -235,7 +267,7 @@
   function persistDraft(draft) {
     if (new TextEncoder().encode(JSON.stringify(draft)).length > 512 * 1024 || [draft, ...(draft.recoveries || [])].some(item => item.text.length > 128 * 1024)) { showHint('草稿超过保存限制，内容仍保留在当前窗口。', true); return; }
     if (draft.cwd !== draftCwd) { post({ type: 'draft', draft }); return; }
-    if (typeof vscode.setState === 'function') vscode.setState(draft);
+    persistWebviewState(draft);
     post({ type: 'draft', draft });
   }
   function saveDraft() {
@@ -274,18 +306,20 @@
   function applyDraft(draft) {
     cancelContext(); closePreview(); closeCompletion(); pendingChoice = undefined;
     el.input.value = typeof draft.text === 'string' ? draft.text : '';
-    state.attachments = draftTrusted && Array.isArray(draft.attachments) ? draft.attachments : [];
-    recoveryDrafts = (Array.isArray(draft.recoveries) ? draft.recoveries : draft.recovery ? [draft.recovery] : []).filter(held => held && typeof held.text === 'string').map(held => ({ text: held.text, attachments: draftTrusted && Array.isArray(held.attachments) ? held.attachments : [] }));
+    state.attachments = draftTrusted && Array.isArray(draft.attachments) ? imageMetadata(draft.attachments) : [];
+    recoveryDrafts = (Array.isArray(draft.recoveries) ? draft.recoveries : draft.recovery ? [draft.recovery] : []).filter(held => held && typeof held.text === 'string').map(held => ({ text: held.text, attachments: draftTrusted && Array.isArray(held.attachments) ? imageMetadata(held.attachments) : [] }));
     if (!el.input.value && !state.attachments.length && recoveryDrafts.length) {
       const recovered = recoveryDrafts.shift(); el.input.value = recovered.text; state.attachments = recovered.attachments;
     }
     updateRecoveryButton();
     renderAttachments(); autoGrow();
+    syncComposer();
     draftsByCwd.set(draftCwd, { draft: currentDraft(), edited: draftEdited });
   }
 
   function keepDraft(draft, cwd = draftCwd) {
     if (!draft || !draft.text && !draft.attachments?.length) return;
+    draft = { ...draft, attachments: imageMetadata(draft.attachments) };
     if (cwd !== draftCwd) {
       const cached = draftsByCwd.get(cwd);
       const target = cached?.draft || { version: 1, cwd, text: '', attachments: [], recoveries: [] };
@@ -314,7 +348,7 @@
     el.input.readOnly = readonly;
     el.input.placeholder = readonly ? '继续此对话或返回当前对话后发送' : queueMode ? '输入下一条消息，Enter 加入队列' : '描述你要完成的任务…';
     el.send.hidden = false;
-    el.send.disabled = Boolean(readonly || sendSettingsPending || pendingRecovery || pendingSend || pendingQueueEdit || pendingChoice || (state.queue.items || []).length + (state.queue.active ? 1 : 0) >= 5);
+    el.send.disabled = Boolean(readonly || sendSettingsPending || pendingRecovery || pendingSend || pendingQueueEdit || pendingChoice || imageIngestPending() || state.attachments.some(item => item.kind === 'image') && !imageCapability.input || (state.queue.items || []).length + (state.queue.active ? 1 : 0) >= 5);
     el.send.classList.toggle('queue-send', Boolean(queueMode));
     el.send.replaceChildren(queueMode ? document.createTextNode('排队') : sendGlyph.cloneNode(true));
     el.send.title = queueMode ? state.queue.paused ? '加入已暂停队列：需点击继续才会发送' : '排队下一条：当前任务结束后发送' : '发送';
@@ -327,9 +361,19 @@
     document.querySelectorAll('[data-recovery-action]').forEach(button => { button.disabled = Boolean(pendingRecovery || sessionSettingsPending || processing); });
     el.stop.hidden = !processing || readonly;
     el.historyResume.disabled = Boolean(!state.historyId || processing || sessionSettingsPending || pendingRecovery);
-    el.historyList.querySelectorAll('[data-history-resume]').forEach(button => { button.disabled = Boolean(processing || sessionSettingsPending || pendingRecovery); });
+    el.historyList.querySelectorAll('[data-history-resume]').forEach(button => { button.disabled = Boolean(processing || sessionSettingsPending || pendingRecovery || button.dataset.historyArchived === 'true'); });
     el.presetNew.disabled = Boolean(processing || readonly || pendingSend || sessionSettingsPending || pendingRecovery);
     document.querySelectorAll('[data-context-add], #context-open').forEach(button => { button.disabled = Boolean(readonly || pendingChoice || !draftTrusted); });
+    if (el.memeOpen) el.memeOpen.disabled = Boolean(!memeApi || readonly || pendingChoice || pendingSend || pendingQueueEdit || !draftTrusted);
+    if (el.imageOpen) {
+      el.imageOpen.disabled = Boolean(!imageApi || !imageCapability.input || readonly || pendingChoice || pendingSend || pendingQueueEdit || imageIngestPending() || !draftTrusted);
+      el.imageOpen.title = imageCapability.input ? '添加图片，或粘贴、拖入 PNG、JPEG、GIF、WebP（单张最多 8 MiB）' : imageCapability.reason || '当前模型不支持图片输入';
+    }
+    if (el.imageNote) {
+      el.imageNote.hidden = imageCapability.input || !state.attachments.some(item => item.kind === 'image');
+      el.imageNote.textContent = imageCapability.reason || '当前模型不支持图片输入，请切换支持图片的模型后发送。';
+    }
+    if (readonly || !draftTrusted) closeMemePicker(false);
     updateRecoveryButton();
     document.querySelectorAll('[data-composer]').forEach(button => { button.disabled = readonly; });
     renderQueue();
@@ -393,16 +437,44 @@
 
   function handle(message) {
     switch (message.type) {
+      case 'imageCapabilities':
+        imageCapability = { ...message, input: message.input === true };
+        syncComposer();
+        break;
+      case 'imageAdded':
+        receiveImageAdded(message);
+        break;
+      case 'imagePreview':
+      case 'imageResolved':
+        receiveImageResource(message);
+        break;
+      case 'imageReset':
+        resetImageWork();
+        break;
+      case 'memeReset':
+        resetMemes();
+        break;
+      case 'memeCatalog':
+        receiveMemeCatalog(message);
+        break;
+      case 'memeImage':
+        receiveMemeImage(message);
+        break;
       case 'status':
         setStatus(message.state, message.detail);
         break;
       case 'meta':
+        if (state.sessionId !== message.sessionId || draftCwd !== message.cwd || message.trusted === false) resetImageWork();
+        if (state.sessionId !== message.sessionId || draftCwd !== message.cwd) resetMemes();
         if (state.sessionId !== message.sessionId || draftCwd !== message.cwd || message.trusted === false) invalidateTestRequests();
-        if (state.sessionId !== message.sessionId) { cancelContext(); closePreview(); closeCompletion(); if (pendingChoice) showHint('对话已变化，请重新添加上下文。', true); pendingChoice = undefined; }
+        if (state.sessionId !== message.sessionId) { cancelContext(); closePreview(); closeCompletion(); closeMemePicker(false); if (pendingChoice) showHint('对话已变化，请重新添加上下文。', true); pendingChoice = undefined; }
         state.sessionId = message.sessionId;
         setWorkdir(message.cwd);
         switchDraftCwd(message.cwd, message.trusted);
+        if (conversationSlot) persistWebviewState(vscode.getState?.() || {});
+        if (!draftTrusted) resetMemes();
         syncComposer();
+        if (draftTrusted && state.attachments.some(item => item.kind === 'image')) renderAttachments();
         break;
       case 'draftRestore':
         if ((message.cwd || message.draft?.cwd) !== draftCwd) break;
@@ -479,30 +551,45 @@
         el.historyContext.hidden = !state.historyReadonly;
         el.historyContextText.textContent = message.reason || '正在查看历史，输入已暂停。';
         el.historyResume.disabled = !message.id || state.busy;
-        cancelContext(); closePreview(); closeCompletion(); pendingChoice = undefined; syncComposer();
+        cancelContext(); closePreview(); closeCompletion(); closeMemePicker(false); pendingChoice = undefined; syncComposer();
         if (workflowState) renderWorkflow(workflowState);
         break;
       case 'conversationSnapshot':
         resetTranscript();
         for (const event of Array.isArray(message.events) ? message.events : []) {
-          if (['user', 'assistant', 'text', 'thinking', 'tool', 'done', 'notice', 'error', 'replay'].includes(event.type)) handle(event);
+          if (['user', 'assistant', 'text', 'image', 'thinking', 'tool', 'done', 'notice', 'error', 'replay'].includes(event.type)) handle(event);
         }
         if (workflowState) renderWorkflow(workflowState);
         break;
       case 'history':
         renderHistory(message);
         break;
+      case 'historyChanged':
+        if (!el.historyPanel.hidden) requestHistory(historyOffset, true);
+        break;
+      case 'historyArchiveResult':
+        if (historyArchivePending.get(message.id) !== message.requestId) break;
+        historyArchivePending.delete(message.id);
+        if (message.success) { if (!el.historyPanel.hidden) requestHistory(historyOffset, true); }
+        else {
+          el.historyMeta.textContent = message.error || '归档同步失败，请重新同步后再试。';
+          el.historyList.querySelectorAll('[data-history-action="archive"]').forEach(button => { button.disabled = !historyArchiveSupported; });
+        }
+        break;
       case 'replay':
         renderReplay(message);
         break;
       case 'user':
-        addUser(message.text, message.attachments);
+        addUser(message.text, message.attachments, message.images);
         break;
       case 'assistant':
         addAssistant(message.id);
         break;
       case 'text':
         appendText(message.id, message.delta);
+        break;
+      case 'image':
+        addAssistantImage(message.id, message.image);
         break;
       case 'thinking':
         appendThinking(message.id, message.delta);
@@ -803,11 +890,32 @@
     if (kind === 'ready' || kind === 'busy') syncConfigRow();
   }
 
-  /** 配置行仅在存在可调项（模型下拉，或模式/权限）时显示。 */
+  /** 默认只显示模型与权限摘要；展开后保留完整的配置控件。 */
   function syncConfigRow() {
-    el.configRow.hidden =
-      state.configOptions.length === 0 && !state.hasPresets && !state.hasPermission;
+    const available = state.configOptions.length > 0 || state.hasPresets || state.hasPermission;
+    el.configToggle.hidden = !available;
+    el.configRow.hidden = !available || !state.settingsExpanded;
+    const expanded = !el.configRow.hidden;
+    el.configToggle.setAttribute('aria-expanded', String(expanded));
+    el.configToggle.closest('.bar').classList.toggle('settings-expanded', expanded);
+    const model = el.modelSelect.selectedOptions[0]?.textContent;
+    const preset = state.hasPresets ? el.presetSelect.selectedOptions[0]?.textContent : undefined;
+    const reasoning = !el.reasoningField.hidden ? el.reasoningSelect.selectedOptions[0]?.textContent : undefined;
+    const access = state.hasPermission ? el.accessBtn.textContent : '';
+    el.configSummary.textContent = model || preset || '对话设置';
+    el.configAccess.textContent = access;
+    el.configAccess.hidden = !access;
+    const label = `${expanded ? '收起' : '展开'}对话设置`;
+    const description = [model, preset, reasoning, access].filter(Boolean).join(' · ');
+    el.configToggle.title = description ? `${label}：${description}` : label;
+    el.configToggle.setAttribute('aria-label', el.configToggle.title);
   }
+
+  el.configToggle.addEventListener('click', () => {
+    if (state.settingsExpanded) closeAccessPop();
+    state.settingsExpanded = !state.settingsExpanded;
+    syncConfigRow();
+  });
 
   function showHint(text, isError) {
     el.hint.textContent = text || '';
@@ -898,8 +1006,7 @@
   // ── 历史会话 ────────────────────────────────────────
 
   /**
-   * 打开/关闭历史浮层。打开时始终重新获取清单：会话记录随时变化，
-   * 缓存会导致显示旧数据。
+   * 打开/关闭历史浮层。只请求当前页；已有摘要先显示，再在后台刷新。
    *
    * 焦点需要随之移动：浮层覆盖整个面板，若打开后焦点仍停留在其下方**不可见**的
    * 控件上，使用键盘的用户按 Tab 会在不可见区域之间移动。因此打开时将焦点交给
@@ -907,10 +1014,20 @@
    * body 上，用户将失去当前位置。
    */
   let historyOffset = 0, historyNextOffset, historyRequestId = 0, historySearchTimer;
-  function requestHistory(offset = 0) {
+  const HISTORY_PAGE_SIZE = 30;
+  let historyRenderedRequestId;
+  let historyArchiveSupported = false, historyArchiveSequence = 0;
+  const historyArchivePending = new Map();
+  const historyWorkspaceExpanded = new Map();
+  function requestHistory(offset = 0, refresh = false) {
+    clearTimeout(historySearchTimer);
     historyOffset = offset;
     el.historyPrev.disabled = true; el.historyNext.disabled = true;
-    post({ type: 'historyList', offset, limit: 100, query: el.historySearch.value, projectOnly: el.historyProject.checked, requestId: ++historyRequestId });
+    el.historySync.disabled = true;
+    el.historyMeta.textContent = '正在读取当前页…';
+    el.historyMeta.title = '';
+    post({ type: 'historyList', offset, limit: HISTORY_PAGE_SIZE, query: el.historySearch.value, projectOnly: el.historyProject.checked,
+      archived: el.historyArchive.value === 'archived', unlisted: el.historyArchive.value === 'unlisted', refresh, requestId: ++historyRequestId });
   }
   function toggleHistory(open) {
     const show = open === undefined ? el.historyPanel.hidden : open;
@@ -946,15 +1063,88 @@
     return parts.length ? parts[parts.length - 1] : cwd;
   }
 
+  /** 完整目录作分组键；Windows 路径忽略大小写，POSIX 路径保留大小写。 */
+  function historyWorkspaceKey(cwd) {
+    if (typeof cwd !== 'string' || !cwd) return '';
+    const portable = cwd.replace(/\\/g, '/');
+    const key = portable.replace(/\/+$/, '') || '/';
+    return /^(?:[a-z]:\/|\/\/)/i.test(portable) ? key.toLowerCase() : key;
+  }
+
+  function historyWorkspace(group, current, expanded, paged) {
+    const section = document.createElement('details');
+    section.className = `history-workspace${current ? ' is-current' : ''}`;
+    section.dataset.historyWorkspace = group.key;
+    section.open = expanded;
+    const summary = document.createElement('summary');
+    summary.className = 'history-workspace-head';
+    const folder = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    folder.setAttribute('viewBox', '0 0 16 16');
+    folder.setAttribute('class', 'history-workspace-icon');
+    folder.setAttribute('aria-hidden', 'true');
+    const outline = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    outline.setAttribute('d', 'M1.5 4h5l1.5 2h6.5v7h-13z');
+    folder.appendChild(outline);
+    summary.appendChild(folder);
+    const label = document.createElement('span');
+    label.className = 'history-workspace-label';
+    const name = document.createElement('span');
+    name.className = 'history-workspace-name';
+    name.textContent = tailPath(group.cwd) || '未记录工作区';
+    label.appendChild(name);
+    if (group.cwd) {
+      const directory = document.createElement('span');
+      directory.className = 'history-workspace-path';
+      directory.textContent = group.cwd;
+      directory.title = group.cwd;
+      label.appendChild(directory);
+    }
+    summary.appendChild(label);
+    const meta = document.createElement('span');
+    meta.className = 'history-workspace-meta';
+    if (current) {
+      const badge = document.createElement('span');
+      badge.className = 'history-workspace-current';
+      badge.textContent = '当前';
+      meta.appendChild(badge);
+    }
+    const count = document.createElement('span');
+    count.className = 'history-workspace-count';
+    count.textContent = `${paged ? '本页 ' : ''}${group.sessions.length} 段`;
+    meta.appendChild(count);
+    summary.appendChild(meta);
+    section.appendChild(summary);
+    const items = document.createElement('div');
+    items.className = 'history-workspace-items';
+    for (const card of group.sessions) items.appendChild(historyItem(card));
+    section.appendChild(items);
+    let previousOpen = section.open;
+    section.addEventListener('toggle', () => {
+      if (section.open === previousOpen) return;
+      previousOpen = section.open;
+      historyWorkspaceExpanded.set(group.key, section.open);
+    });
+    return section;
+  }
+
   /**
    * 渲染历史清单（或错误 —— 插件版本过低、读盘失败均需在此层说明）。
    */
   function renderHistory(message) {
     if (el.historyPanel.hidden) return; // 用户已关闭，不再重新展开浮层
     if (message.requestId !== undefined && message.requestId !== historyRequestId) return;
+    const samePage = message.requestId !== undefined && message.requestId === historyRenderedRequestId;
+    const scrollTop = el.historyList.scrollTop;
+    const focused = el.historyList.contains(document.activeElement) ? document.activeElement : null;
+    const focusId = focused?.closest('.history-item')?.dataset.historyId;
+    const focusAction = focused?.dataset.historyAction;
+    const focusGroup = focused?.matches('summary') ? focused.closest('.history-workspace').dataset.historyWorkspace : undefined;
+    historyRenderedRequestId = message.requestId;
+    el.historySync.disabled = false;
     el.historyList.textContent = '';
     if (message.error) {
       el.historyPrev.disabled = true; el.historyNext.disabled = true;
+      el.historyMeta.textContent = ''; el.historyMeta.title = ''; el.historyPage.textContent = '';
       // 读取失败**不使用** .history-empty：该套居中灰字表达「此处无内容」，
       // 用于报错会被理解为「没有历史会话」，而这两种情况的处理方式完全不同。
       const box = document.createElement('div');
@@ -962,9 +1152,16 @@
       box.setAttribute('role', 'alert');
       box.textContent = message.error;
       el.historyList.appendChild(box);
+      if (samePage && focused) el.historyClose.focus({ preventScroll: true });
       return;
     }
     const sessions = Array.isArray(message.sessions) ? message.sessions : [];
+    historyArchiveSupported = message.archiveSupported === true;
+    el.historyArchive.disabled = message.archiveStateKnown === false;
+    if (!sessions.length && message.total > 0 && message.offset >= message.total) {
+      requestHistory(Math.floor((message.total - 1) / HISTORY_PAGE_SIZE) * HISTORY_PAGE_SIZE, true);
+      return;
+    }
     historyOffset = message.offset || 0; historyNextOffset = message.nextOffset;
     el.historyPrev.disabled = historyOffset === 0;
     el.historyNext.disabled = !Number.isInteger(historyNextOffset);
@@ -979,24 +1176,54 @@
       el.historyMeta.textContent = sessions.length ? `共 ${sessions.length} 段` : '';
     }
     const limitations = [];
-    if (message.limitation) limitations.push(message.limitation);
-    if (message.via === 'cache' && Number.isFinite(message.cachedAt)) limitations.push(`只读摘要缓存 · ${new Date(message.cachedAt).toLocaleString()} · 当前筛选与分页`);
+    if (el.historyArchive.value === 'unlisted') limitations.push('未登记到 DSH 工作区；接回后同步');
+    if (message.via === 'cache') {
+      limitations.push(`摘要缓存${Number.isFinite(message.cachedAt) ? ' ' + new Date(message.cachedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}`);
+    } else if (message.limitation) limitations.push(message.limitation);
+    if (message.refreshing) limitations.push('正在刷新当前页…');
+    if (message.refreshError) limitations.push('当前页刷新失败');
+    el.historyMeta.title = [Number.isFinite(message.cachedAt) ? `缓存时间：${new Date(message.cachedAt).toLocaleString()}` : '', message.limitation, message.refreshError].filter(Boolean).join('\n');
     if (limitations.length) el.historyMeta.textContent = [el.historyMeta.textContent, ...limitations].filter(Boolean).join(' · ');
     if (sessions.length === 0) {
       const box = document.createElement('div');
       box.className = 'history-empty';
       box.textContent = message.emptyReason === 'unsupported-format' || message.unsupported > 0 ? '本地降级无法读取新版会话；连接内核后可查看历史。' : '暂无历史会话。';
       el.historyList.appendChild(box);
+      if (samePage && focused) el.historyClose.focus({ preventScroll: true });
       return;
     }
+    const currentKey = historyWorkspaceKey(message.currentCwd || draftCwd);
+    const groups = new Map();
     for (const card of sessions) {
-      el.historyList.appendChild(historyItem(card));
+      const key = historyWorkspaceKey(card.cwd);
+      if (!groups.has(key)) groups.set(key, { key, cwd: card.cwd || '', sessions: [] });
+      groups.get(key).sessions.push(card);
+    }
+    const ordered = [...groups.values()];
+    const currentIndex = ordered.findIndex(group => group.key && group.key === currentKey);
+    if (currentIndex > 0) ordered.unshift(...ordered.splice(currentIndex, 1));
+    const searching = Boolean(el.historySearch.value.trim());
+    const paged = historyOffset > 0 || message.total > sessions.length || message.skipped > 0;
+    for (const [index, group] of ordered.entries()) {
+      const current = Boolean(group.key && group.key === currentKey);
+      const expanded = searching || (historyWorkspaceExpanded.get(group.key) ?? (current || currentIndex < 0 && index === 0));
+      el.historyList.appendChild(historyWorkspace(group, current, expanded, paged));
+    }
+    if (samePage) {
+      el.historyList.scrollTop = scrollTop;
+      if (focused) {
+        const target = focusId && focusAction
+          ? [...el.historyList.querySelectorAll('.history-item')].find(row => row.dataset.historyId === focusId)?.querySelector(`[data-history-action="${focusAction}"]`)
+          : [...el.historyList.querySelectorAll('.history-workspace')].find(group => group.dataset.historyWorkspace === focusGroup)?.querySelector('summary');
+        (target || el.historyClose).focus({ preventScroll: true });
+      }
     }
   }
 
   function historyItem(card) {
     const row = document.createElement('div');
     row.className = 'history-item';
+    row.dataset.historyId = card.id;
 
     const main = document.createElement('div');
     main.className = 'history-item-main';
@@ -1010,7 +1237,6 @@
     const bits = [
       when,
       card.summaryPartial ? '' : `${card.turns || 0} 回合`,
-      tailPath(card.cwd),
       card.preset && card.preset !== 'standard' ? card.preset : '',
     ].filter(Boolean);
     sub.textContent = bits.join(' · ');
@@ -1023,6 +1249,7 @@
     actions.className = 'history-item-actions';
     const replayBtn = document.createElement('button');
     replayBtn.type = 'button';
+    replayBtn.dataset.historyAction = 'open';
     replayBtn.textContent = '回放';
     replayBtn.title = '查看这段对话的内容（不接回上下文）';
     replayBtn.addEventListener('click', () => {
@@ -1031,18 +1258,34 @@
     actions.appendChild(replayBtn);
     const resumeBtn = document.createElement('button');
     resumeBtn.type = 'button';
+    resumeBtn.dataset.historyAction = 'resume';
     resumeBtn.dataset.historyResume = 'true';
-    resumeBtn.disabled = Boolean(state.busy || state.queue.active || pendingRecovery || settingRequests.size);
+    resumeBtn.dataset.historyArchived = String(card.archived === true);
+    resumeBtn.disabled = Boolean(state.busy || state.queue.active || pendingRecovery || settingRequests.size || card.archived);
     resumeBtn.textContent = '接回';
-    resumeBtn.title = '回放这段对话，并尝试接回上下文继续对话';
+    resumeBtn.title = card.archived ? '请先恢复归档，再继续这段对话' : '回放这段对话，并尝试接回上下文继续对话';
     resumeBtn.addEventListener('click', () => {
       post({ type: 'historyResume', id: card.id });
     });
     actions.appendChild(resumeBtn);
     const exportBtn = document.createElement('button');
-    exportBtn.type = 'button'; exportBtn.textContent = '导出'; exportBtn.title = '导出这段对话为 Markdown';
+    exportBtn.type = 'button'; exportBtn.dataset.historyAction = 'export'; exportBtn.textContent = '导出'; exportBtn.title = '导出这段对话为 Markdown';
     exportBtn.addEventListener('click', () => post({ type: 'historyExport', id: card.id }));
     actions.appendChild(exportBtn);
+    const archiveBtn = document.createElement('button');
+    archiveBtn.type = 'button'; archiveBtn.dataset.historyAction = 'archive';
+    archiveBtn.textContent = card.archived ? '恢复' : '归档';
+    archiveBtn.title = card.archived ? '取消归档，并同步到 DSH；未登记的会话可在其他历史中接回' : '归档这段对话，并同步到 DSH';
+    archiveBtn.disabled = !historyArchiveSupported || historyArchivePending.size > 0;
+    archiveBtn.addEventListener('click', () => {
+      if (!historyArchiveSupported || historyArchivePending.size) return;
+      const requestId = `history-archive:${++historyArchiveSequence}`;
+      historyArchivePending.set(card.id, requestId);
+      el.historyList.querySelectorAll('[data-history-action="archive"]').forEach(button => { button.disabled = true; });
+      el.historyMeta.textContent = '正在同步归档状态…';
+      post({ type: 'historyArchive', id: card.id, archived: !card.archived, requestId });
+    });
+    actions.appendChild(archiveBtn);
     row.appendChild(actions);
     return row;
   }
@@ -1061,6 +1304,7 @@
    *   停在底部等同于从最后一句倒序阅读。只有实时对话才需要跟随到底部。
    */
   function renderReplay(message) {
+    resetImageWork();
     toggleHistory(false);
     clearPendingRenders();
     state.messages.clear();
@@ -1082,7 +1326,7 @@
     for (let i = 0; i < entries.length; i += 1) {
       const item = entries[i];
       if (item.kind === 'user') {
-        addUser(item.text);
+        addUser(item.text, item.attachments, item.images);
         continue;
       }
       if (item.kind === 'assistant') {
@@ -1090,6 +1334,7 @@
         addAssistant(lastAssistantId);
         const entry = state.messages.get(lastAssistantId);
         entry.text = item.text || '';
+        for (const image of Array.isArray(item.images) ? item.images : []) addAssistantImage(lastAssistantId, image);
         if (item.thinking) {
           entry.thinking.hidden = false;
           entry.thinkText = item.thinking;
@@ -1098,6 +1343,9 @@
         continue;
       }
       if (item.kind === 'tool') {
+        if (!state.messages.has(lastAssistantId) && item.images?.length) {
+          lastAssistantId = `replay-a${i}`; addAssistant(lastAssistantId); finishAssistant(lastAssistantId);
+        }
         // 挂到最近一条助手消息内（与实时对话结构一致：工具是回答的一部分），
         // 而非平铺在消息区顶层，否则消息间距会大小不一。
         if (state.messages.has(lastAssistantId)) {
@@ -1110,6 +1358,7 @@
             content: item.output ? [{ type: 'text', text: item.output }] : [],
             status: 'completed',
           });
+          for (const image of Array.isArray(item.images) ? item.images : []) addAssistantImage(lastAssistantId, image);
         }
       }
     }
@@ -1134,6 +1383,7 @@
   // ── 转录区 ──────────────────────────────────────────
 
   function resetTranscript() {
+    resetImageWork();
     clearPendingRenders();
     state.messages.clear();
     turnCards.clear();
@@ -1182,7 +1432,7 @@
     if (el.empty.hidden) scrollIfPinned();
   }
 
-  function addUser(text, attachments) {
+  function addUser(text, attachments, images) {
     const wrap = document.createElement('div');
     wrap.className = 'msg msg-user';
     const bubble = document.createElement('div');
@@ -1196,8 +1446,21 @@
       body.textContent = text;
       bubble.appendChild(body);
     }
+    const imageItems = list.filter(item => item.kind === 'image');
+    const historyImages = (Array.isArray(images) ? images : []).filter(image => image && typeof image.id === 'string' && typeof image.source === 'string' && image.source.length <= 8192);
+    if (imageItems.length || historyImages.length) {
+      const media = document.createElement('div'); media.className = 'chat-user-images';
+      for (const item of imageItems) media.appendChild(attachmentImageSlot(item));
+      const seen = new Set();
+      for (const image of historyImages) {
+        if (seen.has(image.id)) continue; seen.add(image.id);
+        media.appendChild(prepareImageSlot(document.createElement('span'), `source:${draftCwd}:${image.source}`, image.alt || '用户图片', { type: 'imageResolve', source: image.source }));
+      }
+      bubble.appendChild(media);
+    }
     wrap.appendChild(bubble);
     appendNode(wrap);
+    for (const body of bubble.querySelectorAll('.bubble-text')) decorateMemeBody(body);
     // 用户自身发送的消息，视图一定跟随到底部（见上文 scrollToBottom 的说明）。
     scrollToBottom();
   }
@@ -1221,16 +1484,16 @@
     for (const item of list) {
       const id = item.id || item.uri || item.name;
       if (!id) continue;
-      const next = { ...item, id };
+      const next = item.kind === 'image' ? imageApi?.descriptor(item) : { ...item, id };
+      if (!next) { showHint('图片引用无效，请重新添加。', true); return; }
       const at = nextList.findIndex((held) => (held.id || held.uri || held.name) === id);
       if (at >= 0) { nextList[at] = next; updated = true; }
       else nextList.push(next);
       changed += 1;
       lastChanged = next;
     }
-    if (nextList.length > 20 || nextList.reduce((size, item) => size + new TextEncoder().encode(item.text || '').length, 0) > 256 * 1024) {
-      showHint('最多附加 20 项，正文总量不超过 256 KiB；现有内容已保留。', true); return;
-    }
+    const error = imageApi ? imageApi.attachmentsError(nextList) : nextList.length > 20 || nextList.reduce((size, item) => size + new TextEncoder().encode(item.text || '').length, 0) > 256 * 1024 ? '最多附加 20 项，正文总量不超过 256 KiB；现有内容已保留。' : undefined;
+    if (error) { showHint(error, true); return; }
     state.attachments = nextList;
     if (!el.preview.hidden && list.some(item => (item.id || item.uri || item.name) === previewItemId)) closePreview();
     renderAttachments();
@@ -1246,6 +1509,7 @@
     state.attachments = state.attachments.filter((item) => item.id !== id);
     renderAttachments();
     saveDraft();
+    syncComposer();
   }
 
   function renderAttachments() {
@@ -1275,9 +1539,10 @@
       const icon = document.createElement('span');
       icon.className = 'chip-icon';
       // 选区使用「选中」方块，文件使用文件图标，可直接区分这两类。
-      icon.textContent = item.kind === 'selection' ? '❯' : '📄';
+      icon.textContent = item.kind === 'image' ? '▧' : item.kind === 'selection' ? '❯' : '📄';
       icon.setAttribute('aria-hidden', 'true');
       chip.appendChild(icon);
+      if (item.kind === 'image' && options.removable) chip.appendChild(attachmentImageSlot(item, true));
 
       const label = document.createElement('button');
       label.type = 'button';
@@ -1287,7 +1552,7 @@
       label.addEventListener('click', () => openPreview(item, label));
       chip.appendChild(label);
 
-      const chipDetail = item.scope === 'selection' ? `选区 ${item.startLine || '?'}–${item.endLine || '?'} 行` : item.scope === 'file' ? `全文件${item.isDirty || item.isUntitled ? ' · 未保存' : ''}` : item.scope === 'skill' ? '技能' : item.detail;
+      const chipDetail = item.kind === 'image' ? `${(item.byteLength / 1024).toFixed(1)} KiB` : item.scope === 'selection' ? `选区 ${item.startLine || '?'}–${item.endLine || '?'} 行` : item.scope === 'file' ? `全文件${item.isDirty || item.isUntitled ? ' · 未保存' : ''}` : item.scope === 'skill' ? '技能' : item.detail;
       if (chipDetail) {
         const detail = document.createElement('span');
         detail.className = 'chip-detail';
@@ -1313,6 +1578,10 @@
   let previewReturnFocus, previewItemId;
   function openPreview(item, trigger) {
     closeContext(false); closeCompletion();
+    if (item.kind === 'image') { openAttachmentImagePreview(item, trigger); return; }
+    el.preview.setAttribute('aria-label', '附件正文预览');
+    if (el.previewImage) { el.previewImage.hidden = true; el.previewImage.removeAttribute('src'); }
+    delete el.preview.dataset.imageKey;
     previewReturnFocus = trigger;
     previewItemId = item.id || item.uri || item.name;
     el.previewTitle.textContent = item.name || '附件正文预览';
@@ -1335,6 +1604,8 @@
   function closePreview() {
     if (el.preview.hidden) return;
     el.previewBody.textContent = '';
+    if (el.previewImage) { el.previewImage.hidden = true; el.previewImage.removeAttribute('src'); }
+    delete el.preview.dataset.imageKey;
     previewReturnFocus = undefined; previewItemId = undefined;
     closeLayer(el.preview);
   }
@@ -1359,16 +1630,27 @@
 
     const body = document.createElement('div');
     body.className = 'body';
+    const images = document.createElement('div'); images.className = 'chat-assistant-images';
 
+    const toolGroup = document.createElement('details');
+    toolGroup.className = 'tool-group';
+    toolGroup.hidden = true;
+    const toolSummary = document.createElement('summary');
+    toolSummary.className = 'tool-group-head';
     const tools = document.createElement('div');
     tools.className = 'tools';
+    toolGroup.append(toolSummary, tools);
+    toolGroup.addEventListener('toggle', () => {
+      if (toolGroup.open) for (const card of tools.querySelectorAll('.tool.open')) renderToolDetails(card);
+    });
 
     wrap.appendChild(thinking);
-    wrap.appendChild(tools);
+    wrap.appendChild(toolGroup);
     wrap.appendChild(body);
+    wrap.appendChild(images);
     appendNode(wrap);
 
-    const entry = { node: wrap, body, thinking, thinkBody, tools, text: '', thinkText: '' };
+    const entry = { node: wrap, body, images, imageItems: new Map(), thinking, thinkBody, tools, toolGroup, toolSummary, toolStatuses: new Map(), text: '', thinkText: '' };
     state.messages.set(id, entry);
     return entry;
   }
@@ -1433,7 +1715,7 @@
   }
 
   function renderAssistantBody(entry, finished) {
-    if (!markdown?.createStreamingRenderer) { entry.body.textContent = entry.text; return; }
+    if (!markdown?.createStreamingRenderer) { entry.body.textContent = entry.text; decorateMemeBody(entry.body); return; }
     entry.markdown ||= markdown.createStreamingRenderer();
     const patch = entry.markdown.render(entry.text);
     if (patch.reset) entry.stableNodes = 0;
@@ -1447,6 +1729,8 @@
       const following = old.nextSibling; committed.content.removeChild(next); old = following; next = committed.content.firstChild;
     }
     while (old) { const following = old.nextSibling; entry.body.removeChild(old); old = following; }
+    decorateMemeBody(committed.content);
+    resolveMarkdownImages(committed.content);
     entry.body.appendChild(committed.content);
     entry.stableNodes = (entry.stableNodes || 0) + count;
     if (finished) { entry.markdown.clear(); entry.markdown = undefined; }
@@ -1460,6 +1744,7 @@
     const entry = state.messages.get(id);
     if (!entry || entry.finished) return;
     entry.finished = true;
+    updateToolGroup(entry);
     pendingRenders.delete(entry);
     if (!pendingRenders.size) cancelRenderFlush();
     renderAssistantBody(entry, true);
@@ -1564,6 +1849,23 @@
 
   const toolDetails = new WeakMap();
   let toolSequence = 0;
+  function updateToolGroup(entry) {
+    const counts = { completed: 0, failed: 0, in_progress: 0, pending: 0, cancelled: 0 };
+    for (const status of entry.toolStatuses.values()) counts[Object.hasOwn(counts, status) ? status : 'pending']++;
+    entry.toolGroup.hidden = entry.toolStatuses.size === 0;
+    entry.toolGroup.classList.toggle('has-failures', counts.failed > 0);
+    const parts = [`工具调用 · ${entry.toolStatuses.size} 项`];
+    if (counts.failed) parts.push(`${counts.failed} 失败`);
+    if (counts.cancelled) parts.push(`${counts.cancelled} 已取消`);
+    if (counts.completed) parts.push(`${counts.completed} 完成`);
+    const unfinished = counts.pending + counts.in_progress;
+    if (entry.finished && unfinished) parts.push(`${unfinished} 未完成`);
+    else {
+      if (counts.in_progress) parts.push(`${counts.in_progress} 进行中`);
+      if (counts.pending) parts.push(`${counts.pending} 等待中`);
+    }
+    entry.toolSummary.textContent = parts.join(' · ');
+  }
   function renderToolDetails(card) {
     const details = toolDetails.get(card);
     if (!details?.dirty) return;
@@ -1624,9 +1926,10 @@
     const statusInfo = statusOf(tool.status);
     statusEl.textContent = statusInfo.text;
     statusEl.className = `tool-status ${statusInfo.cls}`;
+    if (entry) { entry.toolStatuses.set(tool.toolCallId, tool.status); updateToolGroup(entry); }
     // 保留原始输出，首次展开才构建详情 DOM。已展开的流式工具仍即时更新。
     toolDetails.set(card, { tool, dirty: true });
-    if (card.classList.contains('open')) renderToolDetails(card);
+    if (card.classList.contains('open') && (!entry || entry.toolGroup.open)) renderToolDetails(card);
     scrollIfPinned();
   }
 
@@ -1660,6 +1963,8 @@
         return { text: '完成', cls: 'completed' };
       case 'failed':
         return { text: '失败', cls: 'failed' };
+      case 'cancelled':
+        return { text: '已取消', cls: 'cancelled' };
       case 'in_progress':
         return { text: '进行中', cls: 'in_progress' };
       default:
@@ -2332,6 +2637,8 @@
   function submit() {
     const text = el.input.value;
     const attachments = state.attachments.slice();
+    if (imageIngestPending()) { showHint('图片正在加入，请等待预览准备完成。'); return; }
+    if (attachments.some(item => item.kind === 'image') && !imageCapability.input) { showHint(imageCapability.reason || '当前模型不支持图片输入，请切换支持图片的模型。', true); return; }
     // 只有上下文、没有文字时也允许发送：用户可能希望直接提供内容供查看。
     if ((!text.trim() && attachments.length === 0) || state.historyReadonly || pendingRecovery || Array.from(settingRequests.values()).some(request => request.setting !== 'permission') || pendingSend || pendingChoice || (state.queue.items || []).length + (state.queue.active ? 1 : 0) >= 5) return;
     closeCompletion();
@@ -2358,7 +2665,9 @@
   el.historyClose.addEventListener('click', () => toggleHistory(false));
   el.historySearch.addEventListener('input', () => { clearTimeout(historySearchTimer); historySearchTimer = setTimeout(() => requestHistory(), 250); });
   el.historyProject.addEventListener('change', () => requestHistory());
-  el.historyPrev.addEventListener('click', () => requestHistory(Math.max(0, historyOffset - 100)));
+  el.historyArchive.addEventListener('change', () => requestHistory());
+  el.historySync.addEventListener('click', () => requestHistory(historyOffset, true));
+  el.historyPrev.addEventListener('click', () => requestHistory(Math.max(0, historyOffset - HISTORY_PAGE_SIZE)));
   el.historyNext.addEventListener('click', () => { if (Number.isInteger(historyNextOffset)) requestHistory(historyNextOffset); });
 
   // Esc 优先关闭浮层或候选；没有浮层时停止当前任务并保留草稿。
@@ -2378,6 +2687,373 @@
     event.preventDefault();
     post({ type: 'openLink', href: anchor.dataset.href });
   });
+
+  // ── 图片输入与回复 ───────────────────────────────────
+
+  function imageMetadata(items) {
+    return (Array.isArray(items) ? items : []).map(item => item?.kind === 'image' && imageApi ? imageApi.descriptor(item) : item).filter(Boolean);
+  }
+  function imageIngestPending() { return imageReading || imageUploads.size > 0; }
+  function imageScope() { return { cwd: draftCwd, sessionId: state.sessionId }; }
+  function currentImageScope(message) { return draftTrusted && (!message.cwd || message.cwd === draftCwd) && (!message.sessionId || message.sessionId === state.sessionId); }
+  function resetImageWork() {
+    imageEpoch++; imageReading = false;
+    for (const reader of imageReaders) { try { reader.abort(); } catch { /* Already complete. */ } }
+    imageReaders.clear();
+    for (const request of imageUploads.values()) { clearTimeout(request.timer); request.resolve(false); }
+    for (const request of imageRequests.values()) clearTimeout(request.timer);
+    imageUploads.clear(); imageRequests.clear(); imageQueue.clear(); imageFailures.clear(); imageCache?.clear();
+    for (const slot of document.querySelectorAll('.chat-image-slot')) clearImageSlot(slot);
+    if (el.preview?.dataset.imageKey) closePreview();
+    syncComposer();
+  }
+  function canAddImages() {
+    if (!imageApi || !imageCapability.input) { showHint(imageCapability.reason || '当前模型不支持图片输入。', true); return false; }
+    if (!draftTrusted || state.historyReadonly || pendingSend || pendingChoice || pendingQueueEdit || imageIngestPending()) return false;
+    return true;
+  }
+  function createImageUpload(type, payload) {
+    return new Promise(resolve => {
+      const requestId = `image-add-${++imageSequence}`, epoch = imageEpoch;
+      const timer = setTimeout(() => {
+        if (!imageUploads.has(requestId)) return;
+        imageUploads.delete(requestId); resolve(false); syncComposer();
+        showHint('添加图片未完成，草稿已保留，可重新添加。', true);
+      }, type === 'imagePick' ? 180000 : 30000);
+      imageUploads.set(requestId, { epoch, ...imageScope(), timer, resolve });
+      syncComposer(); post({ type, requestId, ...imageScope(), ...payload });
+    });
+  }
+  function readImageFile(file, mimeType) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader(); imageReaders.add(reader);
+      reader.onload = () => { imageReaders.delete(reader); resolve(imageApi.base64(reader.result)); };
+      reader.onerror = () => { imageReaders.delete(reader); reject(new Error('无法读取图片文件。')); };
+      reader.onabort = () => { imageReaders.delete(reader); reject(new Error('图片读取已取消。')); };
+      reader.readAsDataURL(file.slice(0, file.size, mimeType));
+    });
+  }
+  async function ingestImageFiles(values) {
+    if (!canAddImages()) return;
+    const files = Array.from(values || []); if (!files.length) return;
+    const held = state.attachments.filter(item => item.kind === 'image');
+    if (files.some(file => !imageApi.mimeType(file.type, file.name))) { showHint('请选择 PNG、JPEG、GIF 或 WebP 图片。', true); return; }
+    if (files.some(file => !file.size || file.size > imageApi.MAX_IMAGE_BYTES)) { showHint('单张图片需大于 0 字节且不超过 8 MiB。', true); return; }
+    if (held.length + files.length > imageApi.MAX_IMAGES || held.reduce((sum, item) => sum + item.byteLength, 0) + files.reduce((sum, file) => sum + file.size, 0) > imageApi.MAX_MESSAGE_BYTES || state.attachments.length + files.length > 20) { showHint('每条消息最多 4 张图片、图片合计不超过 16 MiB，全部附件最多 20 项。', true); return; }
+    const epoch = imageEpoch; imageReading = true; syncComposer(); showHint('正在添加图片…');
+    try {
+      for (const file of files) {
+        const mimeType = imageApi.mimeType(file.type, file.name), data = await readImageFile(file, mimeType);
+        if (epoch !== imageEpoch) return;
+        if (!data) throw new Error('图片数据无法读取，请重新选择。');
+        if (!await createImageUpload('imageAdd', { name: file.name || '粘贴图片', mimeType, data })) break;
+      }
+    } catch (error) { if (epoch === imageEpoch) showHint(error.message || '图片读取失败。', true); }
+    finally { if (epoch === imageEpoch) { imageReading = false; syncComposer(); } }
+  }
+  function receiveImageAdded(message) {
+    const request = imageUploads.get(message.requestId); if (!request) return;
+    clearTimeout(request.timer); imageUploads.delete(message.requestId);
+    if (request.epoch !== imageEpoch || !currentImageScope(message) || request.cwd !== draftCwd || request.sessionId !== state.sessionId) { request.resolve(false); syncComposer(); return; }
+    const original = Array.isArray(message.items) ? message.items : [], items = original.map(item => imageApi?.descriptor(item)).filter(Boolean);
+    const next = [...state.attachments.filter(held => !items.some(item => item.id === held.id)), ...items];
+    const error = message.error || (items.length !== original.length ? '图片引用无效，请重新添加。' : imageApi?.attachmentsError(next));
+    if (error) { showHint(error, true); request.resolve(false); syncComposer(); return; }
+    if (items.length) {
+      const draft = { ...currentDraft(), attachments: next };
+      if (new TextEncoder().encode(JSON.stringify(draft)).length > 512 * 1024) { showHint('图片引用会超过草稿保存限制，原草稿已保留。', true); request.resolve(false); syncComposer(); return; }
+      for (const preview of Array.isArray(message.previews) ? message.previews : []) {
+        const item = items.find(item => item.id === preview.id);
+        if (item && preview.dataUrl?.startsWith(`data:${item.mimeType};`)) cacheImage(`attachment:${item.id}`, preview.dataUrl);
+      }
+      addAttachments(items); syncComposer();
+      showHint('已加入图片，检查预览后发送。');
+    }
+    request.resolve(items.length > 0); syncComposer();
+  }
+  function clearImageSlot(slot) {
+    const image = slot.querySelector('img'); if (image) { image.removeAttribute('src'); image.hidden = true; }
+    const fallback = slot.querySelector('.chat-image-fallback'); if (fallback) fallback.hidden = false;
+  }
+  function cacheImage(key, dataUrl) {
+    if (!imageApi?.safeDataUrl(dataUrl)) return false;
+    for (const evicted of imageCache.put(key, dataUrl)) {
+      for (const slot of document.querySelectorAll('.chat-image-slot')) if (slot.dataset.imageKey === evicted) clearImageSlot(slot);
+      if (el.preview.dataset.imageKey === evicted && el.previewImage) { el.previewImage.removeAttribute('src'); el.previewImage.hidden = true; }
+    }
+    for (const slot of document.querySelectorAll('.chat-image-slot')) if (slot.dataset.imageKey === key) slot.querySelector('img').src = dataUrl;
+    if (el.preview.dataset.imageKey === key && el.previewImage) el.previewImage.src = dataUrl;
+    return true;
+  }
+  function prepareImageSlot(slot, key, alt, request, preserveFallback = false) {
+    const original = document.createDocumentFragment();
+    if (preserveFallback) while (slot.firstChild) original.appendChild(slot.firstChild);
+    slot.classList.add('chat-image-slot'); slot.dataset.imageKey = key; slot.tabIndex = 0; slot.setAttribute('role', 'button');
+    slot.setAttribute('aria-label', `预览图片：${alt || '图片'}`); slot.title = alt || '图片';
+    slot.textContent = '';
+    const image = document.createElement('img'); image.className = 'chat-image'; image.alt = alt || '图片'; image.hidden = true; image.decoding = 'async';
+    const fallback = document.createElement('span'); fallback.className = 'chat-image-fallback';
+    if (original.childNodes.length) fallback.appendChild(original); else fallback.textContent = alt || '图片';
+    image.addEventListener('load', () => { image.hidden = false; fallback.hidden = true; scrollIfPinned(); });
+    image.addEventListener('error', () => { image.hidden = true; fallback.hidden = false; slot.title = '图片加载失败，点击可重试'; });
+    const preview = () => { imageFailures.delete(key); if (request) queueImageResource(key, request); openImagePreview(key, alt, slot, request?.item); };
+    slot.addEventListener('click', event => { if (event.target.closest('a')) return; event.stopPropagation(); preview(); });
+    slot.addEventListener('keydown', event => { if (event.target.closest('a')) return; if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); preview(); } });
+    slot.append(image, fallback);
+    const data = imageCache?.get(key); if (data) image.src = data; else if (request) queueImageResource(key, request);
+    return slot;
+  }
+  function attachmentImageSlot(item, thumbnail = false) {
+    const slot = document.createElement('span');
+    if (thumbnail) slot.classList.add('attachment-image-thumb');
+    const reference = imageApi?.descriptor(item);
+    return prepareImageSlot(slot, `attachment:${item.id}`, item.name || '图片', reference ? { type: 'imagePreview', item: reference } : undefined);
+  }
+  function queueImageResource(key, request) {
+    if (!imageApi || !draftTrusted || imageCache.get(key) || imageFailures.has(key) || imageQueue.size >= 64 || [...imageRequests.values()].some(value => value.key === key)) return;
+    imageQueue.set(key, request); setTimeout(pumpImageRequests, 0);
+  }
+  function pumpImageRequests() {
+    if (!draftTrusted) return;
+    for (const [key, payload] of imageQueue) {
+      if (imageRequests.size >= 4) break;
+      imageQueue.delete(key);
+      if (imageCache.get(key) || imageFailures.has(key)) continue;
+      if (el.preview.dataset.imageKey !== key && ![...document.querySelectorAll('.chat-image-slot')].some(slot => slot.dataset.imageKey === key)) continue;
+      const requestId = `image-read-${++imageSequence}`;
+      const timer = setTimeout(() => { if (!imageRequests.has(requestId)) return; imageRequests.delete(requestId); imageFailures.add(key); pumpImageRequests(); }, 30000);
+      imageRequests.set(requestId, { ...payload, key, epoch: imageEpoch, ...imageScope(), timer });
+      post({ ...payload, requestId, ...imageScope() });
+    }
+  }
+  function receiveImageResource(message) {
+    const request = imageRequests.get(message.requestId); if (!request) return;
+    imageRequests.delete(message.requestId); clearTimeout(request.timer);
+    if (request.epoch !== imageEpoch || !currentImageScope(message) || request.cwd !== draftCwd || request.sessionId !== state.sessionId ||
+      request.type === 'imagePreview' && (message.type !== 'imagePreview' || message.id !== request.item.id) ||
+      request.type === 'imageResolve' && (message.type !== 'imageResolved' || message.source !== request.source)) { pumpImageRequests(); return; }
+    if (!cacheImage(request.key, message.dataUrl)) {
+      imageFailures.add(request.key);
+      for (const slot of document.querySelectorAll('.chat-image-slot')) if (slot.dataset.imageKey === request.key) slot.title = message.error || '图片无法读取，点击可重试';
+      if (el.preview.dataset.imageKey === request.key) el.previewNote.textContent = message.error || '图片无法读取。';
+    }
+    pumpImageRequests();
+  }
+  function openImagePreview(key, title, trigger, item) {
+    closeContext(false); closeCompletion();
+    previewReturnFocus = trigger; previewItemId = item?.id || key;
+    el.preview.setAttribute('aria-label', '图片预览'); el.preview.dataset.imageKey = key;
+    el.previewTitle.textContent = title || '图片预览'; el.previewMeta.textContent = ''; el.previewBody.textContent = ''; el.previewBody.hidden = true;
+    if (item) {
+      for (const [label, value] of [['格式', item.mimeType], ['大小', `${item.byteLength.toLocaleString()} 字节`]]) { const dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = label; dd.textContent = value; el.previewMeta.append(dt, dd); }
+    }
+    el.previewNote.textContent = item ? '只读图片快照；发送时使用加入的原始图片。' : '只读图片预览。';
+    if (el.previewImage) {
+      el.previewImage.hidden = true; el.previewImage.removeAttribute('src'); el.previewImage.alt = title || '图片预览';
+      const data = imageCache?.get(key); if (data) el.previewImage.src = data;
+      else el.previewNote.textContent = '正在读取图片预览…';
+    }
+    openLayer(el.preview, el.previewClose, closePreview, trigger);
+  }
+  function openAttachmentImagePreview(item, trigger) {
+    const reference = imageApi?.descriptor(item); if (!reference) { showHint('图片引用无效，请重新添加。', true); return; }
+    const key = `attachment:${reference.id}`; imageFailures.delete(key);
+    openImagePreview(key, reference.name, trigger, reference); queueImageResource(key, { type: 'imagePreview', item: reference });
+  }
+  function addAssistantImage(id, value) {
+    if (!imageApi || !draftTrusted || !value || typeof value.id !== 'string' || value.id.length > 512) return;
+    const entry = textMessage(id), item = imageApi.descriptor(value.item);
+    const source = typeof value.source === 'string' && value.source.length <= 8192 ? value.source : undefined;
+    const key = item ? `attachment:${item.id}` : source ? `source:${draftCwd}:${source}` : `reply:${id}:${value.id}`;
+    if (value.dataUrl) cacheImage(key, value.dataUrl);
+    let slot = entry.imageItems.get(value.id);
+    if (!slot) {
+      slot = prepareImageSlot(document.createElement('span'), key, value.alt || item?.name || '回复图片', item ? { type: 'imagePreview', item } : source ? { type: 'imageResolve', source } : undefined);
+      entry.imageItems.set(value.id, slot); entry.images.appendChild(slot);
+    }
+    if (value.error) slot.title = value.error;
+    if (value.dataUrl && imageApi.safeDataUrl(value.dataUrl)) slot.querySelector('img').src = value.dataUrl;
+    scrollIfPinned();
+  }
+  function resolveMarkdownImages(root) {
+    if (!imageApi || !draftTrusted) return;
+    for (const slot of root.querySelectorAll('.chat-image-request')) {
+      if (slot.dataset.imageKey || slot.closest('pre,code')) continue;
+      const source = slot.dataset.imageSource;
+      if (!source || source.length > 8192) continue;
+      prepareImageSlot(slot, `source:${draftCwd}:${source}`, slot.dataset.imageAlt || slot.textContent || '图片', { type: 'imageResolve', source }, true);
+    }
+  }
+  el.imageOpen?.addEventListener('click', () => { if (canAddImages()) { showHint('选择要添加的图片…'); void createImageUpload('imagePick', {}); } });
+  el.input.addEventListener('paste', event => {
+    const files = [...(event.clipboardData?.items || [])].filter(item => item.kind === 'file').map(item => item.getAsFile()).filter(file => file && (file.type.startsWith('image/') || imageApi?.mimeType(file.type, file.name)));
+    if (!files.length) return; event.preventDefault(); void ingestImageFiles(files);
+  });
+  const imageDropZone = el.input.closest('.composer');
+  imageDropZone?.addEventListener('dragover', event => { if ([...(event.dataTransfer?.types || [])].includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = el.imageOpen?.disabled ? 'none' : 'copy'; } });
+  imageDropZone?.addEventListener('drop', event => { if (!event.dataTransfer?.files?.length) return; event.preventDefault(); void ingestImageFiles(event.dataTransfer.files); });
+  el.previewImage?.addEventListener('load', () => { if (el.preview.dataset.imageKey) el.previewImage.hidden = false; });
+  el.previewImage?.addEventListener('error', () => { el.previewImage.hidden = true; if (el.preview.dataset.imageKey) el.previewNote.textContent = '图片加载失败，可关闭后重试。'; });
+
+  // ── DSH 表情包 ───────────────────────────────────────
+
+  const memeScope = () => ({ cwd: draftCwd, sessionId: state.sessionId });
+  const currentMemeScope = message => (!message.cwd || message.cwd === draftCwd) && (!message.sessionId || message.sessionId === state.sessionId);
+  function closeMemePicker(restoreFocus = true) {
+    if (!el.memePicker) return;
+    closeLayer(el.memePicker, restoreFocus);
+    el.memeOpen.setAttribute('aria-expanded', 'false');
+  }
+  function resetMemes() {
+    memeEpoch++; memeAvailable = false; memeCatalog = memeApi?.createCatalog([]);
+    if (memeCatalogRequest) clearTimeout(memeCatalogRequest.timer);
+    memeCatalogRequest = undefined;
+    for (const request of memeReads.values()) clearTimeout(request.timer);
+    memeReads.clear(); memeQueued.clear(); memeFailed.clear(); memeImages.clear(); memeCacheBytes = 0;
+    for (const marker of el.messages.querySelectorAll('.meme-marker')) marker.replaceWith(document.createTextNode(marker.dataset.memeRaw));
+    closeMemePicker(false);
+    if (el.memeGrid) el.memeGrid.textContent = '';
+  }
+  function requestMemeCatalog() {
+    if (!memeApi) return;
+    if (memeCatalogRequest) clearTimeout(memeCatalogRequest.timer);
+    const requestId = `meme-catalog-${++memeSequence}`;
+    const timer = setTimeout(() => {
+      if (memeCatalogRequest?.id !== requestId) return;
+      memeCatalogRequest = undefined;
+      if (!el.memePicker.hidden) el.memeNote.textContent = '读取图库超时，关闭后可重新打开重试。';
+    }, 12000);
+    memeCatalogRequest = { id: requestId, epoch: memeEpoch, timer };
+    post({ type: 'memeCatalog', requestId, ...memeScope() });
+  }
+  function receiveMemeCatalog(message) {
+    if (!memeApi || !draftTrusted || !currentMemeScope(message) || message.provider && message.provider !== 'dsh-meme') return;
+    if (message.requestId !== undefined && message.requestId !== memeCatalogRequest?.id) return;
+    if (memeCatalogRequest) clearTimeout(memeCatalogRequest.timer);
+    memeCatalogRequest = undefined;
+    memeAvailable = message.available === true;
+    memeCatalog = memeApi.createCatalog(memeAvailable ? message.items : []);
+    memeFailed.clear();
+    // Catalog refreshes may change caption ownership, so resolve every marker again.
+    for (const marker of el.messages.querySelectorAll('.meme-marker')) marker.replaceWith(document.createTextNode(marker.dataset.memeRaw));
+    for (const body of el.messages.querySelectorAll('.msg-user .bubble-text, .msg-assistant > .body')) decorateMemeBody(body);
+    renderMemePicker(message.error);
+  }
+  function openMemePicker() {
+    if (!memeApi || el.memeOpen.disabled) return;
+    closeContext(false); closePreview(false); closeCompletion();
+    el.memeSearch.value = '';
+    el.memeOpen.setAttribute('aria-expanded', 'true');
+    openLayer(el.memePicker, el.memeSearch, closeMemePicker, el.memeOpen);
+    renderMemePicker(); el.memeNote.textContent = '正在读取 DSH 图库…';
+    requestMemeCatalog();
+  }
+  function renderMemePicker(error) {
+    if (!el.memeGrid || el.memePicker.hidden) return;
+    el.memeGrid.textContent = '';
+    const query = el.memeSearch.value.trim().toLocaleLowerCase();
+    const matches = (memeCatalog?.items || []).filter(item => !query || `${item.caption} ${item.keywords} ${item.name} ${item.tag}`.toLocaleLowerCase().includes(query));
+    if (!memeAvailable) {
+      el.memeNote.textContent = error || '当前接入点未提供表情图库。请确认 DSH 已启用 dsh-meme，并更新 ACP Door 后重连。';
+      return;
+    }
+    el.memeNote.textContent = matches.length ? `${matches.length} 张${matches.length > 36 ? '，仅显示前 36 张，可输入关键词筛选' : ''}。选择后加入草稿，由你确认发送。` : '没有匹配的表情包。';
+    for (const item of matches.slice(0, 36)) {
+      const choice = document.createElement('button'); choice.type = 'button'; choice.className = 'meme-choice';
+      choice.title = item.caption || item.name;
+      choice.appendChild(memeSlot(item, item.caption || item.name));
+      const caption = document.createElement('span'); caption.className = 'meme-choice-caption'; caption.textContent = item.caption || item.name;
+      choice.appendChild(caption);
+      choice.addEventListener('click', () => {
+        if (el.memeOpen.disabled || state.historyReadonly) return;
+        const marker = `[表情: ${(item.caption || item.name).slice(0, 80).replace(/[\[\]\r\n]/g, ' ')}]`;
+        const start = el.input.selectionStart, end = el.input.selectionEnd;
+        el.input.setRangeText(marker, start, end, 'end');
+        draftEdited = true; autoGrow(); saveDraft(); syncComposer();
+        closeMemePicker(false); el.input.focus();
+        showHint('已加入表情包，检查草稿后发送。');
+      });
+      el.memeGrid.appendChild(choice);
+    }
+  }
+  function memeSlot(item, raw) {
+    const slot = document.createElement('span'); slot.className = 'meme-image-slot'; slot.dataset.memeId = item.id;
+    const fallback = document.createElement('span'); fallback.className = 'meme-fallback'; fallback.textContent = raw;
+    const image = document.createElement('img'); image.className = 'meme-image'; image.alt = item.caption || item.name; image.hidden = true; image.decoding = 'async';
+    image.addEventListener('load', () => { image.hidden = false; fallback.hidden = true; scrollIfPinned(); });
+    image.addEventListener('error', () => { image.hidden = true; fallback.hidden = false; slot.title = '图片加载失败，已保留原文'; });
+    slot.append(image, fallback);
+    const data = memeImages.get(item.id);
+    if (data) image.src = data;
+    else if (!memeFailed.has(item.id) && memeQueued.size < 128) { memeQueued.add(item.id); setTimeout(pumpMemeReads, 0); }
+    return slot;
+  }
+  function decorateMemeBody(root) {
+    if (!memeAvailable || !memeApi || !memeCatalog?.items.length) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node.nodeValue?.includes('[表情') || node.parentElement?.closest('pre,code,a,.meme-marker,.thinking,.tools,.chips')) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const nodes = []; let node;
+    while ((node = walker.nextNode())) nodes.push(node);
+    for (const text of nodes) {
+      const source = text.nodeValue, fragment = document.createDocumentFragment(); let offset = 0;
+      for (const hit of memeApi.markers(source)) {
+        const item = memeCatalog.find(hit.caption);
+        if (!item) continue;
+        fragment.appendChild(document.createTextNode(source.slice(offset, hit.index)));
+        const marker = document.createElement('span'); marker.className = 'meme-marker'; marker.dataset.memeRaw = hit.raw;
+        marker.appendChild(memeSlot(item, hit.raw)); fragment.appendChild(marker);
+        offset = hit.index + hit.raw.length;
+      }
+      if (!offset) continue;
+      fragment.appendChild(document.createTextNode(source.slice(offset)));
+      text.replaceWith(fragment);
+    }
+  }
+  function pumpMemeReads() {
+    if (!memeAvailable || !draftTrusted) return;
+    for (const id of memeQueued) {
+      if (memeReads.size >= 4) break;
+      memeQueued.delete(id);
+      if (memeImages.has(id) || memeFailed.has(id) || [...memeReads.values()].some(request => request.id === id)) continue;
+      const visibleSlot = [...document.querySelectorAll('.meme-image-slot')].some(slot => slot.dataset.memeId === id && !slot.closest('[hidden]'));
+      if (!visibleSlot) continue;
+      const requestId = `meme-image-${++memeSequence}`;
+      const timer = setTimeout(() => {
+        if (!memeReads.has(requestId)) return;
+        memeReads.delete(requestId); memeFailed.add(id); pumpMemeReads();
+      }, 12000);
+      memeReads.set(requestId, { id, epoch: memeEpoch, timer });
+      post({ type: 'memeRead', requestId, id, ...memeScope() });
+    }
+  }
+  function receiveMemeImage(message) {
+    const request = memeReads.get(message.requestId);
+    if (!request) return;
+    clearTimeout(request.timer); memeReads.delete(message.requestId);
+    if (request.epoch !== memeEpoch || !draftTrusted || !currentMemeScope(message) || request.id !== message.id) { pumpMemeReads(); return; }
+    if (!memeApi.safeDataUrl(message.dataUrl)) { memeFailed.add(request.id); pumpMemeReads(); return; }
+    memeImages.set(request.id, message.dataUrl); memeCacheBytes += message.dataUrl.length;
+    while (memeImages.size > 32 || memeCacheBytes > 24 * 1024 * 1024) {
+      const key = memeImages.keys().next().value;
+      memeCacheBytes -= memeImages.get(key).length; memeImages.delete(key);
+      for (const slot of document.querySelectorAll('.meme-image-slot')) {
+        if (slot.dataset.memeId !== key) continue;
+        const image = slot.querySelector('img'); image.removeAttribute('src'); image.hidden = true;
+        slot.querySelector('.meme-fallback').hidden = false;
+      }
+    }
+    for (const slot of document.querySelectorAll('.meme-image-slot')) {
+      if (slot.dataset.memeId === request.id) slot.querySelector('img').src = message.dataUrl;
+    }
+    pumpMemeReads();
+  }
+  el.memeOpen?.addEventListener('click', openMemePicker);
+  el.memeClose?.addEventListener('click', () => closeMemePicker());
+  el.memeSearch?.addEventListener('input', () => renderMemePicker());
 
   // ── Markdown ────────────────────────────────────────
   //
