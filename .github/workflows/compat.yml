@@ -199,7 +199,7 @@ jobs:
       - name: 准备精确内核和最低编辑器
         shell: pwsh
         run: |
-          npm install --prefix build/editor-runtime --no-audit --no-fund @deepseek-ai/dsh@0.2.1-alpha.1
+          npm install --prefix build/editor-runtime --no-audit --no-fund @deepseek-ai/dsh@0.2.1-rc.3
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $minimumVersion = ((Get-Content -LiteralPath packages/vscode-extension/package.json -Raw | ConvertFrom-Json).engines.vscode).TrimStart('^')
           $chatBaseline = (Get-Content -LiteralPath compat/editors.json -Raw | ConvertFrom-Json).chatBaseline
@@ -212,7 +212,7 @@ jobs:
           $env:DSH_PANEL_DSH = 'node "' + (Join-Path $PWD 'build/editor-runtime/node_modules/@deepseek-ai/dsh/lib/bin.js') + '"'
           $env:DSH_PANEL_CODE = Join-Path $PWD 'build/vscode-editor/Code.exe'
           $manifest = Get-Content -LiteralPath build/candidates/manifest.json -Raw | ConvertFrom-Json
-          ./tools/bridge/check-minimum.ps1 -DshVersion 0.2.1-alpha.1 -Vsix ($manifest.artifacts | Where-Object kind -eq 'vsix').file -Tgz ($manifest.artifacts | Where-Object kind -eq 'tgz').file -Sdk ($manifest.artifacts | Where-Object kind -eq 'sdk').file
+          ./tools/bridge/check-minimum.ps1 -DshVersion 0.2.1-rc.3 -Vsix ($manifest.artifacts | Where-Object kind -eq 'vsix').file -Tgz ($manifest.artifacts | Where-Object kind -eq 'tgz').file -Sdk ($manifest.artifacts | Where-Object kind -eq 'sdk').file
       - name: 导出最低编辑器公开验证结果
         shell: pwsh
         run: |
