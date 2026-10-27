@@ -2226,9 +2226,12 @@ function assertionsScript(scene) {
       var box = node.getBoundingClientRect();
       if (box.width === 0 && box.height === 0) return;
 
-      // 1) 文字被横向截断（本来就应横向滚动的除外：代码块、pre）。
+      // 1) 正文不得截断；模型摘要可省略，但完整值必须保留在提示及读屏名称中。
       var isText = !node.children.length && (node.textContent || '').trim().length > 0;
-      var exempt = node.tagName === 'PRE' || scrollable(node) || scrollable(node.parentElement);
+      var summaryButton = node.id === 'config-summary' ? node.closest('button') : null;
+      var accessibleSummary = summaryButton && style.textOverflow === 'ellipsis' &&
+        summaryButton.title.includes(node.textContent) && (summaryButton.getAttribute('aria-label') || '').includes(node.textContent);
+      var exempt = node.tagName === 'PRE' || scrollable(node) || scrollable(node.parentElement) || accessibleSummary;
       if (isText && !exempt && node.scrollWidth > node.clientWidth + 1) {
         clipped.push(node.className || node.tagName);
       }
